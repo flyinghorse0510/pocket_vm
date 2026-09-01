@@ -14,8 +14,8 @@ use sha2::{Digest as _, Sha256};
 
 use crate::{
     AliasId, AliasKey, DerivationKey, Digest, GenerationId, GenerationSpec, ImmutableSidecar,
-    MAX_GENERATION_SIDECARS, MAX_METADATA_BYTES, MetadataKind, RetainedCowId, RetainedCowState,
-    StoreError,
+    InstanceId, MAX_GENERATION_SIDECARS, MAX_METADATA_BYTES, MetadataKind, RetainedCowId,
+    RetainedCowState, StoreError,
     codec::{Reader, finish_record, put_text, put_u16, put_u64, start_record, verify_record},
     fs::{
         IMMUTABLE_DIR_MODE, IMMUTABLE_FILE_MODE, PRIVATE_DIR_MODE, PRIVATE_FILE_MODE,
@@ -38,6 +38,7 @@ const DERIVATION_MAGIC: &[u8; 8] = b"PKVMDER2";
 const ALIAS_MAGIC: &[u8; 8] = b"PKVMALS2";
 const LEASE_MAGIC: &[u8; 8] = b"PKVMLES2";
 const RETAINED_MAGIC: &[u8; 8] = b"PKVMRET2";
+const INSTANCE_MAGIC: &[u8; 8] = b"PKVMINS1";
 const LOCK_MAGIC: &[u8; 8] = b"PKVMLCK2";
 
 const STORE_METADATA: &str = "store.meta";
@@ -63,6 +64,7 @@ pub struct Store {
     aliases: File,
     leases: File,
     retained: File,
+    instances: File,
     locks: File,
     root_device: u64,
     root_inode: u64,
@@ -391,6 +393,213 @@ impl Lease {
         }
         Ok(bytes)
     }
+}
+
+/// Bound on an instance name, which an operator types.
+pub const MAX_INSTANCE_NAME_BYTES: usize = 64;
+
+/// Bound on the recorded command line, which is evidence rather than input.
+pub const MAX_INSTANCE_COMMAND_BYTES: usize = 4096;
+
+/// How an instance ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceOutcome {
+    /// Still running, or the owner died without recording an outcome.
+    Unknown,
+    Exited(u8),
+    Signalled(u16),
+}
+
+impl InstanceOutcome {
+    pub(crate) const fn encode(self) -> (u8, u16) {
+        match self {
+            Self::Unknown => (0, 0),
+            Self::Exited(code) => (1, code as u16),
+            Self::Signalled(signal) => (2, signal),
+        }
+    }
+
+    pub(crate) fn decode(tag: u8, value: u16) -> Result<Self, StoreError> {
+        match tag {
+            0 => Ok(Self::Unknown),
+            1 => u8::try_from(value).map(Self::Exited).map_err(|_| {
+                StoreError::metadata(MetadataKind::Instance, "<memory>", "exit code out of range")
+            }),
+            2 => Ok(Self::Signalled(value)),
+            _ => Err(StoreError::metadata(
+                MetadataKind::Instance,
+                "<memory>",
+                format!("invalid instance outcome {tag}"),
+            )),
+        }
+    }
+}
+
+/// One finished run, kept so it can be listed, committed or removed.
+///
+/// This is the named, mutable half of a retained run: the COW itself and its
+/// generation root are the [`RetainedCow`] record, which is content-addressed
+/// and therefore cannot carry a name an operator chose. Keeping the two apart
+/// means renaming or removing an instance never disturbs the root that stops
+/// its backing image being collected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Instance {
+    id: InstanceId,
+    name: String,
+    generation_id: GenerationId,
+    retained_id: RetainedCowId,
+    image_reference: String,
+    command: String,
+    created_unix: u64,
+    finished_unix: u64,
+    outcome: InstanceOutcome,
+}
+
+impl Instance {
+    #[must_use]
+    pub const fn id(&self) -> InstanceId {
+        self.id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn generation_id(&self) -> GenerationId {
+        self.generation_id
+    }
+
+    #[must_use]
+    pub const fn retained_id(&self) -> RetainedCowId {
+        self.retained_id
+    }
+
+    #[must_use]
+    pub fn image_reference(&self) -> &str {
+        &self.image_reference
+    }
+
+    #[must_use]
+    pub fn command(&self) -> &str {
+        &self.command
+    }
+
+    #[must_use]
+    pub const fn created_unix(&self) -> u64 {
+        self.created_unix
+    }
+
+    #[must_use]
+    pub const fn finished_unix(&self) -> u64 {
+        self.finished_unix
+    }
+
+    #[must_use]
+    pub const fn outcome(&self) -> InstanceOutcome {
+        self.outcome
+    }
+
+    /// An instance is addressed by the name an operator gave it, so identity
+    /// is the name and nothing else: two runs of the same image with the same
+    /// command are different instances, and re-using a name is a collision the
+    /// store refuses rather than a second record that shadows the first.
+    fn derive_id(name: &str) -> InstanceId {
+        let mut bytes = b"pocket-instance-identity\0v1\0".to_vec();
+        put_text(&mut bytes, name);
+        InstanceId::from_bytes(Sha256::digest(bytes).into())
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut bytes = start_record(INSTANCE_MAGIC);
+        bytes.extend_from_slice(self.id.as_bytes());
+        put_text(&mut bytes, &self.name);
+        bytes.extend_from_slice(self.generation_id.as_bytes());
+        bytes.extend_from_slice(self.retained_id.as_bytes());
+        put_text(&mut bytes, &self.image_reference);
+        put_text(&mut bytes, &self.command);
+        put_u64(&mut bytes, self.created_unix);
+        put_u64(&mut bytes, self.finished_unix);
+        let (tag, value) = self.outcome.encode();
+        bytes.push(tag);
+        put_u16(&mut bytes, value);
+        finish_record(bytes)
+    }
+
+    fn decode(bytes: &[u8], path: &Path) -> Result<Self, StoreError> {
+        let result = (|| {
+            let mut reader = verify_record(bytes, INSTANCE_MAGIC, MetadataKind::Instance)?;
+            let id_bytes: [u8; 32] = reader.take(32)?.try_into().map_err(|_| {
+                StoreError::metadata(MetadataKind::Instance, path, "invalid instance ID")
+            })?;
+            let id = InstanceId::from_bytes(id_bytes);
+            let name = reader.text(MAX_INSTANCE_NAME_BYTES)?.to_owned();
+            let generation_bytes: [u8; 32] = reader.take(32)?.try_into().map_err(|_| {
+                StoreError::metadata(MetadataKind::Instance, path, "invalid generation ID")
+            })?;
+            let retained_bytes: [u8; 32] = reader.take(32)?.try_into().map_err(|_| {
+                StoreError::metadata(MetadataKind::Instance, path, "invalid retained-COW ID")
+            })?;
+            let image_reference = reader.text(MAX_INSTANCE_COMMAND_BYTES)?.to_owned();
+            let command = reader.text(MAX_INSTANCE_COMMAND_BYTES)?.to_owned();
+            let created_unix = reader.u64()?;
+            let finished_unix = reader.u64()?;
+            let tag = reader.u8()?;
+            let value = reader.u16()?;
+            reader.finish()?;
+            let instance = Self {
+                id,
+                name,
+                generation_id: GenerationId::from_bytes(generation_bytes),
+                retained_id: RetainedCowId::from_bytes(retained_bytes),
+                image_reference,
+                command,
+                created_unix,
+                finished_unix,
+                outcome: InstanceOutcome::decode(tag, value)?,
+            };
+            if Self::derive_id(&instance.name) != instance.id {
+                return Err(StoreError::metadata(
+                    MetadataKind::Instance,
+                    path,
+                    "instance ID does not match its name",
+                ));
+            }
+            if instance.encode() != bytes {
+                return Err(StoreError::metadata(
+                    MetadataKind::Instance,
+                    path,
+                    "instance record is not canonical",
+                ));
+            }
+            Ok(instance)
+        })();
+        result.map_err(|error| contextualize(error, MetadataKind::Instance, path))
+    }
+}
+
+/// Reject an instance name that could not be typed back, or that would not be
+/// a single safe filename component.
+pub fn validate_instance_name(name: &str) -> Result<(), StoreError> {
+    if name.is_empty() || name.len() > MAX_INSTANCE_NAME_BYTES {
+        return Err(StoreError::metadata(
+            MetadataKind::Instance,
+            "<name>",
+            format!("name must be 1 to {MAX_INSTANCE_NAME_BYTES} bytes"),
+        ));
+    }
+    let acceptable = name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !acceptable || name.starts_with('.') {
+        return Err(StoreError::metadata(
+            MetadataKind::Instance,
+            "<name>",
+            "name may use only letters, digits, '-', '_' and '.', and may not start with '.'",
+        ));
+    }
+    Ok(())
 }
 
 /// A durable retained-COW record, which is an independent generation GC root.
@@ -794,11 +1003,12 @@ impl Store {
     /// This is what makes an incomplete root recognizable: a directory holding
     /// only a subset of these is an initialization that did not finish, while
     /// one holding anything else is somebody else's directory.
-    pub const ROOT_LAYOUT: [&'static str; 10] = [
+    pub const ROOT_LAYOUT: [&'static str; 11] = [
         "aliases",
         "derivations",
         "generations",
         "init.lock",
+        "instances",
         "leases",
         "locks",
         "retained",
@@ -934,6 +1144,16 @@ impl Store {
         } else {
             open_and_validate_layout_dir(&root, &root_path, "retained", root_device)?
         };
+        let instances = if allow_initialize {
+            ensure_private_dir(
+                &root,
+                "instances",
+                &root_path.join("instances"),
+                root_device,
+            )?
+        } else {
+            open_and_validate_layout_dir(&root, &root_path, "instances", root_device)?
+        };
         let locks = if allow_initialize {
             ensure_private_dir(&root, "locks", &root_path.join("locks"), root_device)?
         } else {
@@ -949,6 +1169,7 @@ impl Store {
             aliases,
             leases,
             retained,
+            instances,
             locks,
             root_device,
             root_inode,
@@ -1563,6 +1784,240 @@ impl Store {
             .map_err(|error| StoreError::io("sync retained-COW publication", &final_path, error))?;
         drop(roots_lock);
         Ok(retained)
+    }
+
+    /// The directory an instance's COW is written into, created empty.
+    ///
+    /// A retained run writes its COW here from the start rather than being
+    /// moved on exit: the store is the durable half of the pair, and copying a
+    /// multi-gigabyte sparse file between filesystems at teardown would be a
+    /// cost paid on every run for the benefit of the ones that are kept.
+    pub fn create_instance_directory(&self, name: &str) -> Result<PathBuf, StoreError> {
+        validate_instance_name(name)?;
+        self.validate_root_identity()?;
+        let id = Instance::derive_id(name);
+        let directory = instance_directory_name(id);
+        let path = self.root_path.join("instances").join(&directory);
+        // The directory is reserved before the run starts, so a name already
+        // in use collides here rather than when the record is written. Say so
+        // in the operator's terms: they typed a name, not a path.
+        match create_private_dir(&self.instances, &directory, &path, self.root_device) {
+            Ok(_) => {}
+            Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(StoreError::metadata(
+                    MetadataKind::Instance,
+                    &path,
+                    format!("an instance named {name} already exists"),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(path)
+    }
+
+    /// Remove an instance directory that never became an instance.
+    ///
+    /// Refuses once a record exists for the name. A caller cleaning up after
+    /// its own failed run cannot always tell whether it created the directory
+    /// or collided with somebody else's instance, and the difference is a
+    /// deleted overlay, so the store decides rather than the caller: a
+    /// directory with a published record belongs to that instance and is
+    /// removed only by `remove_instance`.
+    pub fn discard_instance_directory(&self, name: &str) -> Result<(), StoreError> {
+        validate_instance_name(name)?;
+        let id = Instance::derive_id(name);
+        match self.read_instance(id) {
+            Err(StoreError::InstanceNotFound) => {}
+            Ok(_) => {
+                return Err(StoreError::metadata(
+                    MetadataKind::Instance,
+                    self.instance_path(id),
+                    format!("{name} is a published instance; remove it instead of discarding it"),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+        let directory = instance_directory_name(id);
+        let path = self.root_path.join("instances").join(&directory);
+        remove_tree_at(
+            &self.instances,
+            std::ffi::OsStr::new(&directory),
+            &path,
+            self.root_device,
+        )
+    }
+
+    /// Publish one finished run as a named instance.
+    ///
+    /// The caller has already registered the retained COW, so the generation
+    /// is rooted before this record exists: a crash between the two leaves a
+    /// root with no name, which wastes space but never loses a base an
+    /// instance still needs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_instance(
+        &self,
+        name: &str,
+        generation_id: GenerationId,
+        retained_id: RetainedCowId,
+        image_reference: &str,
+        command: &str,
+        created_unix: u64,
+        finished_unix: u64,
+        outcome: InstanceOutcome,
+    ) -> Result<Instance, StoreError> {
+        validate_instance_name(name)?;
+        if image_reference.len() > MAX_INSTANCE_COMMAND_BYTES
+            || command.len() > MAX_INSTANCE_COMMAND_BYTES
+        {
+            return Err(StoreError::metadata(
+                MetadataKind::Instance,
+                "<memory>",
+                "recorded reference or command is too long",
+            ));
+        }
+        self.validate_root_identity()?;
+        let instance = Instance {
+            id: Instance::derive_id(name),
+            name: name.to_owned(),
+            generation_id,
+            retained_id,
+            image_reference: image_reference.to_owned(),
+            command: command.to_owned(),
+            created_unix,
+            finished_unix,
+            outcome,
+        };
+        let roots_lock = self.lock_roots_exclusive()?;
+        let final_name = instance_filename(instance.id);
+        let final_path = self.instance_path(instance.id);
+        let temp_name = format!(".tmp-instance-{}", unique_suffix());
+        let temp_path = self.root_path.join("instances").join(&temp_name);
+        write_new_synced(
+            &self.instances,
+            &temp_name,
+            &temp_path,
+            &instance.encode(),
+            IMMUTABLE_FILE_MODE,
+        )?;
+        match rename_noreplace_at(
+            &self.instances,
+            &temp_name,
+            &self.instances,
+            &final_name,
+            &final_path,
+        ) {
+            Ok(()) => {}
+            Err(error) if io_error_is(&error, io::ErrorKind::AlreadyExists) => {
+                let _ = unlink_file_at(&self.instances, &temp_name, &temp_path);
+                return Err(StoreError::metadata(
+                    MetadataKind::Instance,
+                    &final_path,
+                    format!("an instance named {name} already exists"),
+                ));
+            }
+            Err(error) => {
+                let _ = unlink_file_at(&self.instances, &temp_name, &temp_path);
+                return Err(error);
+            }
+        }
+        self.instances
+            .sync_all()
+            .map_err(|error| StoreError::io("sync instance publication", &final_path, error))?;
+        drop(roots_lock);
+        Ok(instance)
+    }
+
+    /// Read one instance by the name an operator typed.
+    pub fn instance(&self, name: &str) -> Result<Instance, StoreError> {
+        validate_instance_name(name)?;
+        self.validate_root_identity()?;
+        let roots_lock = self.lock_roots_shared()?;
+        let instance = self.read_instance(Instance::derive_id(name))?;
+        drop(roots_lock);
+        Ok(instance)
+    }
+
+    /// Every instance the store holds, ordered by name.
+    ///
+    /// A record that cannot be read is reported rather than skipped: a listing
+    /// that silently omits an instance would show an operator an incomplete
+    /// picture of what is occupying their disk.
+    pub fn instances(&self) -> Result<Vec<Instance>, StoreError> {
+        self.validate_root_identity()?;
+        let roots_lock = self.lock_roots_shared()?;
+        let mut found = Vec::new();
+        for entry in list_names(&self.instances, &self.root_path.join("instances"))? {
+            let Some(name) = entry.to_str() else {
+                continue;
+            };
+            let Some(id_text) = name.strip_suffix(".meta") else {
+                continue;
+            };
+            let Some(id) = InstanceId::parse_filename(id_text) else {
+                continue;
+            };
+            found.push(self.read_instance(id)?);
+        }
+        drop(roots_lock);
+        found.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(found)
+    }
+
+    /// Remove one instance and the COW directory it owns.
+    ///
+    /// The retained-COW root goes first: dropping the name while the root
+    /// survives leaves reclaimable space, whereas dropping the root while the
+    /// name survives leaves an instance whose base can be collected.
+    pub fn remove_instance(&self, name: &str) -> Result<Instance, StoreError> {
+        validate_instance_name(name)?;
+        self.validate_root_identity()?;
+        let id = Instance::derive_id(name);
+        let instance = {
+            let roots_lock = self.lock_roots_shared()?;
+            let instance = self.read_instance(id)?;
+            drop(roots_lock);
+            instance
+        };
+        match self.remove_retained_cow(instance.retained_id) {
+            Ok(_) | Err(StoreError::RetainedCowNotFound) => {}
+            Err(error) => return Err(error),
+        }
+        let roots_lock = self.lock_roots_exclusive()?;
+        let file_name = instance_filename(id);
+        let file_path = self.instance_path(id);
+        unlink_file_at(&self.instances, &file_name, &file_path)?;
+        let directory = instance_directory_name(id);
+        let directory_path = self.root_path.join("instances").join(&directory);
+        let _ = remove_tree_at(
+            &self.instances,
+            std::ffi::OsStr::new(&directory),
+            &directory_path,
+            self.root_device,
+        );
+        self.instances
+            .sync_all()
+            .map_err(|error| StoreError::io("sync instance removal", &file_path, error))?;
+        drop(roots_lock);
+        Ok(instance)
+    }
+
+    fn read_instance(&self, id: InstanceId) -> Result<Instance, StoreError> {
+        let path = self.instance_path(id);
+        let name = instance_filename(id);
+        let file = match open_regular_at(&self.instances, &name, &path) {
+            Ok(file) => file,
+            Err(StoreError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(StoreError::InstanceNotFound);
+            }
+            Err(error) => return Err(error),
+        };
+        validate_regular(&file, &path, self.root_device, IMMUTABLE_FILE_MODE)?;
+        let bytes = read_bounded(file, &path, MetadataKind::Instance)?;
+        Instance::decode(&bytes, &path)
+    }
+
+    fn instance_path(&self, id: InstanceId) -> PathBuf {
+        self.root_path.join("instances").join(instance_filename(id))
     }
 
     /// Read and checksum a retained-COW record. This does not hash its COW file.
@@ -3059,6 +3514,14 @@ fn alias_filename(id: AliasId) -> String {
 
 fn derivation_filename(key: DerivationKey) -> String {
     format!("{key}.meta")
+}
+
+fn instance_filename(id: InstanceId) -> String {
+    format!("{id}.meta")
+}
+
+fn instance_directory_name(id: InstanceId) -> String {
+    format!("{id}.d")
 }
 
 fn retained_filename(id: RetainedCowId) -> String {

@@ -42,7 +42,12 @@ pocket image pull \
 pocket generation inspect --store STORE GENERATION_ID [--json]
 pocket generation list --store STORE --derivation DERIVATION_KEY [--json]
 
-pocket ps [--runtime-root RUNTIME_ROOT] [--json]
+pocket ps [--runtime-root RUNTIME_ROOT] [--store STORE] [-a] [--json]
+
+pocket rm [--store STORE] NAME...
+
+pocket commit [--store STORE] [--profile-bundle BUNDLE] \
+  [--runtime-root RUNTIME_ROOT] NAME REFERENCE [--json]
 
 pocket cache gc --store STORE --apply [--json]
 pocket cache roots --store STORE [--json]
@@ -58,7 +63,7 @@ pocket run \
   [--user USER[:GROUP]] [--workdir ABSOLUTE_PATH] [-e KEY=VALUE] \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
   [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
-  [--root-readonly] [-i] [-t] [--console-log ABSENT_PATH] \
+  [--root-readonly] [-i] [-t] [--name NAME | --rm] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
 
@@ -279,6 +284,43 @@ stops it with the run, so a SIGKILLed caller cannot orphan it.
 
 `-p/--publish` remains refused: the helper accepts forwards over an API socket
 that is not wired up.
+
+## Kept runs
+
+A run is kept when it exits, so what it produced can be looked at afterwards.
+It is recorded under a name -- `--name`, or a generated one like
+`nimble-delta-1d4d` -- and its copy-on-write overlay is retained:
+
+```sh
+pocket run --name build-one alpine:3.22 -- /bin/sh -c 'make'
+pocket run --rm alpine:3.22 -- /bin/true      # discarded instead
+pocket ps -a                                  # running, plus what was kept
+pocket rm build-one                           # the record and its overlay
+```
+
+`--rm` and `--name` cannot be combined: a discarded run leaves nothing to
+name. A name already in use is refused before the guest starts, not after the
+run has been paid for.
+
+A kept run's overlay is written inside the store from the start rather than
+moved there at teardown, because moving a multi-gigabyte sparse file would cost
+every run for the benefit of the kept ones. It is sparse, so it occupies what
+the workload wrote -- typically a few hundred kilobytes -- against a logical
+size that matches the image's filesystem.
+
+Keeping a run roots its image: `cache gc` reports the generation as `rooted`
+and will not collect it while any instance needs it. That root and the name are
+separate records, so removing an instance releases both, and a crash between
+them leaves reclaimable space rather than an instance whose image has been
+collected.
+
+`commit` is **not implemented** and refuses by name. Merging the overlay is
+well-defined -- a UML COW is a v3 header, a sector bitmap and the sectors that
+changed -- but a generation also carries a manifest of the filesystem it holds,
+produced by a guest that walks it. A commit is the one operation that changes
+those contents, so publishing it with the source's evidence would describe a
+filesystem that no longer exists. It needs a guest pass over the merged result,
+which `image adjust` does not, because a resize preserves contents exactly.
 
 ## Filesystem size
 

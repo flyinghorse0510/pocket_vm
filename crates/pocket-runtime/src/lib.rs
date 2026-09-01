@@ -32,17 +32,18 @@ pub use manifest::{
     VerifiedProfile,
 };
 pub use operation::{LiveOperation, live_operations};
-/// The bound the runtime applies to an image `User` value, re-exported so a
-/// caller can reject an oversized one before opening anything.
 pub use pocket_protocol::{
     MAX_ORIGINAL_USER_LENGTH, MAX_VOLUME_COUNT, RESERVED_GUEST_PATHS, VolumeSpec,
     reserved_guest_path_conflict,
 };
+/// The bound the runtime applies to an image `User` value, re-exported so a
+/// caller can reject an oversized one before opening anything.
+pub use pocket_store::validate_instance_name;
 pub use profile_seal::{
     ProfileArtifactSources, ProfileSealRequest, SealedProfile, seal_profile_bundle,
 };
 pub use runtime::{
-    CapturedStream, RunOptions, RunOutput, RunningWorkload, Runtime, RuntimePolicy,
+    CapturedStream, RetainRequest, RunOptions, RunOutput, RunningWorkload, Runtime, RuntimePolicy,
     TerminalRequest, WorkloadSpec,
 };
 pub use terminal::TerminalSession;

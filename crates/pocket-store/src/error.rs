@@ -13,6 +13,7 @@ pub enum MetadataKind {
     Alias,
     Lease,
     RetainedCow,
+    Instance,
     Derivation,
     Lock,
 }
@@ -26,6 +27,7 @@ impl std::fmt::Display for MetadataKind {
             Self::Alias => "alias",
             Self::Lease => "lease",
             Self::RetainedCow => "retained COW",
+            Self::Instance => "instance",
             Self::Derivation => "derivation lookup",
             Self::Lock => "lock",
         })
@@ -90,6 +92,9 @@ pub enum StoreError {
 
     #[error("retained COW record does not exist")]
     RetainedCowNotFound,
+
+    #[error("instance does not exist")]
+    InstanceNotFound,
 
     #[error("digest mismatch for {path}: expected {expected}, observed {actual}")]
     DigestMismatch {

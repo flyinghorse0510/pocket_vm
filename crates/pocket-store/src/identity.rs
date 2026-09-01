@@ -142,6 +142,7 @@ hash_id!(GenerationId, "pkvm-gen-v1-");
 hash_id!(DerivationKey, "pkvm-der-v1-");
 hash_id!(AliasId, "pkvm-alias-v1-");
 hash_id!(RetainedCowId, "pkvm-cow-v1-");
+hash_id!(InstanceId, "pkvm-inst-v1-");
 
 /// One immutable output sidecar covered by the final generation identity.
 ///

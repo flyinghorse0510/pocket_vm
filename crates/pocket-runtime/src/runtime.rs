@@ -30,7 +30,9 @@ use pocket_protocol::{
     Exit, MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, Ready, Resize, ResourceLimit, Start,
     ValidateMessage, VolumeSpec,
 };
-use pocket_store::{AliasKey, Digest, GenerationId, GenerationSpec, Lease, Store};
+use pocket_store::{
+    AliasKey, Digest, GenerationId, GenerationSpec, Instance, InstanceOutcome, Lease, Store,
+};
 use sha2::{Digest as _, Sha256};
 
 use crate::{
@@ -76,6 +78,14 @@ pub struct RunOptions {
     pub memory: ParsedMemory,
     pub workload: WorkloadSpec,
     pub stdin: Vec<u8>,
+    /// Keep this run after it exits, under this name, so it can be listed,
+    /// committed or removed later.
+    ///
+    /// A kept run writes its COW inside the store from the start rather than
+    /// into the runtime root: the store is the durable half, and moving a
+    /// multi-gigabyte sparse file at teardown would cost every run for the
+    /// benefit of the kept ones.
+    pub retain: Option<RetainRequest>,
     /// Attach the run to this process's own terminal instead of buffering.
     ///
     /// A terminal session streams both directions for as long as it lasts, so
@@ -95,6 +105,17 @@ pub struct RunOptions {
 
 /// The live output pump for a terminal session, and the byte total it keeps.
 type TerminalOutputPump = (JoinHandle<Result<(), String>>, Arc<AtomicU64>);
+
+/// A run that is kept after it exits, and what to record about it.
+#[derive(Debug, Clone)]
+pub struct RetainRequest {
+    /// The name an operator will address it by. Unique within one store.
+    pub name: String,
+    /// The reference the run was started from, recorded for listing.
+    pub image_reference: String,
+    /// The command line, recorded for listing.
+    pub command: String,
+}
 
 /// Initial window size for an interactive terminal session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +174,11 @@ pub struct CapturedStream {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutput {
     pub run_id: String,
+    /// The generation this run was started from.
+    pub generation_id: GenerationId,
+    /// Where the run's copy-on-write overlay was written, when it was kept.
+    /// `None` for a discarded run, whose COW is gone with its run directory.
+    pub cow_path: Option<PathBuf>,
     pub scaling_qualified: bool,
     pub guest_exit: Exit,
     pub stdout: CapturedStream,
@@ -231,6 +257,72 @@ impl<'runtime> Runtime<'runtime> {
     /// configuration has been read.
     pub fn run_leased(&self, lease: Lease, options: RunOptions) -> Result<RunOutput, RuntimeError> {
         self.start_leased(lease, options)?.wait()
+    }
+
+    /// Record a finished run as a named instance.
+    ///
+    /// Called after the run returns, when the guard has exited and the COW is
+    /// quiescent. The retained-COW root is registered first, so a crash
+    /// between the two steps leaves a root with no name -- reclaimable space
+    /// -- rather than a name whose backing image can be collected.
+    pub fn retain_instance(
+        &self,
+        output: &RunOutput,
+        retain: &RetainRequest,
+        created_unix: u64,
+        finished_unix: u64,
+    ) -> Result<Instance, RuntimeError> {
+        let cow_path = output
+            .cow_path
+            .as_ref()
+            .ok_or_else(|| RuntimeError::invalid("retain", "this run did not keep its overlay"))?;
+        let managed = ManagedUmlPath::new(cow_path)?;
+        let digest = {
+            let mut file = File::open(cow_path)
+                .map_err(|error| RuntimeError::io("open retained COW", cow_path, error))?;
+            let mut hasher = Sha256::new();
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            loop {
+                let read = file
+                    .read(&mut buffer)
+                    .map_err(|error| RuntimeError::io("read retained COW", cow_path, error))?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Digest::from_bytes(hasher.finalize().into())
+        };
+        // The guard has exited, so nothing holds the generation between the
+        // run and this record. Taking a lease is what closes that window.
+        let lease = self.store.acquire_lease(output.generation_id)?;
+        let retained = self.store.register_retained_cow(
+            &lease,
+            managed,
+            digest,
+            pocket_store::RetainedCowState::Clean,
+        )?;
+        let outcome = match (output.guest_exit.code, output.guest_exit.signal) {
+            (Some(code), _) => InstanceOutcome::Exited(code),
+            (None, Some(signal)) => InstanceOutcome::Signalled(signal),
+            _ => InstanceOutcome::Unknown,
+        };
+        Ok(self.store.create_instance(
+            &retain.name,
+            output.generation_id,
+            retained.id(),
+            &retain.image_reference,
+            &retain.command,
+            created_unix,
+            finished_unix,
+            outcome,
+        )?)
+    }
+
+    /// Drop the store directory a kept run reserved, for a run that will not
+    /// become an instance.
+    pub fn discard_retained(&self, name: &str) -> Result<(), RuntimeError> {
+        Ok(self.store.discard_instance_directory(name)?)
     }
 
     /// Start one workload and return a same-thread lifecycle handle after
@@ -328,7 +420,15 @@ impl<'runtime> Runtime<'runtime> {
         // A listing needs something to show. This is best effort: a run must
         // not fail because its own description could not be written.
         run_directory.describe(&generation_id, cpus.requested(), memory.bytes());
-        let paths = run_directory.paths(self.profile)?;
+        let mut paths = run_directory.paths(self.profile)?;
+        // A kept run's COW belongs in the store, which outlives the runtime
+        // root. The directory is created before the launch so a failure to
+        // make room is reported before a guest starts, and removed again if
+        // the run never becomes an instance.
+        if let Some(retain) = options.retain.as_ref() {
+            let directory = self.store.create_instance_directory(&retain.name)?;
+            paths.cow = ManagedUmlPath::new(directory.join("root.cow"))?.into_path_buf();
+        }
         if paths.cow.exists() {
             return Err(RuntimeError::invalid(
                 "root.cow",
@@ -345,6 +445,7 @@ impl<'runtime> Runtime<'runtime> {
             verbose_console: options.console_log.is_some(),
             network: options.workload.network,
         })?;
+        let retained_cow = options.retain.as_ref().map(|_| paths.cow.clone());
         let launch = spawn_guard(&plan, lease.lock_file())?;
         // The guard's dup of this open file description is now the sole lock
         // owner required by the runtime lifecycle.
@@ -361,6 +462,8 @@ impl<'runtime> Runtime<'runtime> {
             scaling_qualified,
             &options.stdin,
             options.terminal,
+            generation_id,
+            retained_cow,
         )?;
         active.console_log = options.console_log.clone();
         let startup_deadline = Instant::now() + self.policy.startup_timeout;
@@ -659,6 +762,9 @@ struct ActiveRun {
     guard_stdout_worker: Option<CaptureWorker>,
     guard_stderr_worker: Option<CaptureWorker>,
     run_directory: Option<RunDirectory>,
+    generation_id: GenerationId,
+    /// Set when the COW lives in the store and outlives this run.
+    retained_cow: Option<PathBuf>,
     paths: RunPaths,
     base_path: PathBuf,
     base_digest: Digest,
@@ -684,6 +790,8 @@ impl ActiveRun {
         scaling_qualified: bool,
         stdin: &[u8],
         terminal: Option<TerminalRequest>,
+        generation_id: GenerationId,
+        retained_cow: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
         let guard_stdout = match launch.child.stdout.take() {
             Some(stdout) => stdout,
@@ -764,6 +872,8 @@ impl ActiveRun {
                 policy.maximum_console_bytes,
             )),
             run_directory: Some(run_directory),
+            generation_id,
+            retained_cow,
             paths,
             base_path,
             base_digest,
@@ -896,6 +1006,8 @@ impl ActiveRun {
         self.cleaned = true;
         Ok(RunOutput {
             run_id: self.paths.umid.clone(),
+            generation_id: self.generation_id,
+            cow_path: self.retained_cow.clone(),
             scaling_qualified: self.scaling_qualified,
             guest_exit,
             stdout: captures.stdout,

@@ -28,13 +28,13 @@ use pocket_runtime::VolumeSpec;
 use pocket_runtime::{
     BuildOutput, BuildRequest, BuilderPolicy, BuilderToolContract, HostBuildError, HostBuilder,
     ImageArgv, ImageProcessOverrides, ManifestError, ProfileArtifactSources, ProfileMaturity,
-    ProfileSealRequest, RunOptions, RunOutput, Runtime, RuntimeError, RuntimePolicy,
+    ProfileSealRequest, RetainRequest, RunOptions, RunOutput, Runtime, RuntimeError, RuntimePolicy,
     TerminalRequest, TerminalSession, VerifiedProfile, WorkloadSpec, resolve_image_process,
     seal_profile_bundle,
 };
 use pocket_store::{
     AliasId, AliasKey, AliasRoot, DerivationKey, Digest, GarbageCollectionReport, Generation,
-    GenerationId, Lease, Platform, Store, StoreError,
+    GenerationId, Instance, InstanceOutcome, Lease, Platform, Store, StoreError,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -86,11 +86,46 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
-    /// List operations still running in a runtime root.
+    /// List running operations, and with `-a` the runs kept after they exited.
     Ps {
         /// Runtime root to inspect. Defaults to `runtime_root` in the config file.
         #[arg(long, value_name = "PATH")]
         runtime_root: Option<PathBuf>,
+        /// Also list kept runs that have already exited.
+        #[arg(short = 'a', long)]
+        all: bool,
+        /// Store holding kept runs. Defaults to `store` in the config file.
+        #[arg(long, value_name = "PATH")]
+        store: Option<PathBuf>,
+        /// Emit stable JSON rather than key=value output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Publish a kept run's filesystem as a new image.
+    Commit {
+        /// Store holding the kept run. Defaults to `store` in the config file.
+        #[arg(long, value_name = "PATH")]
+        store: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        profile_bundle: Option<PathBuf>,
+        #[arg(long, value_name = "PATH")]
+        runtime_root: Option<PathBuf>,
+        /// Kept run to commit, by name.
+        name: String,
+        /// Reference the resulting image is published under.
+        reference: String,
+        /// Emit stable JSON rather than key=value output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove kept runs and the disk they hold.
+    Rm {
+        /// Store holding the kept runs. Defaults to `store` in the config file.
+        #[arg(long, value_name = "PATH")]
+        store: Option<PathBuf>,
+        /// Kept runs to remove, by name.
+        #[arg(required = true)]
+        names: Vec<String>,
         /// Emit stable JSON rather than key=value output.
         #[arg(long)]
         json: bool,
@@ -395,6 +430,13 @@ struct RunArgs {
     /// Implied by `--tty`, which streams input instead of buffering it.
     #[arg(short = 'i', long)]
     interactive: bool,
+    /// Name this run so it can be listed, committed and removed after it
+    /// exits. Defaults to a generated name.
+    #[arg(long)]
+    name: Option<String>,
+    /// Discard the run when it exits instead of keeping it.
+    #[arg(long)]
+    rm: bool,
     /// Run the workload on a terminal: allocate a PTY in the guest, put this
     /// terminal in raw mode, and stream both directions until it exits.
     /// Requires that this process's stdin and stdout are both terminals.
@@ -656,6 +698,25 @@ fn apply_config(command: &mut Command, config: &Config) {
             }
             ImageCommand::List => {}
         },
+        Command::Ps {
+            runtime_root,
+            store,
+            ..
+        } => {
+            fill(runtime_root, &config.runtime_root);
+            fill(store, &config.store);
+        }
+        Command::Commit {
+            store,
+            profile_bundle,
+            runtime_root,
+            ..
+        } => {
+            fill(store, &config.store);
+            fill(profile_bundle, &config.profile_bundle);
+            fill(runtime_root, &config.runtime_root);
+        }
+        Command::Rm { store, .. } => fill(store, &config.store),
         Command::Generation { command } => match command {
             GenerationCommand::Inspect { store, .. } | GenerationCommand::List { store, .. } => {
                 fill(&mut store.store, &config.store);
@@ -666,7 +727,6 @@ fn apply_config(command: &mut Command, config: &Config) {
             | CacheCommand::Roots { store, .. }
             | CacheCommand::Forget { store, .. } => fill(&mut store.store, &config.store),
         },
-        Command::Ps { runtime_root, .. } => fill(runtime_root, &config.runtime_root),
         Command::Attach | Command::Exec | Command::Profile { .. } => {}
     }
 }
@@ -702,7 +762,29 @@ fn execute(
         Command::Image { command } => execute_image(command, stdout),
         Command::Generation { command } => execute_generation(command, stdout),
         Command::Cache { command } => execute_cache(command, stdout),
-        Command::Ps { runtime_root, json } => execute_ps(runtime_root.as_deref(), json, stdout),
+        Command::Ps {
+            runtime_root,
+            all,
+            store,
+            json,
+        } => execute_ps(runtime_root.as_deref(), all, store.as_deref(), json, stdout),
+        Command::Commit {
+            store,
+            profile_bundle,
+            runtime_root,
+            name,
+            reference,
+            json,
+        } => execute_commit(
+            store.as_deref(),
+            profile_bundle.as_deref(),
+            runtime_root.as_deref(),
+            &name,
+            &reference,
+            json,
+            stdout,
+        ),
+        Command::Rm { store, names, json } => execute_rm(store.as_deref(), &names, json, stdout),
         Command::Attach => Err(unsupported(
             "attach",
             "a run is a foreground process with no daemon behind it, so there is \
@@ -1196,6 +1278,8 @@ fn execute_cache(command: CacheCommand, stdout: &mut dyn Write) -> Result<Comman
 /// bookkeeping can.
 fn execute_ps(
     runtime_root: Option<&Path>,
+    all: bool,
+    store: Option<&Path>,
     json: bool,
     stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
@@ -1212,6 +1296,16 @@ fn execute_ps(
     let managed = managed_runtime_root(&root)?;
     let live = pocket_runtime::live_operations(managed.as_path(), "run-")
         .map_err(|source| output_error("list running operations", source))?;
+    // Kept runs live in the store, not the runtime root: they outlive it.
+    let kept = if all {
+        let path = store
+            .map(Path::to_path_buf)
+            .or_else(|| Config::load().ok().and_then(|config| config.store))
+            .ok_or_else(|| invalid("store", "pass --store or set store in the config file"))?;
+        open_or_initialize_store(&path)?.instances()?
+    } else {
+        Vec::new()
+    };
 
     if json {
         let rows: Vec<Value> = live
@@ -1225,7 +1319,13 @@ fn execute_ps(
                 Value::Object(row)
             })
             .collect();
-        writeln!(stdout, "{}", json!({ "running": rows }))
+        let exited: Vec<Value> = kept.iter().map(instance_row).collect();
+        let mut document = serde_json::Map::<String, Value>::new();
+        document.insert("running".to_owned(), Value::Array(rows));
+        if all {
+            document.insert("exited".to_owned(), Value::Array(exited));
+        }
+        writeln!(stdout, "{}", Value::Object(document))
             .map_err(|source| output_error("write ps output", source))?;
         return Ok(CommandStatus::SUCCESS);
     }
@@ -1248,6 +1348,127 @@ fn execute_ps(
             field("memory_bytes"),
         )
         .map_err(|source| output_error("write ps output", source))?;
+    }
+    for instance in &kept {
+        writeln!(
+            stdout,
+            "name={} status={} image={} generation={} created={} finished={} command={}",
+            instance.name(),
+            outcome_text(instance.outcome()),
+            instance.image_reference(),
+            instance.generation_id(),
+            instance.created_unix(),
+            instance.finished_unix(),
+            instance.command(),
+        )
+        .map_err(|source| output_error("write ps output", source))?;
+    }
+    Ok(CommandStatus::SUCCESS)
+}
+
+/// A name for a run the operator did not name, in the shape they would have
+/// chosen: short, typeable, and unlikely to collide within one store.
+fn generated_instance_name() -> String {
+    const ADJECTIVES: [&str; 16] = [
+        "amber", "brisk", "calm", "dusky", "eager", "fleet", "gentle", "hazy", "ivory", "jolly",
+        "keen", "lucid", "mellow", "nimble", "olive", "plucky",
+    ];
+    const NOUNS: [&str; 16] = [
+        "alloy", "basin", "cedar", "delta", "ember", "fjord", "grove", "harbor", "inlet", "jetty",
+        "kiln", "ledge", "mesa", "nook", "orchard", "prairie",
+    ];
+    // Time and pid are what distinguish two runs started side by side; the
+    // words are only there to make the result something a person can say.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+    let pid = u64::from(std::process::id());
+    let mixed = now ^ pid.rotate_left(29);
+    format!(
+        "{}-{}-{:04x}",
+        ADJECTIVES[(mixed >> 8) as usize % ADJECTIVES.len()],
+        NOUNS[(mixed >> 16) as usize % NOUNS.len()],
+        mixed as u16,
+    )
+}
+
+fn outcome_text(outcome: InstanceOutcome) -> String {
+    match outcome {
+        InstanceOutcome::Exited(code) => format!("exited({code})"),
+        InstanceOutcome::Signalled(signal) => format!("signalled({signal})"),
+        InstanceOutcome::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn instance_row(instance: &Instance) -> Value {
+    json!({
+        "name": instance.name(),
+        "id": instance.id().to_string(),
+        "status": outcome_text(instance.outcome()),
+        "image": instance.image_reference(),
+        "generation": instance.generation_id().to_string(),
+        "created": instance.created_unix(),
+        "finished": instance.finished_unix(),
+        "command": instance.command(),
+    })
+}
+
+/// Publish a kept run's filesystem as a new image.
+///
+/// Not implemented, and refused by name rather than left to read as a typo.
+/// The merge itself is the easy half: a UML COW is a v3 header, a sector
+/// bitmap and the sectors that changed, so applying it over a copy of the base
+/// is mechanical. What is missing is the evidence. A generation carries a
+/// `metadata.manifest` and validation evidence describing the filesystem it
+/// holds, produced by a guest that walks it; a commit is the one operation
+/// that changes those contents, so copying the source's sidecars would publish
+/// a generation whose recorded evidence describes a filesystem that no longer
+/// exists. Committing honestly needs a guest pass over the merged filesystem,
+/// which `image adjust` did not because a resize preserves contents exactly.
+fn execute_commit(
+    _store: Option<&Path>,
+    _profile_bundle: Option<&Path>,
+    _runtime_root: Option<&Path>,
+    name: &str,
+    _reference: &str,
+    _json: bool,
+    _stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let _ = name;
+    Err(unsupported(
+        "commit",
+        "a committed image needs its own content evidence: a generation records a \
+         manifest of the filesystem it holds, and a commit is what changes those \
+         contents, so the kept run's overlay has to be walked by a guest before it \
+         can be published. Merging the overlay is implemented in the COW format; \
+         regenerating the evidence is not",
+    ))
+}
+
+/// Remove kept runs, reporting each by name.
+fn execute_rm(
+    store: Option<&Path>,
+    names: &[String],
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let path = store
+        .map(Path::to_path_buf)
+        .or_else(|| Config::load().ok().and_then(|config| config.store))
+        .ok_or_else(|| invalid("store", "pass --store or set store in the config file"))?;
+    let store = open_or_initialize_store(&path)?;
+    let mut removed = Vec::with_capacity(names.len());
+    for name in names {
+        let instance = store.remove_instance(name)?;
+        removed.push(json!({ "name": instance.name(), "id": instance.id().to_string() }));
+        if !json {
+            writeln!(stdout, "removed={}", instance.name())
+                .map_err(|source| output_error("write rm output", source))?;
+        }
+    }
+    if json {
+        writeln!(stdout, "{}", json!({ "removed": removed }))
+            .map_err(|source| output_error("write rm output", source))?;
     }
     Ok(CommandStatus::SUCCESS)
 }
@@ -1398,6 +1619,23 @@ fn execute_run(
         ..RuntimePolicy::default()
     };
     let runtime = Runtime::new(&profile, &store, runtime_root, policy)?;
+    // A run is kept unless it is told not to be, so an operator can come back
+    // to what it produced. The name is what they will address it by.
+    let retain = if arguments.rm {
+        None
+    } else {
+        let name = match arguments.name.clone() {
+            Some(name) => name,
+            None => generated_instance_name(),
+        };
+        pocket_runtime::validate_instance_name(&name)
+            .map_err(|error| invalid("name", error.to_string()))?;
+        Some(RetainRequest {
+            name,
+            image_reference: arguments.image.clone(),
+            command: process.argv.join(" "),
+        })
+    };
     // Taken as late as possible: everything that can be refused has been, so
     // the operator's terminal is only disturbed by a run that will start.
     let terminal = hold_terminal(arguments.tty)?;
@@ -1421,24 +1659,65 @@ fn execute_run(
             stop_signal: process.stop_signal,
         },
         stdin: input,
+        retain: retain.clone(),
         terminal: terminal.as_ref().map(|session| session.request),
         console_log,
     };
 
+    let started_unix = unix_now();
+    // A run that never starts must not leave the directory it reserved in the
+    // store behind, so every failure from here releases it.
+    let discard_on_error = |error: CliError| -> CliError {
+        if let Some(retain) = retain.as_ref() {
+            let _ = runtime.discard_retained(&retain.name);
+        }
+        error
+    };
     let output = match terminal {
         // The operator's terminal is held in raw mode for exactly as long as
         // the session runs, and is put back before anything is printed to it:
         // a diagnostic written while the terminal is still raw comes out
         // stepped across the screen.
         Some(mut session) => {
-            let running = runtime.start_leased(lease, options)?;
+            let running = runtime
+                .start_leased(lease, options)
+                .map_err(|error| discard_on_error(error.into()))?;
             let result = running.wait_interactive(|| session.handle.take_resize());
             session.handle.restore();
-            result?
+            result.map_err(|error| discard_on_error(error.into()))?
         }
-        None => runtime.run_leased(lease, options)?,
+        None => runtime
+            .run_leased(lease, options)
+            .map_err(|error| discard_on_error(error.into()))?,
     };
+    // A kept run becomes an instance only once it has finished and its overlay
+    // is quiescent. Failing to record it must not discard the run's own
+    // result, so the failure is reported alongside the outcome.
+    let mut retain_error = None;
+    if let Some(retain) = retain.as_ref() {
+        match runtime.retain_instance(&output, retain, started_unix, unix_now()) {
+            Ok(instance) => {
+                writeln!(stderr, "pocket: kept as {}", instance.name())
+                    .map_err(|source| output_error("write retention notice", source))?;
+            }
+            Err(error) => {
+                let _ = runtime.discard_retained(&retain.name);
+                retain_error = Some(error.to_string());
+            }
+        }
+    }
+    if let Some(reason) = retain_error {
+        writeln!(stderr, "pocket: warning: run not kept: {reason}")
+            .map_err(|source| output_error("write retention diagnostic", source))?;
+    }
     emit_run_output(output, cpus, stdout, stderr)
+}
+
+/// Seconds since the epoch, or zero on a clock this process cannot read.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 /// The operator's terminal, together with the size the guest was started with.
@@ -1745,6 +2024,14 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
             "detach",
             "a run is a foreground process with no daemon to hand it to; its exit \
              status is the point, and nothing would be left to report it",
+        ));
+    }
+    // `--rm` discards the run, so there is nothing left for a name to address.
+    // Accepting both would silently ignore one of them.
+    if arguments.rm && arguments.name.is_some() {
+        return Err(invalid(
+            "name",
+            "--name cannot be combined with --rm: a discarded run leaves nothing to name",
         ));
     }
     // Checked here, with the other refusals, so piping into an interactive
@@ -3650,6 +3937,9 @@ mod tests {
         };
         let output = |scaling_qualified| RunOutput {
             run_id: "test".into(),
+            generation_id: GenerationId::from_str(&format!("pkvm-gen-v1-{}", "00".repeat(32)))
+                .expect("synthetic generation id"),
+            cow_path: None,
             scaling_qualified,
             guest_exit: pocket_protocol::Exit {
                 code: Some(0),
@@ -3691,6 +3981,9 @@ mod tests {
         };
         let output = RunOutput {
             run_id: "test".into(),
+            generation_id: GenerationId::from_str(&format!("pkvm-gen-v1-{}", "00".repeat(32)))
+                .expect("synthetic generation id"),
+            cow_path: None,
             scaling_qualified: true,
             guest_exit: pocket_protocol::Exit {
                 code: Some(42),
@@ -3716,6 +4009,9 @@ mod tests {
 
         let output = RunOutput {
             run_id: "test".into(),
+            generation_id: GenerationId::from_str(&format!("pkvm-gen-v1-{}", "00".repeat(32)))
+                .expect("synthetic generation id"),
+            cow_path: None,
             scaling_qualified: true,
             guest_exit: pocket_protocol::Exit {
                 code: None,
@@ -3748,6 +4044,9 @@ mod tests {
         };
         let output = RunOutput {
             run_id: "test".into(),
+            generation_id: GenerationId::from_str(&format!("pkvm-gen-v1-{}", "00".repeat(32)))
+                .expect("synthetic generation id"),
+            cow_path: None,
             scaling_qualified: true,
             guest_exit: pocket_protocol::Exit {
                 code: Some(0),

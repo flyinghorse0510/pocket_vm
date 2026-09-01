@@ -129,10 +129,11 @@ than trust it:
 | `make container-engine` | dockerd inside the guest, running containers of its own |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** inbound port forwarding, arm64, and private registries.
-Docker's `attach`, `exec` and `-d` are refused by name:
-there is no daemon, so a run is a foreground process you own, and `pocket ps`
-lists what is running.
+**Not supported:** inbound port forwarding, arm64, private registries, and
+`commit`. Docker's `attach`, `exec` and `-d` are refused by name:
+there is no daemon, so a run is a foreground process you own. `pocket ps -a`
+lists what is running and what was kept; runs are kept when they exit, named
+with `--name` and removed with `pocket rm`.
 
 This is a runtime for workloads you already trust — it is deliberately **not**
 a security boundary against hostile code.

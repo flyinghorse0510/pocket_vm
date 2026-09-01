@@ -541,6 +541,37 @@ Two things to know:
   the session, so the guest decides what a keystroke means. Exit the workload
   to end the run.
 
+## Coming back to a finished run
+
+A run is kept when it exits, the way a container is:
+
+```sh
+pocket run --name build-one alpine:3.22 -- /bin/sh -c 'echo built > /out'
+pocket ps -a
+```
+
+```
+name=build-one status=exited(0) image=alpine:3.22 created=... command=/bin/sh -c echo built > /out
+```
+
+Without `--name` you get a generated one like `nimble-delta-1d4d`. Add `--rm` to
+throw the run away instead; the two cannot be combined, because a discarded run
+leaves nothing to name.
+
+What is kept is the run's copy-on-write overlay, inside the store. It is sparse,
+so it costs what the workload wrote rather than the size of the filesystem, and
+it keeps its image alive -- `cache gc` will not collect an image a kept run
+still needs. Remove it when you are done:
+
+```sh
+pocket rm build-one
+```
+
+`pocket commit` is accepted but refuses: turning a kept run into an image needs
+the merged filesystem walked by a guest to produce its own content manifest,
+and that pass is not built yet. It says so rather than publishing an image whose
+recorded evidence describes the wrong filesystem.
+
 ## Disk space inside the guest
 
 A converted image's filesystem is at least **8 GiB**, and that is also the

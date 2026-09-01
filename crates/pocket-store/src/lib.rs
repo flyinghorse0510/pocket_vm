@@ -24,11 +24,14 @@ mod store;
 pub use error::{MetadataKind, StoreError};
 pub use identity::{
     AliasId, AliasKey, DerivationKey, Digest, GenerationId, GenerationSpec, ImmutableSidecar,
-    MAX_GENERATION_SIDECARS, MAX_SIDECAR_NAME_BYTES, Platform, RetainedCowId, RetainedCowState,
+    InstanceId, MAX_GENERATION_SIDECARS, MAX_SIDECAR_NAME_BYTES, Platform, RetainedCowId,
+    RetainedCowState,
 };
 pub use store::{
     AliasRoot, BeginGeneration, GarbageCollectionReport, Generation, GenerationManifest,
-    GenerationTransaction, Lease, RecoveryReport, RetainedCow, RetainedCowLease, Store,
+    GenerationTransaction, Instance, InstanceOutcome, Lease, MAX_INSTANCE_COMMAND_BYTES,
+    MAX_INSTANCE_NAME_BYTES, RecoveryReport, RetainedCow, RetainedCowLease, Store,
+    validate_instance_name,
 };
 
 /// On-disk store schema understood by this crate.
