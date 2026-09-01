@@ -126,14 +126,16 @@ than trust it:
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
 | `make terminal-session` | one interactive `-t` session driven through a real PTY |
 | `make image-adjust` | an image resized both ways, each result booted |
+| `make instances` | a kept run listed, committed into an image, and removed |
 | `make container-engine` | dockerd inside the guest, running containers of its own |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** inbound port forwarding, arm64, private registries, and
-`commit`. Docker's `attach`, `exec` and `-d` are refused by name:
+**Not supported:** inbound port forwarding, arm64, and private registries.
+Docker's `attach`, `exec` and `-d` are refused by name:
 there is no daemon, so a run is a foreground process you own. `pocket ps -a`
 lists what is running and what was kept; runs are kept when they exit, named
-with `--name` and removed with `pocket rm`.
+with `--name`, turned into images with `pocket commit`, and removed with
+`pocket rm`.
 
 This is a runtime for workloads you already trust — it is deliberately **not**
 a security boundary against hostile code.

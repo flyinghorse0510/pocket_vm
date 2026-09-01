@@ -187,6 +187,156 @@ pub struct AdjustRequest {
 
 const EXT4_BLOCK_BYTES_U32: u32 = 4096;
 
+/// One request to publish a kept run's filesystem as a new image.
+#[derive(Debug)]
+pub struct CommitRequest {
+    /// The image the run started from. Never modified.
+    pub source: Lease,
+    /// The kept run's copy-on-write overlay.
+    pub cow_path: PathBuf,
+    /// The name of the instance being committed, recorded as provenance.
+    pub instance_name: String,
+    /// The reference the committed image is published under.
+    pub reference: String,
+}
+
+/// Apply a UML COW file's changed sectors over an image in place.
+///
+/// The format is a v3 header, a bitmap with one bit per sector, and the
+/// sectors themselves: bit `n` set means sector `n` lives in the overlay
+/// rather than the backing file. Merging is therefore a walk of the bitmap,
+/// and only the sectors the workload actually wrote are touched, so the result
+/// stays as sparse as the pair it came from.
+fn apply_cow(image: &Path, cow: &Path) -> Result<(), HostBuildError> {
+    use std::io::{Seek, SeekFrom};
+
+    const HEADER_BYTES: u64 = 32 + 4096;
+    let mut overlay =
+        File::open(cow).map_err(|error| HostBuildError::io("open retained overlay", cow, error))?;
+    let mut header = [0_u8; HEADER_BYTES as usize];
+    overlay
+        .read_exact(&mut header)
+        .map_err(|error| HostBuildError::io("read overlay header", cow, error))?;
+
+    let field32 = |at: usize| u32::from_be_bytes(header[at..at + 4].try_into().unwrap_or([0; 4]));
+    let magic = field32(0);
+    let version = field32(4);
+    if magic != 0x4f4f_4f4d || version != 3 {
+        return Err(HostBuildError::invalid(
+            "overlay",
+            format!("expected a COW v3 overlay, observed magic {magic:#x} version {version}"),
+        ));
+    }
+    let size = u64::from_be_bytes(header[12..20].try_into().unwrap_or([0; 8]));
+    let sector_bytes = u64::from(field32(20));
+    let alignment = u64::from(field32(24));
+    let cow_format = u32::from_ne_bytes(header[28..32].try_into().unwrap_or([0; 4]));
+    if sector_bytes == 0 || alignment == 0 || cow_format != 0 {
+        return Err(HostBuildError::invalid(
+            "overlay",
+            "unsupported overlay geometry or bitmap format",
+        ));
+    }
+
+    let sectors = size.div_ceil(sector_bytes);
+    let bitmap_bytes = sectors.div_ceil(8);
+    // The bitmap does not begin where the header ends: the kernel rounds the
+    // header up to the COW's alignment first (`read_cow_header`), so with a
+    // 4128-byte v3 header and 4096-byte alignment it starts at 8192. Reading
+    // it from 4128 shifts every bit by 32512 sectors, which silently merges
+    // the wrong blocks rather than failing.
+    let bitmap_offset = HEADER_BYTES.div_ceil(alignment) * alignment;
+    let data_offset = (bitmap_offset + bitmap_bytes).div_ceil(alignment) * alignment;
+    let mut bitmap = vec![
+        0_u8;
+        usize::try_from(bitmap_bytes).map_err(|_| {
+            HostBuildError::invalid("overlay", "overlay bitmap does not fit in memory")
+        })?
+    ];
+    overlay
+        .seek(SeekFrom::Start(bitmap_offset))
+        .and_then(|_| overlay.read_exact(&mut bitmap))
+        .map_err(|error| HostBuildError::io("read overlay bitmap", cow, error))?;
+
+    let mut target = OpenOptions::new()
+        .write(true)
+        .open(image)
+        .map_err(|error| HostBuildError::io("open committed base", image, error))?;
+    let mut sector = vec![
+        0_u8;
+        usize::try_from(sector_bytes).map_err(|_| {
+            HostBuildError::invalid("overlay", "overlay sector size does not fit in memory")
+        })?
+    ];
+    let mut applied = 0_u64;
+    for index in 0..sectors {
+        let byte = usize::try_from(index / 8).unwrap_or(usize::MAX);
+        if bitmap
+            .get(byte)
+            .is_none_or(|bits| bits & (1 << (index % 8)) == 0)
+        {
+            continue;
+        }
+        let from = data_offset + index * sector_bytes;
+        let to = index * sector_bytes;
+        overlay
+            .seek(SeekFrom::Start(from))
+            .and_then(|_| overlay.read_exact(&mut sector))
+            .map_err(|error| HostBuildError::io("read overlay sector", cow, error))?;
+        target
+            .seek(SeekFrom::Start(to))
+            .and_then(|_| target.write_all(&sector))
+            .map_err(|error| HostBuildError::io("write committed sector", image, error))?;
+        applied += 1;
+    }
+    if applied == 0 {
+        // A run that wrote nothing still commits, but say so rather than
+        // silently publishing a byte-identical copy of the source.
+        return Err(HostBuildError::invalid(
+            "overlay",
+            "the kept run changed nothing, so committing it would republish its source unchanged",
+        ));
+    }
+    target
+        .sync_all()
+        .map_err(|error| HostBuildError::io("flush committed base", image, error))
+}
+
+/// Identity for a committed image.
+///
+/// A commit is not a conversion: it has no OCI layers of its own, and its
+/// contents are the source generation plus exactly one overlay. Binding those
+/// two is what makes committing the same overlay onto the same base converge
+/// on one generation instead of producing a new one each time.
+fn commit_contract_digest(
+    profile: &VerifiedProfile,
+    source: GenerationId,
+    cow_digest: Digest,
+) -> Result<Digest, HostBuildError> {
+    #[derive(serde::Serialize)]
+    struct CommitContract<'a> {
+        schema: &'a str,
+        profile_id: &'a str,
+        profile_revision: String,
+        source_generation: String,
+        overlay_sha256: String,
+        merge_contract: &'a str,
+    }
+    let manifest = profile.manifest();
+    let record = CommitContract {
+        schema: "pocket-host-commit-contract-v1",
+        profile_id: &manifest.profile_id,
+        profile_revision: manifest.profile_revision.to_string(),
+        source_generation: hex::encode(source.as_bytes()),
+        overlay_sha256: cow_digest.to_string(),
+        merge_contract: "pocket-uml-cow-v3-bitmap-merge-v1",
+    };
+    let bytes = serde_json::to_vec(&record).map_err(|error| {
+        HostBuildError::invalid("commit_contract", format!("cannot serialize: {error}"))
+    })?;
+    Ok(Digest::of_bytes(&bytes))
+}
+
 /// Bound and align one requested filesystem size.
 fn validate_target_size(bytes: u64) -> Result<u64, HostBuildError> {
     if !bytes.is_multiple_of(u64::from(EXT4_BLOCK_BYTES_U32)) {
@@ -528,6 +678,150 @@ impl<'builder> HostBuilder<'builder> {
 
     /// Build or reuse one immutable generation and atomically update the exact
     /// profile/platform-qualified alias only after full store publication.
+    /// Publish a kept run's filesystem as a new image.
+    ///
+    /// The source generation is untouched: this merges the run's overlay onto
+    /// a copy of the base and publishes the result as its own generation.
+    ///
+    /// A committed image carries only the evidence that is still true of it.
+    /// `image-config.json` and `accounts.cbor` describe how to start the image
+    /// and are copied across; the build evidence -- the manifest of the
+    /// filesystem, the validation evidence and the build record -- describes a
+    /// conversion that did not produce this filesystem, so it is replaced by a
+    /// commit record naming what this actually is. Copying it instead would
+    /// publish an image whose recorded inventory lists a filesystem that no
+    /// longer exists.
+    pub fn commit(&self, request: CommitRequest) -> Result<BuildOutput, HostBuildError> {
+        self.profile.reverify()?;
+        let generation = request.source.generation();
+        let source_id = request.source.id();
+        let source_base = generation.base_path().to_path_buf();
+        let (_, source_blocks) = crate::filesystem::ext4_geometry(&source_base)
+            .map_err(|error| HostBuildError::invalid("source", error.to_string()))?;
+        let source_bytes = source_blocks
+            .checked_mul(u64::from(EXT4_BLOCK_BYTES_U32))
+            .ok_or_else(|| HostBuildError::invalid("source", "source size overflows"))?;
+        let (cow_digest, _) = hash_path(&request.cow_path)?;
+
+        let contract = commit_contract_digest(self.profile, source_id, cow_digest)?;
+        let previous = generation.manifest().spec();
+        let spec = GenerationSpec::new(
+            previous.selected_manifest_digest(),
+            previous.config_digest(),
+            previous.layer_digests().to_vec(),
+            previous.diff_ids().to_vec(),
+            previous.descriptor_platform().cloned(),
+            previous.config_platform().clone(),
+            previous.effective_platform().clone(),
+            previous.selector_policy_id(),
+            previous.profile_id(),
+            previous.profile_revision(),
+            previous.root_layout_contract(),
+            previous.filesystem_contract(),
+            contract,
+        )?;
+        let derivation_key = spec.derivation_key();
+        let alias = AliasKey::new(
+            self.profile.manifest().profile_id.as_str(),
+            Digest::from_bytes(self.profile.manifest().profile_revision.as_bytes()),
+            request.reference.as_str(),
+            previous.effective_platform().clone(),
+            previous.selector_policy_id(),
+        )?;
+        let transaction = match self.store.try_begin_generation(spec)? {
+            BeginGeneration::Existing(lease) => {
+                self.store.set_alias(&alias, lease.id())?;
+                return Ok(BuildOutput {
+                    generation_id: lease.id(),
+                    derivation_key,
+                    alias_id: alias.id(),
+                    cache_hit: true,
+                });
+            }
+            BeginGeneration::Vacant(transaction) => transaction,
+        };
+
+        let mut directory = BuildDirectory::create(&self.runtime_root)?;
+        let paths = directory.paths(self.profile)?;
+        create_private_blkid_file(&paths.blkid_file)?;
+        let context = E2fsHelperContext {
+            profile: self.profile,
+            lock: transaction.lock_file(),
+            tmp: &paths.tmp_dir,
+            blkid_file: &paths.blkid_file,
+            policy: self.policy,
+        };
+
+        let staged = transaction.base_path();
+        copy_sparse(&source_base, &staged)?;
+        apply_cow(&staged, &request.cow_path)?;
+        let mut logs = Vec::new();
+        // The merged filesystem is the guest's own last write, so it may carry
+        // an unreplayed journal; the check is still read-only, and a merge
+        // that produced something unmountable has to fail here.
+        verify_filesystem(&staged, &context, source_bytes, &mut logs)?;
+
+        let marker_bytes = read_generation_marker(&staged, &context, source_bytes, &mut logs)?;
+        let mut marker: GenerationMarker =
+            pocket_protocol::decode_payload(&marker_bytes).map_err(|error| {
+                HostBuildError::invalid("generation_marker", format!("cannot decode: {error}"))
+            })?;
+        marker.derivation_key = hex::encode(derivation_key.as_bytes());
+        let updated = pocket_protocol::encode_payload(&marker).map_err(|error| {
+            HostBuildError::invalid("generation_marker", format!("cannot encode: {error}"))
+        })?;
+        if updated.len() != marker_bytes.len() {
+            return Err(HostBuildError::invalid(
+                "generation_marker",
+                "replacement marker changed length",
+            ));
+        }
+        rewrite_generation_marker(&staged, &updated, &context, source_bytes, &mut logs)?;
+        verify_filesystem(&staged, &context, source_bytes, &mut logs)?;
+
+        let mut sidecars = Vec::new();
+        // Still true of the committed image: how to start it, and who its
+        // accounts are.
+        for name in ["accounts.cbor", "image-config.json"] {
+            let from = generation.directory_path().join(name);
+            let bytes = fs::read(&from)
+                .map_err(|error| HostBuildError::io("read source sidecar", &from, error))?;
+            let mut file = transaction.create_sidecar(name)?;
+            write_synced(&mut file, &bytes, name)?;
+            drop(file);
+            let (digest, size) = hash_path(&transaction.staging_path().join(name))?;
+            sidecars.push(ImmutableSidecar::new(name, digest, size)?);
+        }
+        let record = serde_json::json!({
+            "schema": "pocket-commit-record-v1",
+            "source_generation": format!("{source_id}"),
+            "source_reference": request.reference,
+            "instance": request.instance_name,
+            "overlay_sha256": cow_digest.to_string(),
+            "merge_contract": "pocket-uml-cow-v3-bitmap-merge-v1",
+        });
+        let bytes = serde_json::to_vec_pretty(&record).map_err(|error| {
+            HostBuildError::invalid("commit_record", format!("cannot serialize: {error}"))
+        })?;
+        let mut file = transaction.create_sidecar("commit-record.json")?;
+        write_synced(&mut file, &bytes, "commit-record.json")?;
+        drop(file);
+        let (digest, size) = hash_path(&transaction.staging_path().join("commit-record.json"))?;
+        sidecars.push(ImmutableSidecar::new("commit-record.json", digest, size)?);
+        sidecars.sort_by(|left, right| left.name().cmp(right.name()));
+
+        let (base_digest, _) = hash_path(&staged)?;
+        let lease = transaction.publish_leased(base_digest, &sidecars)?;
+        directory.cleanup()?;
+        self.store.set_alias(&alias, lease.id())?;
+        Ok(BuildOutput {
+            generation_id: lease.id(),
+            derivation_key,
+            alias_id: alias.id(),
+            cache_hit: false,
+        })
+    }
+
     /// Republish one image's filesystem at a different size.
     ///
     /// A generation is immutable, so this never edits the source: it copies the

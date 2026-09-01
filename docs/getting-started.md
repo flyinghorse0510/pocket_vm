@@ -567,10 +567,21 @@ still needs. Remove it when you are done:
 pocket rm build-one
 ```
 
-`pocket commit` is accepted but refuses: turning a kept run into an image needs
-the merged filesystem walked by a guest to produce its own content manifest,
-and that pass is not built yet. It says so rather than publishing an image whose
-recorded evidence describes the wrong filesystem.
+Turn what a run produced into a new image with `commit`, the way
+`docker commit` does:
+
+```sh
+pocket run --name build alpine:3.22 -- /bin/sh -c 'apk add --no-cache jq'
+pocket commit build alpine:with-jq
+pocket run --rm alpine:with-jq -- jq --version
+```
+
+```
+jq-1.8.1
+```
+
+The image you started from is not modified; `commit` publishes a new one beside
+it.
 
 ## Disk space inside the guest
 

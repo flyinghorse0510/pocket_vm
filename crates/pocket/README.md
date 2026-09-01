@@ -314,13 +314,32 @@ separate records, so removing an instance releases both, and a crash between
 them leaves reclaimable space rather than an instance whose image has been
 collected.
 
-`commit` is **not implemented** and refuses by name. Merging the overlay is
-well-defined -- a UML COW is a v3 header, a sector bitmap and the sectors that
-changed -- but a generation also carries a manifest of the filesystem it holds,
-produced by a guest that walks it. A commit is the one operation that changes
-those contents, so publishing it with the source's evidence would describe a
-filesystem that no longer exists. It needs a guest pass over the merged result,
-which `image adjust` does not, because a resize preserves contents exactly.
+`commit` publishes what a kept run produced as a new image:
+
+```sh
+pocket run --name build alpine:3.22 -- /bin/sh -c 'apk add --no-cache jq'
+pocket commit build alpine:with-jq
+```
+
+It merges the run's overlay onto a copy of the base -- a UML COW is a v3
+header, a sector bitmap and the sectors that changed -- rewrites the generation
+marker, and publishes the result. The source is untouched, and committing the
+same overlay onto the same base twice converges on one generation rather than
+producing a new one each time.
+
+A committed image carries only the evidence still true of it.
+`image-config.json` and `accounts.cbor` describe how to start it and are
+carried across; the build evidence -- the filesystem manifest, the validation
+evidence, the build record -- describes a conversion that did not produce this
+filesystem, so it is replaced by a `commit-record.json` naming the source
+generation, the instance and the overlay digest. Carrying the old manifest
+instead would publish an image whose recorded inventory lists a filesystem that
+no longer exists.
+
+Two consequences worth knowing. `accounts.cbor` is the source image's account
+database, so a run that edited `/etc/passwd` commits an image whose `--user`
+name resolution still reflects the original. And a run that changed nothing is
+refused rather than republished unchanged.
 
 ## Filesystem size
 

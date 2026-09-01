@@ -26,11 +26,11 @@ use pocket_oci::{
 };
 use pocket_runtime::VolumeSpec;
 use pocket_runtime::{
-    BuildOutput, BuildRequest, BuilderPolicy, BuilderToolContract, HostBuildError, HostBuilder,
-    ImageArgv, ImageProcessOverrides, ManifestError, ProfileArtifactSources, ProfileMaturity,
-    ProfileSealRequest, RetainRequest, RunOptions, RunOutput, Runtime, RuntimeError, RuntimePolicy,
-    TerminalRequest, TerminalSession, VerifiedProfile, WorkloadSpec, resolve_image_process,
-    seal_profile_bundle,
+    BuildOutput, BuildRequest, BuilderPolicy, BuilderToolContract, CommitRequest, HostBuildError,
+    HostBuilder, ImageArgv, ImageProcessOverrides, ManifestError, ProfileArtifactSources,
+    ProfileMaturity, ProfileSealRequest, RetainRequest, RunOptions, RunOutput, Runtime,
+    RuntimeError, RuntimePolicy, TerminalRequest, TerminalSession, VerifiedProfile, WorkloadSpec,
+    resolve_image_process, seal_profile_bundle,
 };
 use pocket_store::{
     AliasId, AliasKey, AliasRoot, DerivationKey, Digest, GarbageCollectionReport, Generation,
@@ -1426,23 +1426,83 @@ fn instance_row(instance: &Instance) -> Value {
 /// exists. Committing honestly needs a guest pass over the merged filesystem,
 /// which `image adjust` did not because a resize preserves contents exactly.
 fn execute_commit(
-    _store: Option<&Path>,
-    _profile_bundle: Option<&Path>,
-    _runtime_root: Option<&Path>,
+    store: Option<&Path>,
+    profile_bundle: Option<&Path>,
+    runtime_root: Option<&Path>,
     name: &str,
-    _reference: &str,
-    _json: bool,
-    _stdout: &mut dyn Write,
+    reference: &str,
+    json: bool,
+    stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
-    let _ = name;
-    Err(unsupported(
-        "commit",
-        "a committed image needs its own content evidence: a generation records a \
-         manifest of the filesystem it holds, and a commit is what changes those \
-         contents, so the kept run's overlay has to be walked by a guest before it \
-         can be published. Merging the overlay is implemented in the COW format; \
-         regenerating the evidence is not",
-    ))
+    let config = Config::load()?;
+    let store_path = store
+        .map(Path::to_path_buf)
+        .or_else(|| config.store.clone())
+        .ok_or_else(|| invalid("store", "pass --store or set store in the config file"))?;
+    let bundle = profile_bundle
+        .map(Path::to_path_buf)
+        .or_else(|| config.profile_bundle.clone())
+        .ok_or_else(|| {
+            invalid(
+                "profile-bundle",
+                "pass --profile-bundle or set profile_bundle in the config file",
+            )
+        })?;
+    let root = runtime_root
+        .map(Path::to_path_buf)
+        .or_else(|| config.runtime_root.clone())
+        .ok_or_else(|| {
+            invalid(
+                "runtime-root",
+                "pass --runtime-root or set runtime_root in the config file",
+            )
+        })?;
+
+    let profile = load_profile(&bundle)?;
+    let store = open_or_initialize_store(&store_path)?;
+    let managed_root = managed_runtime_root(&root)?;
+
+    let instance = store.instance(name)?;
+    // Lease the retained overlay and its backing generation together, so
+    // neither can be collected while the merge reads them.
+    let retained = store.lease_retained_cow(instance.retained_id())?;
+    let source = store.acquire_lease(instance.generation_id())?;
+    let cow_path = retained.retained().cow_path().as_path().to_path_buf();
+
+    let builder = HostBuilder::new(&profile, &store, managed_root, BuilderPolicy::default())?;
+    let output = builder.commit(CommitRequest {
+        source,
+        cow_path,
+        instance_name: instance.name().to_owned(),
+        reference: reference.to_owned(),
+    })?;
+
+    if json {
+        writeln!(
+            stdout,
+            "{}",
+            json!({
+                "generation_id": output.generation_id.to_string(),
+                "alias_id": output.alias_id.to_string(),
+                "reference": reference,
+                "instance": instance.name(),
+                "cache_hit": output.cache_hit,
+            })
+        )
+        .map_err(|source| output_error("write commit output", source))?;
+    } else {
+        writeln!(
+            stdout,
+            "generation_id={} alias_id={} reference={} instance={} cache_hit={}",
+            output.generation_id,
+            output.alias_id,
+            reference,
+            instance.name(),
+            output.cache_hit,
+        )
+        .map_err(|source| output_error("write commit output", source))?;
+    }
+    Ok(CommandStatus::SUCCESS)
 }
 
 /// Remove kept runs, reporting each by name.
