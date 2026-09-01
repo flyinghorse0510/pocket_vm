@@ -518,6 +518,32 @@ it persists (see [Sharing a folder with the host](#sharing-a-folder-with-the-hos
 If you want the root read-only inside the guest as well, pass
 `--root-readonly`.
 
+## Seeing what is running
+
+```sh
+pocket ps
+```
+
+```
+id=run-7c500389004fffd1777240d717e8afdc generation=pkvm-gen-v1-f1c8c0… pid=2654078 started=1788241378 cpus=1 memory_bytes=268435456
+```
+
+`--json` gives the same rows as JSON. There is no daemon behind this: each run
+holds a lock on its own directory, and the kernel drops that lock when the
+owner dies, so a run killed with `kill -9` disappears from the list at once.
+
+**`attach`, `exec` and `-d` are not available**, and say so rather than looking
+like typos:
+
+```
+pocket: [E_FEATURE_UNSUPPORTED] feature "detach" is unavailable: a run is a
+foreground process with no daemon to hand it to; its exit status is the point,
+and nothing would be left to report it
+```
+
+To run something in the background, background the `pocket` process itself —
+it owns the run, and its exit status is the workload's.
+
 ## Managing the store
 
 ```sh
@@ -567,6 +593,8 @@ Stated plainly, so you do not go looking:
 - **A TTY.** `--tty` is refused; streams are buffered and non-interactive.
 - **Host privileges.** `--privileged` grants capabilities inside the *guest*
   only. Nothing gives a workload any authority over the host.
+- **`attach`, `exec`, `--detach`.** There is no daemon, and a run executes one
+  process. `pocket ps` lists what is running; the rest refuse by name.
 
 The full gate list, including what is and is not yet verified, is in
 [the release support matrix](release-support-matrix.md). The CLI's complete

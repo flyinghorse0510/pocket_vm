@@ -36,6 +36,8 @@ pocket image pull \
 pocket generation inspect --store STORE GENERATION_ID [--json]
 pocket generation list --store STORE --derivation DERIVATION_KEY [--json]
 
+pocket ps [--runtime-root RUNTIME_ROOT] [--json]
+
 pocket cache gc --store STORE --apply [--json]
 pocket cache roots --store STORE [--json]
 pocket cache forget --store STORE --alias ALIAS_ID
@@ -207,6 +209,19 @@ real lock-aware collection operation. Omitting `--apply` returns
 `E_FEATURE_UNSUPPORTED` because the store has no classify-only preview API; it
 does not approximate a dry run or delete anything.
 
+## Listing running operations
+
+`pocket ps` lists the runs in a runtime root whose owner is still alive, one
+`id= generation= pid= started= cpus= memory_bytes=` line each, or `--json`.
+
+It reads the runtime root directly, because there is no daemon to ask. A run
+holds an exclusive lock on its own directory for its whole life, and the
+kernel releases that lock when the owner dies however it dies -- so a
+directory whose lock cannot be taken has a living owner. This is the
+reclamation sweep's test read the other way round, which is why the listing
+cannot drift out of step with reality: it *is* reality. A run killed with
+SIGKILL stops being listed immediately, without anything having to notice.
+
 ## Capabilities
 
 A workload runs as uid 0 with a fixed 12-capability allowlist
@@ -327,6 +342,10 @@ This build does not implement:
   removal, or global alias/image listing;
 - installed-profile discovery, implicit profile selection, or `probe`;
 - PTYs, inbound port forwards, or host CPU affinity;
+- `attach`, `exec`, and `run --detach`. Each is a named command or flag that
+  refuses with `E_FEATURE_UNSUPPORTED` and the reason, rather than reading as
+  a typo: a run is a foreground process with no daemon behind it, and it
+  executes exactly one process, decided before the guest starts;
 - `pocket run` pull policies other than `never`, retained root COWs, or dynamic UML
   profile bundles.
 

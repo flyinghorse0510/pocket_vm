@@ -186,6 +186,15 @@ does not satisfy any UML execution gate.
   variants; `vector_poll()` is unchanged because softirqs are already off
   there, and `vector_send()` uses `spin_trylock()`, which is safe either way.
   The same lane reports zero after the fix.
+- [x] List running operations without a daemon. `pocket ps` reports the runs
+  in a runtime root whose owner still holds its directory lock, which is the
+  reclamation sweep's own liveness test read in reverse, so the listing cannot
+  disagree with reality and a signal-killed run leaves it immediately.
+  `attach`, `exec` and `run --detach` are named and refused with
+  `E_FEATURE_UNSUPPORTED` rather than left to read as unknown arguments.
+  Detached runs, reattachable stdio, and a second process in a live guest all
+  remain unimplemented; the last needs a control message the protocol does not
+  have.
 - [ ] Verify builder byte and inode capacity retry policy at both boundaries,
   no partial generation publication, deterministic derivation identity, and
   independent ext4 clean-state/UUID/size/manifest/account validation. The

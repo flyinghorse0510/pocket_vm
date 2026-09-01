@@ -113,8 +113,9 @@ than trust it:
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** inbound port forwarding, arm64, private registries, and
-interactive TTYs. This is a runtime for workloads you already trust — it is
+**Not supported:** inbound port forwarding, arm64, private registries,
+interactive TTYs, and Docker's `attach`/`exec`/`-d` — there is no daemon, so a
+run is a foreground process you own. `pocket ps` lists what is running. This is a runtime for workloads you already trust — it is
 deliberately **not** a security boundary against hostile code.
 
 ## Upstream kernel fix

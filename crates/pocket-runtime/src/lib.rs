@@ -30,6 +30,7 @@ pub use manifest::{
     PROFILE_SCHEMA_VERSION, ProfileManifest, ProfileMaturity, ProfileRevision, ValidatorContract,
     VerifiedProfile,
 };
+pub use operation::{LiveOperation, live_operations};
 /// The bound the runtime applies to an image `User` value, re-exported so a
 /// caller can reject an oversized one before opening anything.
 pub use pocket_protocol::{

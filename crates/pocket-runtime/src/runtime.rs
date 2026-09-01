@@ -39,6 +39,8 @@ use crate::{
 const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_CAPTURE_BYTES: usize = 64 * 1024 * 1024;
 const RUN_ID_BYTES: usize = 16;
+/// What a run records about itself inside its own directory, for listings.
+pub const RUN_DESCRIPTION: &str = "description";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadSpec {
@@ -291,6 +293,9 @@ impl<'runtime> Runtime<'runtime> {
         )?;
 
         let run_directory = RunDirectory::create(&self.runtime_root)?;
+        // A listing needs something to show. This is best effort: a run must
+        // not fail because its own description could not be written.
+        run_directory.describe(&generation_id, cpus.requested(), memory.bytes());
         let paths = run_directory.paths(self.profile)?;
         if paths.cow.exists() {
             return Err(RuntimeError::invalid(
@@ -1053,6 +1058,31 @@ impl RunDirectory {
             network_socket,
             umid,
         })
+    }
+
+    /// Record what this run is, for `pocket ps`.
+    ///
+    /// Best effort throughout: the run is already committed by the time this
+    /// is called, and failing it would turn a cosmetic problem into a lost
+    /// workload. A listing simply omits what it cannot read.
+    fn describe(&self, generation: &GenerationId, cpus: u16, memory_bytes: u64) {
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_secs())
+            .unwrap_or_default();
+        let body = format!(
+            "generation={generation}\npid={}\nstarted={started}\ncpus={cpus}\nmemory_bytes={memory_bytes}\n",
+            std::process::id(),
+        );
+        let path = self.path.join(RUN_DESCRIPTION);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            let _ = file.write_all(body.as_bytes());
+        }
     }
 
     fn cleanup(&mut self) -> Result<(), RuntimeError> {

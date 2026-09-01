@@ -123,6 +123,68 @@ pub(crate) fn reclaim_orphans(root: &Path, prefix: &str) -> io::Result<usize> {
     Ok(reclaimed)
 }
 
+/// One live operation found in a runtime root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveOperation {
+    pub id: String,
+    /// Lines the run recorded about itself, as written. Empty if unreadable:
+    /// a listing reports the runs it found, not only the tidy ones.
+    pub description: Vec<(String, String)>,
+}
+
+/// List the operations in `root` that are still owned by a living process.
+///
+/// This is the reclamation test read the other way round. A sweep reclaims a
+/// directory precisely when it *can* take that directory's `owner.lock`,
+/// because the kernel releases the lock when the owner dies however it dies.
+/// A directory whose lock cannot be taken therefore has a living owner, which
+/// is the definition of a running operation -- no daemon, no bookkeeping that
+/// could disagree with reality, and no PID liveness guess.
+pub fn live_operations(root: &Path, prefix: &str) -> io::Result<Vec<LiveOperation>> {
+    let mut found = Vec::new();
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        // No runtime root yet means nothing has ever run here.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(prefix) {
+            continue;
+        }
+        let path = entry.path();
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
+            continue;
+        }
+        let owner = match open_existing(&path.join(OWNER_LOCK)) {
+            Ok(owner) => owner,
+            // A directory still being created has no lock file yet.
+            Err(_) => continue,
+        };
+        if owner.try_lock().is_ok() {
+            // Ours to take, so the owner is gone: abandoned, not running.
+            continue;
+        }
+        let description = fs::read_to_string(path.join(crate::runtime::RUN_DESCRIPTION))
+            .map(|text| {
+                text.lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        found.push(LiveOperation {
+            id: name.to_owned(),
+            description,
+        });
+    }
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(found)
+}
+
 /// SIGKILL anything whose command line names `path`.
 ///
 /// The owner's own children die with it: the guard carries a parent-death

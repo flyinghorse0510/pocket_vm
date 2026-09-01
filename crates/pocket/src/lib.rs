@@ -85,6 +85,19 @@ enum Command {
         #[command(subcommand)]
         command: CacheCommand,
     },
+    /// List operations still running in a runtime root.
+    Ps {
+        /// Runtime root to inspect. Defaults to `runtime_root` in the config file.
+        #[arg(long, value_name = "PATH")]
+        runtime_root: Option<PathBuf>,
+        /// Emit stable JSON rather than key=value output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Unavailable: a run is a foreground process with no daemon behind it.
+    Attach,
+    /// Unavailable: a run executes exactly one process.
+    Exec,
     /// Run image defaults, or Docker-compatible overrides, from a generation or alias.
     Run(Box<RunArgs>),
 }
@@ -367,6 +380,10 @@ struct RunArgs {
     /// unprivileged userspace stack; `none` leaves it with loopback only.
     #[arg(long, value_enum, default_value = "slirp")]
     network: NetworkMode,
+    /// Unavailable: a run is a foreground process. Accepted so the refusal
+    /// names the reason instead of reading as a typo.
+    #[arg(short = 'd', long)]
+    detach: bool,
     /// Give the workload every capability the guest kernel implements,
     /// instead of the fixed allowlist. Needed to run a container engine
     /// inside the guest. This grants nothing over the host: the guest has its
@@ -623,7 +640,8 @@ fn apply_config(command: &mut Command, config: &Config) {
             | CacheCommand::Roots { store, .. }
             | CacheCommand::Forget { store, .. } => fill(&mut store.store, &config.store),
         },
-        Command::Profile { .. } => {}
+        Command::Ps { runtime_root, .. } => fill(runtime_root, &config.runtime_root),
+        Command::Attach | Command::Exec | Command::Profile { .. } => {}
     }
 }
 
@@ -658,6 +676,17 @@ fn execute(
         Command::Image { command } => execute_image(command, stdout),
         Command::Generation { command } => execute_generation(command, stdout),
         Command::Cache { command } => execute_cache(command, stdout),
+        Command::Ps { runtime_root, json } => execute_ps(runtime_root.as_deref(), json, stdout),
+        Command::Attach => Err(unsupported(
+            "attach",
+            "a run is a foreground process with no daemon behind it, so there is \
+             nothing to attach to; keep the terminal that started it",
+        )),
+        Command::Exec => Err(unsupported(
+            "exec",
+            "a run executes exactly one process, decided before the guest starts; \
+             starting a second one needs a control message the protocol does not have",
+        )),
         Command::Run(arguments) => execute_run(*arguments, stdin, stdout, stderr),
     }
 }
@@ -1072,6 +1101,73 @@ fn execute_cache(command: CacheCommand, stdout: &mut dyn Write) -> Result<Comman
             Ok(CommandStatus::SUCCESS)
         }
     }
+}
+
+/// List operations whose owner is still alive.
+///
+/// Reads the runtime root directly rather than consulting a daemon, because
+/// there is none. A run holds an exclusive lock on its own directory for its
+/// whole life, and the kernel releases that lock when the owner dies however
+/// it dies -- so a directory whose lock cannot be taken has a living owner.
+/// This is the reclamation sweep's test read the other way round, which means
+/// the listing cannot drift out of step with reality the way a daemon's
+/// bookkeeping can.
+fn execute_ps(
+    runtime_root: Option<&Path>,
+    json: bool,
+    stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let config = Config::load()?;
+    let root = runtime_root
+        .map(Path::to_path_buf)
+        .or_else(|| config.runtime_root.clone())
+        .ok_or_else(|| {
+            invalid(
+                "runtime-root",
+                "pass --runtime-root or set runtime_root in the config file",
+            )
+        })?;
+    let managed = managed_runtime_root(&root)?;
+    let live = pocket_runtime::live_operations(managed.as_path(), "run-")
+        .map_err(|source| output_error("list running operations", source))?;
+
+    if json {
+        let rows: Vec<Value> = live
+            .iter()
+            .map(|operation| {
+                let mut row = serde_json::Map::<String, Value>::new();
+                row.insert("id".to_owned(), json!(operation.id));
+                for (key, value) in &operation.description {
+                    row.insert(key.clone(), json!(value));
+                }
+                Value::Object(row)
+            })
+            .collect();
+        writeln!(stdout, "{}", json!({ "running": rows }))
+            .map_err(|source| output_error("write ps output", source))?;
+        return Ok(CommandStatus::SUCCESS);
+    }
+    for operation in &live {
+        let field = |name: &str| {
+            operation
+                .description
+                .iter()
+                .find(|(key, _)| key == name)
+                .map_or("-", |(_, value)| value.as_str())
+        };
+        writeln!(
+            stdout,
+            "id={} generation={} pid={} started={} cpus={} memory_bytes={}",
+            operation.id,
+            field("generation"),
+            field("pid"),
+            field("started"),
+            field("cpus"),
+            field("memory_bytes"),
+        )
+        .map_err(|source| output_error("write ps output", source))?;
+    }
+    Ok(CommandStatus::SUCCESS)
 }
 
 fn execute_run(
@@ -1501,6 +1597,13 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
         return Err(invalid(
             "entrypoint",
             "cannot be combined with --exact-argv",
+        ));
+    }
+    if arguments.detach {
+        return Err(unsupported(
+            "detach",
+            "a run is a foreground process with no daemon to hand it to; its exit \
+             status is the point, and nothing would be left to report it",
         ));
     }
     if arguments.tty {
@@ -2821,6 +2924,9 @@ mod tests {
             // Networking exists now, but nothing forwards a host port into
             // the guest yet, so --publish is still refused.
             (vec!["--publish", "8080:80"], "port-forwarding"),
+            // Named so the refusal explains itself rather than reading as an
+            // unknown flag, which is what an unrecognised -d would look like.
+            (vec!["--detach"], "detach"),
             (vec!["--cpuset", "0-1"], "cpuset"),
             (vec!["--pull", "missing"], "pull-policy"),
         ] {
