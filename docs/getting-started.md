@@ -230,12 +230,23 @@ pocket: [E_CLI_INVALID_INPUT] invalid store: pass --store or set store in
         /home/you/.config/pocket/config.toml
 ```
 
-Keep these paths **short**. They become AF_UNIX socket paths inside UML, so a
-managed path over 192 bytes is refused:
+Keep the **runtime root** short. A run creates AF_UNIX sockets inside it, and
+the kernel's socket-address field is 108 bytes and cannot be raised, so once a
+run directory and its socket leaf are accounted for the root itself may be at
+most **66 bytes**:
 
 ```
-pocket: [E_PATH_TOO_LONG] invalid run path: managed UML path is 221 bytes; maximum is 192
+pocket: [E_CLI_INVALID_INPUT] invalid runtime-root: runtime root is 95 bytes; a
+run directory and its socket need the rest of the 107 the kernel allows for a
+Unix socket path, so the maximum here is 66
 ```
+
+`$XDG_RUNTIME_DIR/pocket/run` is 25 bytes, so the default has plenty of room.
+
+The store and the profile bundle are **not** socket paths, and get a much
+larger budget — 3840 bytes. They need it: a generation path spends 114 bytes on
+`/generations/pkvm-gen-v1-<64 hex>/validation-evidence.cbor` before your store
+root contributes anything.
 
 ## First run
 

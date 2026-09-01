@@ -798,7 +798,7 @@ fn execute_image_import(
     )?)?;
     let requested = requested_platform(&profile, Some(&context.platform))?;
     let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
-    let runtime_root = managed_path(required_path(
+    let runtime_root = managed_runtime_root(required_path(
         &context.runtime_root,
         "runtime-root",
         "runtime_root",
@@ -890,7 +890,7 @@ fn execute_image_pull(
     )?)?;
     let requested = requested_platform(&profile, Some(&context.platform))?;
     let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
-    let runtime_root = managed_path(required_path(
+    let runtime_root = managed_runtime_root(required_path(
         &context.runtime_root,
         "runtime-root",
         "runtime_root",
@@ -1125,7 +1125,7 @@ fn execute_run(
     // Held until the run ends: dropping these releases each shared directory
     // for the next run.
     let volumes = hold_volumes(&arguments.volume)?;
-    let runtime_root = managed_path(required_path(
+    let runtime_root = managed_runtime_root(required_path(
         &arguments.runtime_root,
         "runtime-root",
         "runtime_root",
@@ -1575,6 +1575,29 @@ fn open_or_initialize_store(path: &Path) -> Result<Store, CliError> {
 /// The final component is deliberately left as written. A store root or
 /// profile bundle that is itself a symlink still fails, because that leaf's
 /// device and inode are exactly what the store pins.
+/// A runtime root, checked against the bound the sockets inside it impose.
+///
+/// Refused here rather than at launch: the launch-time message would name a
+/// generated run directory the caller never typed, and by then a kernel is
+/// already starting.
+fn managed_runtime_root(path: &Path) -> Result<ManagedUmlPath, CliError> {
+    let managed = managed_path(path)?;
+    let length = managed.as_path().as_os_str().len();
+    if length > pocket_core::MAX_RUNTIME_ROOT_PATH_BYTES {
+        return Err(invalid(
+            "runtime-root",
+            format!(
+                "runtime root is {length} bytes; a run directory and its socket \
+                 need the rest of the {} the kernel allows for a Unix socket \
+                 path, so the maximum here is {}",
+                pocket_core::MAX_UNIX_SOCKET_PATH_BYTES,
+                pocket_core::MAX_RUNTIME_ROOT_PATH_BYTES,
+            ),
+        ));
+    }
+    Ok(managed)
+}
+
 fn managed_path(path: &Path) -> Result<ManagedUmlPath, CliError> {
     let lexical = ManagedUmlPath::new(path)?;
     let resolved = resolve_ancestors(lexical.as_path())?;

@@ -18,6 +18,6 @@ pub use memory::{
     ValidatedMemory,
 };
 pub use path::{
-    MAX_MANAGED_UML_PATH_BYTES, MIN_MANAGED_UML_PATH_COMPONENTS, ManagedUmlPath,
-    ManagedUmlPathError,
+    MAX_MANAGED_UML_PATH_BYTES, MAX_RUNTIME_ROOT_PATH_BYTES, MAX_UNIX_SOCKET_PATH_BYTES,
+    MIN_MANAGED_UML_PATH_COMPONENTS, ManagedUmlPath, ManagedUmlPathError,
 };

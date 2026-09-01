@@ -132,7 +132,7 @@ tree is published with Linux renameat2(RENAME_NOREPLACE).
 
 Installation deliberately separates each short immutable release tree from
 the shared immutable profile tree. This avoids nesting two full SHA-256
-identities, which can exceed pocket's 192-byte managed-path limit. The
+identities, which lengthens every installed path. The
 installer also checks the longest installed profile artifact path against
 that limit before publishing anything.
 

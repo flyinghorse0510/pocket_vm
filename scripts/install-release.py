@@ -597,6 +597,10 @@ def ensure_installed_tree(
         remove_private_stage(stage)
 
 
+# Mirrors MAX_MANAGED_UML_PATH_BYTES in crates/pocket-core/src/path.rs.
+MAX_MANAGED_PATH_BYTES = 3840
+
+
 def enforce_profile_path_budget(
     profile: Path,
     expected: dict[str, tuple[str, int, int, str]],
@@ -637,10 +641,13 @@ def enforce_profile_path_budget(
         key=lambda path: len(os.fsencode(path)),
     )
     length = len(os.fsencode(longest_path))
-    if length > 192:
+    # A profile bundle never becomes a socket address, so it is held to the
+    # generous managed-path limit rather than the socket-shaped one. Keep this
+    # in step with MAX_MANAGED_UML_PATH_BYTES in crates/pocket-core/src/path.rs.
+    if length > MAX_MANAGED_PATH_BYTES:
         raise ReleaseError(
-            "installed profile would exceed pocket's 192-byte managed "
-            f"path limit ({length} bytes at {longest_path})"
+            f"installed profile would exceed pocket's {MAX_MANAGED_PATH_BYTES}-byte "
+            f"managed path limit ({length} bytes at {longest_path})"
         )
 
 

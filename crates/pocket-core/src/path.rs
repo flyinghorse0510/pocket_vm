@@ -4,9 +4,61 @@ use thiserror::Error;
 
 use crate::{CodedError, ErrorCode};
 
-/// Keeps managed paths comfortably below UML's tighter command-line and
-/// Unix-socket path consumers. Profile-specific code may impose a lower cap.
-pub const MAX_MANAGED_UML_PATH_BYTES: usize = 192;
+/// Upper bound for a managed path.
+///
+/// This is deliberately generous. The tight limit in this system is the
+/// kernel's `sockaddr_un.sun_path`, which is 108 bytes and cannot be raised --
+/// but that binds only paths which *become socket addresses*, which means the
+/// runtime root and what is derived from it. `MAX_RUNTIME_ROOT_PATH_BYTES`
+/// below carries that, checked where the runtime root is accepted so a caller
+/// hears about it immediately instead of when a socket is finally constructed.
+///
+/// A store or a profile bundle never becomes a socket address, and both are
+/// long by nature: a generation path spends 114 bytes on
+/// `/generations/pkvm-gen-v1-<64 hex>/validation-evidence.cbor` before the
+/// root contributes anything, and a bundle spends 88 on
+/// `/profiles/<id>/<64 hex>`. Holding those to a socket-shaped budget bought
+/// nothing and cost roughly fifty bytes of usable prefix, which an ordinary
+/// installed layout under a long home directory can want.
+///
+/// 3840 leaves 256 bytes under `PATH_MAX` for the deepest structure any
+/// managed tree adds beneath its root.
+pub const MAX_MANAGED_UML_PATH_BYTES: usize = 3840;
+
+/// The kernel's `sockaddr_un.sun_path` is `char[108]`: 107 usable bytes and a
+/// terminator. Unchanged since 4.2BSD and not something a profile may raise.
+pub const MAX_UNIX_SOCKET_PATH_BYTES: usize = 107;
+
+/// What a run directory adds beneath the runtime root before a socket name:
+/// `/run-` plus a 32-character operation id, then `/uml` or `/net`.
+pub const RUN_DIRECTORY_SOCKET_OVERHEAD_BYTES: usize = "/run-".len() + 32 + "/uml".len();
+
+/// Upper bound for a runtime root.
+///
+/// Derived rather than chosen: whatever is left of a Unix socket path once a
+/// run directory and its socket leaf are accounted for. A deeper root produces
+/// an unusable socket address, so it is refused when it is supplied instead of
+/// at launch, where the message would name a path the caller never typed.
+pub const MAX_RUNTIME_ROOT_PATH_BYTES: usize =
+    MAX_UNIX_SOCKET_PATH_BYTES - RUN_DIRECTORY_SOCKET_OVERHEAD_BYTES;
+
+// The invariants the two bounds exist to hold, checked when this crate is
+// built rather than when a test happens to run. Holding a store to a
+// socket-shaped budget cost real prefix length and protected nothing, because
+// a store never becomes a socket address; these say so in a form that cannot
+// drift back.
+const _: () = {
+    // A run directory and its socket leaf must fit in what the kernel allows.
+    assert!(
+        MAX_RUNTIME_ROOT_PATH_BYTES + RUN_DIRECTORY_SOCKET_OVERHEAD_BYTES
+            == MAX_UNIX_SOCKET_PATH_BYTES
+    );
+    // The general bound is for paths that never become socket addresses, and
+    // must leave room under PATH_MAX for what a managed tree adds below its
+    // root -- 114 bytes for a store generation, 88 for a profile bundle.
+    assert!(MAX_MANAGED_UML_PATH_BYTES > MAX_UNIX_SOCKET_PATH_BYTES);
+    assert!(MAX_MANAGED_UML_PATH_BYTES + 256 <= 4096);
+};
 
 /// A managed root must name at least three components below `/`.
 ///
