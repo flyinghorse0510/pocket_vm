@@ -277,6 +277,8 @@ PER-WORKLOAD EXECUTION
 
 A small Rust workspace is a suitable implementation because the host supervisor and guest init need explicit ownership of processes, FDs, protocol buffers, and cleanup state. Mature external tools should handle registries, OCI layer application, ext filesystems, and user-mode networking.
 
+This is the layout as proposed. The entries marked `implemented` or `current` below were built as described; the ones marked `planned` were not adopted in this shape. In the tree as built, per-profile kernel source and config records live under `config/kernel/`, initramfs and profile output are generated under `build/profiles/`, relocatable bundles under `build/package/`, and test inputs under `fixtures/` — there is no top-level `initramfs/`, `packaging/`, `tests/` or `kernel/profiles/` directory. For the shipped tree, read [Getting started](getting-started.md); this section records the original plan.
+
 ~~~text
 pocket_vm/
   Cargo.toml

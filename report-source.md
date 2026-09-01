@@ -1,7 +1,7 @@
 # Research source: trusted native UML container runtime
 
 Status: canonical internal research record  
-Revised: 2026-08-28  
+Revised: 2026-09-01  
 Target hosts: Linux x86_64 and Linux arm64  
 Target guest/image platforms: native linux/amd64 and native linux/arm64  
 Question: Can a useful trusted-workload container runtime consume existing Docker/OCI images, run them natively under same-architecture User-Mode Linux, use multiple host CPUs where qualified, and require no host privilege?
@@ -99,6 +99,9 @@ The status distinguishes upstream facts from decisions and test obligations.
 | C29 | `mem=` limits guest physical memory but not all host-side overhead. UML consumes the recognized token before constructing `/proc/cmdline` and may silently shrink the accepted size for host-layout constraints, so Pocket pairs it with a guest-visible decimal expected-byte alias and compares that alias with the revision-bound accepted-physmem ABI. | UML parameter behavior plus pinned-source audit | Direct plus measurement obligation |
 | C30 | Hard aggregate CPU, PID, memory and I/O control requires a writable delegated cgroup or an external enclosing policy. | [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) | Direct plus product constraint |
 | C31 | Linux initramfs rootfs cannot be removed with pivot_root; keeping pocket-init in initramfs and chrooting a nested-PID child permits later root-volume unmount. | [Linux initramfs/rootfs documentation](https://docs.kernel.org/filesystems/ramfs-rootfs-initramfs.html) | Direct plus architecture decision |
+| C32 | Enabling `CONFIG_UML_NET_VECTOR` selects `MAY_HAVE_RUNTIME_DEPS`, which `CONFIG_STATIC_LINK` depends on being unset, so upstream cannot build a statically linked UML with any vector transport. The dependency is real for only the IP transports (`gre`, `l2tpv3`), which resolve names through NSS; `bess` and `fd` do not. Patches `0006`-`0007` move the select onto a new `UML_NET_VECTOR_IP_TRANSPORTS` symbol and compile those transports out when it is unset, which is what lets the shipped profile be both static and networked. | [Upstream vector Kconfig](https://github.com/torvalds/linux/blob/master/arch/um/drivers/Kconfig) | Direct; discovered while enabling the driver, corrected in the locked series |
+| C33 | `vector_poll()` takes a queue-head lock from NAPI (softirq context), while `vector_reset_stats()` and `vector_get_ethtool_stats()` took the same lock with plain `spin_lock()` in process context with softirqs enabled. Lockdep reports the `{SOFTIRQ-ON-W} -> {IN-SOFTIRQ-W}` inconsistency on every boot with a vector device: a self-deadlock if the softirq lands on the holding CPU. Patch `0008` takes both with `spin_lock_bh()`. This is an upstream defect that predates the project; `make diagnostic-lifecycle` went from 34 lockdep reports to none. | [Upstream vector driver](https://github.com/torvalds/linux/blob/master/arch/um/drivers/vector_kern.c) | Direct; found by enabling lockdep on the first networked build |
+| C34 | hostfs implements no extended attributes, and overlay2 requires `trusted.overlay.*`, so a container engine inside the guest cannot place its storage on a shared host directory. In-guest Docker therefore keeps `/var/lib/docker` on the discarded COW overlay. | [Upstream hostfs](https://github.com/torvalds/linux/blob/master/fs/hostfs/hostfs_kern.c) | Direct; bounds what `--volume` can be used for |
 
 ## Selected architecture decisions
 

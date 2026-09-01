@@ -7,8 +7,12 @@ things to know before you start:
 
 - The first build fetches and *verifies* a Linux 7.2 tarball, e2fsprogs,
   Skopeo, slirp4netns and a Go toolchain, then compiles a kernel. Budget
-  **40-60 minutes** and roughly **10 GB** of disk. Later builds reuse all of
-  it.
+  **40-60 minutes** and roughly **10 GB** of disk. Later builds reuse the
+  downloads, but each one that replaces the kernel source or output *keeps*
+  the old tree as evidence under `build/src/replaced/` and
+  `build/kernel/replaced/` — roughly 1.8 GB per replaced source tree and
+  150 MB per kernel output, never reclaimed for you. See
+  [When something goes wrong](#when-something-goes-wrong).
 - This is `linux/amd64` on an x86_64 host only, and it is deliberately **not**
   a security boundary against hostile code. It is a runtime for workloads you
   already trust.
@@ -593,6 +597,16 @@ It is written on success and on failure alike, which is the case it exists
 for. Errors are machine-readable: `E_CLI_INVALID_INPUT` means your command
 line, `E_STORE` the store, `E_IMAGE_BUILD` the conversion, `E_GUEST` the
 workload itself.
+
+**If `build/` grows unexpectedly**, it is the retained trees. Every kernel
+rebuild renames the previous source and output aside instead of deleting them,
+so they can be audited later; nothing reclaims them automatically. Once you no
+longer need that history, remove it yourself:
+
+```sh
+du -sh build/src/replaced build/kernel/replaced
+rm -rf build/src/replaced build/kernel/replaced
+```
 
 ## What is not supported
 
