@@ -49,9 +49,14 @@ pocket run \
   [--entrypoint EXECUTABLE | --entrypoint=] [--exact-argv] \
   [--user USER[:GROUP]] [--workdir ABSOLUTE_PATH] [-e KEY=VALUE] \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
+  [--volume HOST_DIR:GUEST_DIR[:ro]]... \
   [--root-readonly] [-i] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
+
+`--profile-bundle`, `--store` and `--runtime-root` may also come from a config
+file, so the common case needs no path flags at all. See **Configuration file**
+below.
 
 `profile list` deliberately verifies only the bundle paths supplied by the
 caller; there is no installed-profile index yet. `generation list` is scoped to
@@ -186,6 +191,67 @@ real lock-aware collection operation. Omitting `--apply` returns
 `E_FEATURE_UNSUPPORTED` because the store has no classify-only preview API; it
 does not approximate a dry run or delete anything.
 
+## Configuration file
+
+Every command that takes `--profile-bundle`, `--store` or `--runtime-root`
+reads them from a config file when the flag is absent. An explicit flag always
+wins, so the file only ever supplies a default:
+
+```
+$XDG_CONFIG_HOME/pocket/config.toml     # or ~/.config/pocket/config.toml
+```
+
+`POCKET_CONFIG` overrides the location. `scripts/install-release.py` writes one
+at install time, pointing at the profile it installed, and never overwrites a
+file that already exists.
+
+The grammar is a deliberately small subset: `key = "value"`, `#` comments, and
+blank lines. The three keys above are the only ones accepted. An unknown key, a
+repeated key, an unquoted value or a backslash escape is an error naming the
+file and line rather than a silently ignored setting.
+
+## Sharing host directories
+
+`--volume HOST_DIR:GUEST_DIR[:ro]` mounts a host directory into the guest over
+`hostfs`. The host directory must already exist; the guest mount point is
+created if it does not. Writes land in the host's own directory, so unlike the
+copy-on-write root they survive the run. `:ro` mounts it read-only.
+
+The guest destination may not collide with a path the runtime mounts or
+generates -- `/proc`, `/sys`, `/dev`, `/run`, `/etc/hostname`, `/etc/hosts`,
+`/etc/resolv.conf` -- in either direction. Under one it would be silently
+shadowed; over one, the runtime's own mounts and generated files would be
+created inside the caller's directory and left there. A sibling such as
+`/etc/myconfig` is unaffected. The refusal happens in the CLI and again in the
+guest's `START` contract.
+
+One host directory is used by one run at a time. A second run naming the same
+directory is refused with `E_CLI_INVALID_INPUT` rather than serialized or
+silently allowed: `hostfs` does not track host-side changes, so two guests
+writing through their own caches would corrupt each other's view.
+
+The claim is an advisory lock on the shared directory itself, released when the
+run's process exits. It is deliberately not a marker file inside the share: a
+marker is part of what the workload sees, and a job that tidies its own output
+directory removes the one thing keeping a second run out, after which a third
+run claims a directory the first is still writing to. Locking the directory has
+no such hole, writes nothing into the caller's folder, and needs no write
+permission, which is what makes an ordinary read-only share work. On a network
+filesystem the lock may be local to one machine, so two hosts sharing a
+directory are not excluded from each other.
+
+At most 32 volumes per run. A host path may not contain a colon, because the
+first colon separates it from the guest path. Two volumes may not name the same
+host path or the same guest path.
+
+Because `hostfs` does not track host-side changes, a file altered on the host
+while a run holds the directory may still be served from the guest's cache.
+
+A shared directory is host state with host permissions. It is outside
+everything the immutable store guarantees, and a workload can write anything
+the invoking user can write. That is the point of the feature, and it is the
+caller's judgement to make.
+
 ## Explicitly unavailable surface
 
 This build does not implement:
@@ -194,7 +260,7 @@ This build does not implement:
   Docker daemon imports, archive selectors or multi-image archives, image
   removal, or global alias/image listing;
 - installed-profile discovery, implicit profile selection, or `probe`;
-- PTYs, slirp networking, port forwards, managed volumes, or host CPU affinity;
+- PTYs, slirp networking, port forwards, or host CPU affinity;
 - `pocket run` pull policies other than `never`, retained root COWs, or dynamic UML
   profile bundles.
 

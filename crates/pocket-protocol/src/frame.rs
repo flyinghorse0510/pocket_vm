@@ -9,8 +9,10 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// identity rather than a compatibility hint: bump it for ANY change a peer
 /// can observe on the wire, including adding a field to an existing message.
 /// Minor 4 added the required `Start::stdin_bytes` field; minor 5 made a
-/// guest ERROR legal before HELLO.
-pub const PROTOCOL_MINOR: u16 = 5;
+/// guest ERROR legal before HELLO; minor 6 made `Start::volumes` host
+/// directories mounted through hostfs, and refuses a destination that
+/// collides with a path the runtime mounts or generates.
+pub const PROTOCOL_MINOR: u16 = 6;
 pub const MAX_CONTROL_PAYLOAD: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

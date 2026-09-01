@@ -73,28 +73,115 @@ That single target does everything, in order:
 5. **Seals a profile bundle** — a content-addressed directory holding the
    exact kernel, tools and initramfses this runtime will use.
 
-The build prints its sealed bundle path as `"bundle"` in the JSON on the last
-lines. Keep it — every command needs it. To pick it up afterwards, take the
-newest and strip the trailing slash, which the path validator rejects:
+### Install it
+
+The quickest path from here is to install into a prefix you choose. This also
+writes a config file, so afterwards no command needs any path flags:
 
 ```sh
-export POCKET_PROFILE_BUNDLE=$(
-  ls -dt "$PWD"/build/profiles/x86_64-smp-p4k/*/ | head -1 | sed 's:/*$::'
-)
+make install PREFIX="$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+
+pocket image pull --reference alpine:3.22 --platform linux/amd64 \
+  docker://docker.io/library/alpine:3.22
+pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
+```
+
+```
+3.22.5
+```
+
+`make install` puts the release under `<prefix>/lib/pocket-vm/`, adds a
+versioned launcher `<prefix>/bin/pocket-<release-id>`, and points
+`<prefix>/bin/pocket` at it. Each install keeps the previous versions beside
+the new one, so pointing that symlink at an older launcher rolls back.
+
+It also writes `~/.config/pocket/config.toml` naming the installed profile, a
+store under `~/.local/share/pocket/store`, and a runtime root under
+`$XDG_RUNTIME_DIR` — which is short and on tmpfs, both of which UML prefers.
+An existing config is never overwritten. To choose different locations, or to
+skip either piece of setup:
+
+```sh
+make install PREFIX="$HOME/.local" \
+  STORE="$HOME/data/pocket-store" RUNTIME_ROOT=/run/user/$(id -u)/pocket
+make install PREFIX="$HOME/.local" NO_CONFIG=1 NO_DEFAULT_LINK=1
+```
+
+`CONFIG=<path>` writes the config file somewhere else; `pocket` then needs
+`POCKET_CONFIG` set to find it.
+
+If the prefix is group- or other-writable, the installer refuses and says how
+to fix it. On distributions with a `002` umask, `~/.local` is often `0775`:
+
+```
+install-release: installation prefix component is group- or other-writable
+(mode 0775): /home/you/.local
+  fix it with: chmod go-w /home/you/.local
+  or install somewhere else with: make install PREFIX=<dir>
+```
+
+### Or take the tarball
+
+`make package` produces one relocatable, self-contained archive — kernel,
+tools, initramfses, CLI and the installer itself — which installs on another
+machine with no toolchain, no repository and no build:
+
+```sh
+make package                       # prints package=<path>.tar
+```
+
+Copy that one file to the other machine. The installer travels inside it, so
+nothing else is needed — take it out and run it:
+
+```sh
+tar -xf pocket-vm-....tar --strip-components=2 --wildcards \
+  '*/bin/pocket-vm-install' '*/bin/pocket_release.py'
+
+./pocket-vm-install install --archive pocket-vm-....tar --prefix "$HOME/.local"
+```
+
+That is the same digest-checked install as `make install`, and it writes the
+same config file.
+
+Do not unpack the whole archive by hand instead. Its directories are `0555`,
+mirroring the read-only tree the installer publishes, so a plain `tar -xf`
+fails part-way with `Cannot open: Permission denied` — it creates each
+directory read-only before writing what goes in it. (`tar -xf ...
+--delay-directory-restore` unpacks it, but you get an unverified tree with no
+launcher and no config.) Let the installer do it.
+
+From a checkout you can use the Makefile instead:
+
+```sh
+make install-archive ARCHIVE=/path/to/pocket-vm-....tar PREFIX="$HOME/.local"
+```
+
+The archive name carries the release revision, so re-running `make package`
+after an unchanged build reproduces the same file and checks the bytes match
+rather than overwriting it. `pocket-vm-install verify --archive ... --prefix
+...` re-checks an installed tree against the archive at any time.
+
+### Or use the build tree directly
+
+The build prints its sealed bundle path as `"bundle"` in the JSON on the last
+lines, and writes it to `build/profiles/latest`:
+
+```sh
+export POCKET_PROFILE_BUNDLE=$(cat build/profiles/latest)
 echo "$POCKET_PROFILE_BUNDLE"
 ```
 
-Each build publishes a new revision beside the old ones, so sorting by name
-would hand you a stale profile. If you keep several, name the one you want
-explicitly rather than guessing.
+Each build publishes a new revision beside the old ones, so neither sorting by
+name nor picking the newest directory is reliable — that file is what the build
+actually sealed. If you keep several, name the one you want explicitly.
 
 Check the build with `make test` (Rust suite, Clippy, rustfmt, ShellCheck) and
 `make verify` (artifact ABI, linkage and locked digests).
 
 ## The three paths
 
-Every command takes three directories and has no defaults for them, which is
-the first thing that trips people up. They are separate because they have
+Every command needs three directories. They are separate because they have
 different lifetimes and different trust:
 
 | Flag | What it is | Lifetime |
@@ -103,12 +190,44 @@ different lifetimes and different trust:
 | `--store` | Where converted images live as immutable generations, plus their aliases. Created on first use. | Long-lived; shared across runs |
 | `--runtime-root` | Scratch for one process's in-flight runs: the per-run COW file and UML sockets. | Emptied as runs finish |
 
-Pick a store and runtime root once and reuse them:
+**Write them down once instead of passing them every time.** Put them in
+`~/.config/pocket/config.toml` and every command picks them up:
+
+```toml
+# ~/.config/pocket/config.toml
+profile_bundle = "/home/you/pocket_vm/build/profiles/x86_64-smp-p4k/<revision>"
+store          = "/home/you/.pocket/store"
+runtime_root   = "/home/you/.pocket/run"
+```
+
+Then the commands get short:
 
 ```sh
-export POCKET_STORE="$HOME/.pocket/store"
-export POCKET_RT="$HOME/.pocket/run"
-mkdir -p "$HOME/.pocket"
+pocket image pull --reference alpine:3.22 --platform linux/amd64 \
+  docker://docker.io/library/alpine:3.22
+pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
+```
+
+A flag always wins over the file, so you can point one command at a different
+store without editing anything. Nothing is ever guessed: a path has a default
+only because you wrote one down. The file is read from `$POCKET_CONFIG`, else
+`$XDG_CONFIG_HOME/pocket/config.toml`, else `~/.config/pocket/config.toml`.
+
+The grammar is deliberately tiny — `key = "value"`, `#` comments, blank lines —
+and anything else is refused with the file and line, so a typo can never
+silently send a command at the wrong store:
+
+```
+pocket: [E_CLI_INVALID_INPUT] invalid config:
+        /home/you/.config/pocket/config.toml:2: unknown key "stores"
+```
+
+If you would rather not use a file, pass `--profile-bundle`, `--store` and
+`--runtime-root` explicitly; omitting one without a config entry says so:
+
+```
+pocket: [E_CLI_INVALID_INPUT] invalid store: pass --store or set store in
+        /home/you/.config/pocket/config.toml
 ```
 
 Keep these paths **short**. They become AF_UNIX socket paths inside UML, so a
@@ -123,16 +242,13 @@ pocket: [E_PATH_TOO_LONG] invalid run path: managed UML path is 221 bytes; maxim
 Pull an ordinary image from a registry and run it. No special image
 preparation: this is `docker.io/library/alpine:3.22` exactly as published.
 
-```sh
-# The CLI is built at target/release/pocket. Capture it once so the rest of
-# this works from any directory.
-export POCKET=$PWD/target/release/pocket
+The rest of this guide uses the installed `pocket` and the config file that
+`make install` wrote. If you are working from the build tree instead, the
+binary is `target/release/pocket` and every command below also needs
+`--profile-bundle`, `--store` and `--runtime-root`.
 
-"$POCKET" image pull \
-  --profile-bundle "$POCKET_PROFILE_BUNDLE" \
-  --store "$POCKET_STORE" \
-  --runtime-root "$POCKET_RT" \
-  --reference alpine:3.22 --platform linux/amd64 \
+```sh
+pocket image pull --reference alpine:3.22 --platform linux/amd64 \
   docker://docker.io/library/alpine:3.22
 ```
 
@@ -144,11 +260,7 @@ in a *separate* read-only UML, and publishes it. It prints a
 Now run it, by that alias:
 
 ```sh
-"$POCKET" run \
-  --profile-bundle "$POCKET_PROFILE_BUNDLE" \
-  --store "$POCKET_STORE" \
-  --runtime-root "$POCKET_RT" \
-  alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
+pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```
 
 ```
@@ -156,13 +268,13 @@ Now run it, by that alias:
 ```
 
 That is a real Linux kernel booting, mounting the converted image, and running
-your command — with no root, no KVM, no user namespaces, and no host mounts.
+your command — with no root, no KVM, no user namespaces, and no privileged
+mounts.
 
 Ask for more vCPUs:
 
 ```sh
-"$POCKET" run --profile-bundle "$POCKET_PROFILE_BUNDLE" --store "$POCKET_STORE" \
-  --runtime-root "$POCKET_RT" --cpus 4 alpine:3.22 -- /usr/bin/nproc
+pocket run --cpus 4 alpine:3.22 -- /usr/bin/nproc
 ```
 
 ```
@@ -175,15 +287,139 @@ Docker-compatible overrides (`--entrypoint`, `--user`, `--workdir`, `-e`,
 `--umask`, `--stop-signal`). It exits with the workload's exit status, and
 reports `128+n` when the workload dies of a signal.
 
+## CPU and memory
+
+Both are per-run requests, and neither is clamped silently — if the host cannot
+honour a request you are told, rather than quietly given less.
+
+```sh
+pocket run --cpus 4 --memory 2G IMAGE -- /usr/bin/nproc
+```
+
+`--cpus` defaults to `1` and accepts up to the profile's maximum (16 in the
+shipped profile). If the host's CPU affinity or cgroup-v2 `cpu.max` cannot
+actually deliver that many in parallel, the run still proceeds and prints a
+note on stderr saying the guest will be oversubscribed.
+
+`--memory` takes a decimal size (`512M`, `2G`, `4G`) and defaults to the
+profile's own default. The guest reports the physical memory the kernel
+actually accepted, and the host refuses the run if it differs from what was
+requested — so `--memory 2G` means 2 GiB or an error, never a silent 1.5.
+
+## Sharing a folder with the host
+
+`--volume HOST_PATH:GUEST_PATH[:ro]` mounts a host directory into the guest
+through hostfs. The guest sees the host's own files rather than a copy, so what
+it writes lands on the host and **survives the run** — unlike the copy-on-write
+root.
+
+```sh
+mkdir -p ~/work
+echo 'from the host' > ~/work/input.txt
+
+pocket run --volume "$HOME/work:/data" IMAGE -- \
+  /bin/sh -c 'cat /data/input.txt && echo "from the guest" > /data/output.txt'
+
+cat ~/work/output.txt      # from the guest
+```
+
+Both paths must be absolute, and the host directory must already exist. Append
+`:ro` to mount it read-only, which the guest kernel enforces; `:rw` is the
+default and may be written out. Up to 32 volumes per run. The host path may not
+contain a colon — the first colon is the separator.
+
+The guest destination cannot collide with a path the runtime mounts or writes
+itself — `/proc`, `/sys`, `/dev`, `/run`, and the generated `/etc/hostname`,
+`/etc/hosts` and `/etc/resolv.conf`. Sharing at `/etc` is refused for that
+reason; `/etc/myconfig`, beside them, is fine:
+
+```
+pocket: [E_CLI_INVALID_INPUT] invalid volume.destination: /etc collides with
+/etc/hostname, which the runtime mounts or generates itself
+```
+
+**One caveat, from the UML HOWTO:** hostfs does not watch the host for changes.
+If you edit a file on the host *while a run is using it*, the guest may keep
+serving a stale cached copy. Write from one side at a time — set inputs up
+before the run, and read outputs after it — rather than treating the directory
+as live shared memory between host and guest.
+
+**One run at a time per directory.** A shared directory is claimed with an
+exclusive lock on the directory itself for the length of the run — nothing is
+written into your folder to take the claim, so there is nothing for a workload
+to delete and nothing left behind afterwards. A second run asking for the same
+directory is refused loudly:
+
+```
+pocket: [E_CLI_INVALID_INPUT] invalid volume.source: host path /home/you/work
+is already shared by another running pocket; one shared directory is used by
+one run at a time
+```
+
+Two guests writing one hostfs tree through independent page caches is a
+corruption that cannot be made safe, so it fails instead of being serialized or
+silently allowed. Different directories run concurrently without restriction.
+
+Taking the claim needs no write permission, so an ordinary read-only share
+works: a system data directory, or a tree deliberately made immutable, is
+claimed like any other.
+
+On a network filesystem the lock may be local to your machine, so two hosts
+sharing one directory are not excluded from each other. Within one machine the
+guarantee holds.
+
+A shared directory is your own directory, with your own permissions, and
+nothing about the immutable store applies to it: a workload can write anything
+there that you could. That is what the feature is for.
+
+## Networking
+
+There is none. `--network` accepts only `none`, and that is the default:
+
+```
+pocket: [E_FEATURE_UNSUPPORTED] feature "network-slirp" is unavailable:
+        the selected runtime exposes network-none only
+```
+
+The guest has a working loopback interface and nothing else — no host network,
+no port forwarding, no DNS. A workload that needs the network cannot run here
+yet.
+
+This is a real limitation rather than a missing flag, though not for the reason
+you might expect. Linux 7.2's UML has one network driver, `vector`, and while
+`tap` and `raw` do need privileges this runtime will not take, its **BESS**
+transport needs none — the
+[UML HOWTO](https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html)
+says so outright, and it carries Ethernet frames over an ordinary `AF_UNIX`
+socket. `l2tpv3` over UDP is unprivileged too.
+
+What is missing is the other end. Those transports give the guest an L2 pipe to
+*something*; for the guest to reach the host's network, that something has to
+be a userspace TCP/IP stack doing NAT. Supplying one means adding an
+authenticated, digest-pinned third-party dependency to the sealed profile,
+which has not been done. The transport is not the obstacle; the stack is.
+
+Until then, move data in and out over the streams or a shared folder:
+
+```sh
+# in over stdin
+tar -cf - -C ./payload . | pocket run -i IMAGE -- \
+  /bin/sh -c 'mkdir -p /w && tar -xf - -C /w && ...'
+
+# in and out over a shared folder
+pocket run --volume "$PWD/artifacts:/out" IMAGE -- /build.sh
+```
+
 ## Using a local image instead of a registry
 
 ```sh
 # an already-normalized OCI layout directory
-"$POCKET" image import ... --oci /abs/path/to/layout
+pocket image import --reference local:tag --platform linux/amd64 \
+  --oci /abs/path/to/layout
 
 # a single-image OCI or Docker archive
-"$POCKET" image import ... --oci-archive /abs/path/to/image.tar
-"$POCKET" image import ... --docker-archive /abs/path/to/saved.tar
+pocket image import ... --oci-archive /abs/path/to/image.tar
+pocket image import ... --docker-archive /abs/path/to/saved.tar
 ```
 
 `docker save`-style archives work. So do archives built by hand with
@@ -206,15 +442,14 @@ So inside the guest you have a normal read-write filesystem. `apk add`,
 the pristine base again:
 
 ```sh
-"$POCKET" run ... alpine:3.22 -- /bin/sh -c 'echo hi > /marker; cat /marker'   # hi
-"$POCKET" run ... alpine:3.22 -- /bin/sh -c 'test -e /marker || echo gone'     # gone
+pocket run alpine:3.22 -- /bin/sh -c 'echo hi > /marker; cat /marker'   # hi
+pocket run alpine:3.22 -- /bin/sh -c 'test -e /marker || echo gone'     # gone
 ```
 
-This is deliberate — it is what lets many runs share one verified base — but
-it means **there is no way to persist changes today**. To keep a change, put it
-in an image and import that image. Persistent volumes (`--volume`) are
-explicitly rejected as unimplemented, and retained overlays exist in the store
-layer but are not exposed by any command.
+This is deliberate — it is what lets many runs share one verified base. To keep
+changes to the *image itself*, build a new image and import it. To keep
+**data**, share a host folder with `--volume`: that is a real host directory and
+it persists (see [Sharing a folder with the host](#sharing-a-folder-with-the-host)).
 
 If you want the root read-only inside the guest as well, pass
 `--root-readonly`.
@@ -222,12 +457,11 @@ If you want the root read-only inside the guest as well, pass
 ## Managing the store
 
 ```sh
-"$POCKET" image inspect --profile-bundle "$POCKET_PROFILE_BUNDLE" \
-  --store "$POCKET_STORE" alpine:3.22 --json
+pocket image inspect alpine:3.22 --json
 
-"$POCKET" cache roots  --store "$POCKET_STORE"            # what is keeping generations alive
-"$POCKET" cache forget --store "$POCKET_STORE" --alias <ALIAS_ID>
-"$POCKET" cache gc     --store "$POCKET_STORE" --apply
+pocket cache roots            # what is keeping generations alive
+pocket cache forget --alias <ALIAS_ID>
+pocket cache gc     --apply
 ```
 
 A generation stays on disk while any alias points at it. `cache gc` only
@@ -240,7 +474,7 @@ generations are mode `0400` files inside `0500` directories — that is what
 remove what is in it:
 
 ```sh
-chmod -R u+rwX "$POCKET_STORE" && rm -rf "$POCKET_STORE"
+chmod -R u+rwX ~/.local/share/pocket/store && rm -rf ~/.local/share/pocket/store
 ```
 
 ## When something goes wrong
@@ -249,7 +483,7 @@ Keep the guest kernel console — it holds kernel and guest-init diagnostics
 (never your workload's output):
 
 ```sh
-"$POCKET" run ... --console-log /tmp/guest.log alpine:3.22 -- /bin/true
+pocket run --console-log /tmp/guest.log alpine:3.22 -- /bin/true
 ```
 
 It is written on success and on failure alike, which is the case it exists
@@ -261,8 +495,8 @@ workload itself.
 
 Stated plainly, so you do not go looking:
 
-- **Networking.** `--network none` only; there is no port forwarding.
-- **Persistence.** No volumes, no retained overlays (see above).
+- **Networking.** `--network none` only; there is no port forwarding. See
+  [Networking](#networking) for why.
 - **arm64.** `linux/amd64` on an x86_64 host only.
 - **Private registries.** Pulls are anonymous by design; credential flags are
   rejected.

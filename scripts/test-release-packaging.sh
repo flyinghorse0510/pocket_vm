@@ -320,6 +320,137 @@ RELEASE_ID_C=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["release_
 [[ $(find "$PREFIX/lib/pocket-vm/p/x86_64-smp-p4k" -mindepth 1 -maxdepth 1 -type d | wc -l) == 2 ]]
 [[ $(find "$PREFIX/bin" -mindepth 1 -maxdepth 1 -type f -name 'pocket-*' | wc -l) == 2 ]]
 
+# The archive has to be installable on a machine that has only the archive:
+# the installer travels inside it, and the extracted copy installs the same
+# tree as the one in this repository.
+STANDALONE_ROOT="$TEST_ROOT/standalone"
+mkdir -p -- "$STANDALONE_ROOT"
+# Exactly the two files the guide tells a recipient to take out, and no
+# directory members: the archive's directories are 0555, so selecting one
+# would leave tar unable to write into it.
+tar -xf "$ARCHIVE_A" -C "$STANDALONE_ROOT" --strip-components=2 --wildcards \
+    '*/bin/pocket-vm-install' '*/bin/pocket_release.py'
+STANDALONE_INSTALLER="$STANDALONE_ROOT/pocket-vm-install"
+[[ -x "$STANDALONE_INSTALLER" ]] || {
+    printf 'test-release-packaging: the archive carries no executable installer\n' >&2
+    exit 1
+}
+cmp -- "$STANDALONE_INSTALLER" "$ROOT/scripts/install-release.py" || {
+    printf 'test-release-packaging: the packaged installer is not the repository installer\n' >&2
+    exit 1
+}
+cmp -- "$STANDALONE_ROOT/pocket_release.py" \
+    "$ROOT/scripts/pocket_release.py" || {
+    printf 'test-release-packaging: the packaged installer library is not the repository one\n' >&2
+    exit 1
+}
+# Run it with no repository on the module path at all, which is the situation
+# on the machine that received only the tarball.
+STANDALONE_PREFIX="$TEST_ROOT/standalone-prefix"
+(
+    cd /
+    PYTHONPATH='' "$STANDALONE_INSTALLER" install \
+        --archive "$ARCHIVE_A" --prefix "$STANDALONE_PREFIX" \
+        --no-config --no-default-link >/dev/null
+)
+"$ROOT/scripts/install-release.py" verify \
+    --archive "$ARCHIVE_A" --prefix "$STANDALONE_PREFIX" >/dev/null
+
+# An install has to leave the machine ready to use: a default launcher to run,
+# and a config file naming the three paths so no command needs flags. Neither
+# may trample something the operator already has.
+CONFIG_PREFIX="$TEST_ROOT/config-prefix"
+CONFIG_HOME="$TEST_ROOT/xdg-config"
+CONFIG_FILE="$CONFIG_HOME/pocket/config.toml"
+CONFIGURED_JSON=$(
+    XDG_CONFIG_HOME="$CONFIG_HOME" \
+    "$ROOT/scripts/install-release.py" install \
+        --archive "$ARCHIVE_A" \
+        --prefix "$CONFIG_PREFIX" \
+        --store "$TEST_ROOT/configured-store" \
+        --runtime-root "$TEST_ROOT/configured-run"
+)
+python3 - "$CONFIGURED_JSON" "$CONFIG_FILE" "$CONFIG_PREFIX" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+config_file, prefix = sys.argv[2], sys.argv[3]
+assert result["config_written"] is True, result
+assert result["config"] == config_file, result
+assert result["default_launcher"] == f"{prefix}/bin/pocket", result
+assert result["changed"] is True, result
+
+body = open(config_file).read()
+assert f'profile_bundle = "{result["profile"]}"' in body, body
+assert 'store = "' in body and 'runtime_root = "' in body, body
+PY
+# The default launcher points at this release's versioned launcher.
+[[ -L "$CONFIG_PREFIX/bin/pocket" ]] || {
+    printf 'test-release-packaging: install left no default launcher link\n' >&2
+    exit 1
+}
+[[ "$(readlink "$CONFIG_PREFIX/bin/pocket")" == pocket-* ]] || {
+    printf 'test-release-packaging: default launcher does not name a versioned launcher\n' >&2
+    exit 1
+}
+# The parents of the configured store and runtime root exist, so the very first
+# command after an install does not fail on a path the installer chose.
+[[ -d "$TEST_ROOT" ]] || exit 1
+
+# A second install must not rewrite a config the operator may have edited.
+printf '# hand written\nstore = "/somewhere/else"\n' > "$CONFIG_FILE"
+SECOND_JSON=$(
+    XDG_CONFIG_HOME="$CONFIG_HOME" \
+    "$ROOT/scripts/install-release.py" install \
+        --archive "$ARCHIVE_A" --prefix "$CONFIG_PREFIX"
+)
+python3 - "$SECOND_JSON" "$CONFIG_FILE" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["config_written"] is False, result
+body = open(sys.argv[2]).read()
+assert "hand written" in body, body
+assert '/somewhere/else' in body, body
+PY
+
+# --no-config and --no-default-link leave both alone.
+BARE_PREFIX="$TEST_ROOT/bare-prefix"
+BARE_CONFIG="$TEST_ROOT/bare-config"
+BARE_JSON=$(
+    XDG_CONFIG_HOME="$BARE_CONFIG" \
+    "$ROOT/scripts/install-release.py" install \
+        --archive "$ARCHIVE_A" --prefix "$BARE_PREFIX" \
+        --no-config --no-default-link
+)
+python3 - "$BARE_JSON" <<'PY'
+import json
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["config"] is None, result
+assert result["config_written"] is False, result
+assert result["default_launcher"] is None, result
+PY
+[[ ! -e "$BARE_PREFIX/bin/pocket" ]] || {
+    printf 'test-release-packaging: --no-default-link still created a link\n' >&2
+    exit 1
+}
+[[ ! -e "$BARE_CONFIG/pocket/config.toml" ]] || {
+    printf 'test-release-packaging: --no-config still wrote a config\n' >&2
+    exit 1
+}
+# A flag that only configures the config file is refused rather than ignored.
+if "$ROOT/scripts/install-release.py" install \
+    --archive "$ARCHIVE_A" --prefix "$BARE_PREFIX" \
+    --no-config --store "$TEST_ROOT/ignored-store" >/dev/null 2>&1
+then
+    printf 'test-release-packaging: --no-config silently ignored --store\n' >&2
+    exit 1
+fi
+
 # Two installers racing to publish the same release is a race one of them wins,
 # not an error. The losers must verify what won and report that they changed
 # nothing -- and each has to discard its own already-sealed stage, which is

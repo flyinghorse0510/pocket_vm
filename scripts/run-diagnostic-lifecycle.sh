@@ -188,10 +188,25 @@ printf 'building the diagnostic kernel (this differs from the release kernel by 
 if POCKET_BUILD_ROOT="$TREE_BUILD" make -C "$TREE" kernel >"$DIAG_ROOT/kernel-first.log" 2>&1; then
     :
 else
+    # The expected first failure is the locked-digest check: a debug kernel is
+    # a different kernel, so it cannot match the release artifact. Relock to
+    # what it actually built and build again.
+    #
+    # Any other first failure -- a compiler error, a full disk -- leaves a
+    # tree with no digests at all. Relocking from that would set empty locks
+    # and the second build would fail on those instead, reporting "failed
+    # after relocking" for what was really the first log's problem. Insist on
+    # a complete pair before believing this was the digest check.
     failed=$(find "$TREE_BUILD/kernel/replaced" -maxdepth 1 -name '*.failed-build.*' -print 2>/dev/null | sort | tail -1)
     [[ -n "$failed" ]] || { sed -n '1,80p' "$DIAG_ROOT/kernel-first.log" >&2; die "diagnostic kernel build failed"; }
-    relock linux_uml_sha256 "$(awk '$2 == "linux" {print $1}' "$failed/SHA256SUMS")"
-    relock linux_uml_config_sha256 "$(awk '$2 == ".config" {print $1}' "$failed/SHA256SUMS")"
+    built_linux_sha=$(awk '$2 == "linux" {print $1}' "$failed/SHA256SUMS" 2>/dev/null)
+    built_config_sha=$(awk '$2 == ".config" {print $1}' "$failed/SHA256SUMS" 2>/dev/null)
+    if [[ ! $built_linux_sha =~ ^[0-9a-f]{64}$ || ! $built_config_sha =~ ^[0-9a-f]{64}$ ]]; then
+        tail -n 40 "$DIAG_ROOT/kernel-first.log" >&2
+        die "the diagnostic kernel did not build; see $DIAG_ROOT/kernel-first.log"
+    fi
+    relock linux_uml_sha256 "$built_linux_sha"
+    relock linux_uml_config_sha256 "$built_config_sha"
     POCKET_BUILD_ROOT="$TREE_BUILD" make -C "$TREE" kernel >"$DIAG_ROOT/kernel-second.log" 2>&1 || {
         sed -n '1,80p' "$DIAG_ROOT/kernel-second.log" >&2
         die "diagnostic kernel build failed after relocking"
@@ -335,6 +350,44 @@ grep -Fqx churn-ok "$CONSOLES/churn.stdout" || {
     failures=$((failures + 1))
 }
 scan_console churn "$CONSOLES/churn.log"
+
+# hostfs is the newest guest-kernel surface this runtime uses, and it is the
+# one a debug kernel has the most to say about: every mount, every dentry and
+# every page-cache write goes through validators that the release kernel does
+# not run. Exercise it read-write, then read-only, and scan both consoles.
+printf 'diagnostic shared-directory case\n'
+SHARED="$DIAG_ROOT/shared"
+mkdir -m 0700 -- "$SHARED"
+printf 'from the host\n' >"$SHARED/input.txt"
+"$POCKET_BIN" run --profile-bundle "$BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
+    --cpus 4 --timeout 600s --console-log "$CONSOLES/volume.log" \
+    --volume "$SHARED:/data" \
+    "$GENERATION" -- /bin/sh -c 'cat /data/input.txt && head -c 65536 /dev/urandom > /data/out.bin && sync' \
+    >"$CONSOLES/volume.stdout" 2>"$CONSOLES/volume.stderr" || failures=$((failures + 1))
+[[ $(cat "$CONSOLES/volume.stdout") == "from the host" ]] || {
+    printf 'FAIL diagnostic volume case did not read the host file\n' >&2
+    failures=$((failures + 1))
+}
+[[ $(stat -c '%s' "$SHARED/out.bin" 2>/dev/null) == 65536 ]] || {
+    printf 'FAIL diagnostic volume case did not write 65536 bytes to the host\n' >&2
+    failures=$((failures + 1))
+}
+scan_console volume "$CONSOLES/volume.log"
+
+"$POCKET_BIN" run --profile-bundle "$BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
+    --cpus 4 --timeout 600s --console-log "$CONSOLES/volume-ro.log" \
+    --volume "$SHARED:/data:ro" \
+    "$GENERATION" -- /bin/sh -c 'if touch /data/denied 2>/dev/null; then echo wrote; else echo refused; fi' \
+    >"$CONSOLES/volume-ro.stdout" 2>"$CONSOLES/volume-ro.stderr" || failures=$((failures + 1))
+[[ $(cat "$CONSOLES/volume-ro.stdout") == "refused" ]] || {
+    printf 'FAIL diagnostic read-only volume case was not refused\n' >&2
+    failures=$((failures + 1))
+}
+[[ ! -e "$SHARED/denied" ]] || {
+    printf 'FAIL diagnostic read-only volume case wrote to the host\n' >&2
+    failures=$((failures + 1))
+}
+scan_console volume-ro "$CONSOLES/volume-ro.log"
 
 printf 'console transcripts retained under %s\n' "$CONSOLES"
 (( failures == 0 )) || die "diagnostic lane recorded $failures failures"

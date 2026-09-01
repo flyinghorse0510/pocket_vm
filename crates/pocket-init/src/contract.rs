@@ -112,12 +112,6 @@ pub fn verify_start(
             "network mode slirp requires the separately qualified guest network setup",
         ));
     }
-    if !start.volumes.is_empty() {
-        return Err(InitError::unsupported(
-            "start-contract",
-            "managed volume UBD mapping is not implemented in this profile revision",
-        ));
-    }
     Ok(())
 }
 

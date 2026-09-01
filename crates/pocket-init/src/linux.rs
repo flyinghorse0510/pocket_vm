@@ -606,6 +606,21 @@ fn prepare_image_directories(config: &GuestConfig, start: &Start) -> Result<(), 
         })?;
         ensure_directory_beneath(&root, relative, 0o755)?;
     }
+    // Only the mount points are made here. The hostfs mounts themselves happen
+    // inside the workload's own mount namespace, so they are torn down with it
+    // rather than pinning the image-root bind and failing its unmount.
+    for volume in &start.volumes {
+        let relative = volume.destination.strip_prefix('/').ok_or_else(|| {
+            InitError::contract("prepare-root", "volume destination is not absolute")
+        })?;
+        if relative.is_empty() {
+            return Err(InitError::contract(
+                "prepare-root",
+                "volume destination must not be the image root",
+            ));
+        }
+        ensure_directory_beneath(&root, relative, 0o755)?;
+    }
     fs::create_dir_all(&config.newroot_mount)
         .map_err(|error| InitError::io("prepare-root", error))?;
     let mut entries = fs::read_dir(&config.newroot_mount)
@@ -617,6 +632,103 @@ fn prepare_image_directories(config: &GuestConfig, start: &Start) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+/// Mount every requested host directory into the image root through hostfs.
+///
+/// The destination is created inside the root with the same containment as any
+/// other guest path, so a volume cannot be used to write outside the image.
+/// The source is a host path: hostfs hands the guest the host's own files, so
+/// what the workload writes is visible on the host immediately and survives
+/// the run, which a copy-on-write overlay deliberately does not.
+fn mount_host_volumes(
+    root: &str,
+    start: &Start,
+    targets: &mut Vec<String>,
+) -> Result<(), InitError> {
+    for volume in &start.volumes {
+        let relative = volume.destination.strip_prefix('/').ok_or_else(|| {
+            InitError::contract("mount-volume", "volume destination is not absolute")
+        })?;
+        if relative.is_empty() {
+            return Err(InitError::contract(
+                "mount-volume",
+                "volume destination must not be the image root",
+            ));
+        }
+        // Resolve the destination inside the image root before mounting on
+        // it. `mount` follows symlinks in its target, and an absolute one in
+        // the image -- `/data -> /etc` -- resolves against the initramfs root
+        // we are still standing in, so the share would land on the wrong
+        // filesystem entirely and the teardown would unmount that. Resolving
+        // in-root first gives the path the guest itself will see.
+        let target = resolve_beneath(root, relative)?;
+        let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
+        if volume.read_only {
+            flags |= MsFlags::MS_RDONLY;
+        }
+        mount(
+            Some("none"),
+            target.as_str(),
+            Some("hostfs"),
+            flags,
+            Some(volume.source.as_str()),
+        )
+        .map_err(|error| InitError::syscall("mount-volume", error))?;
+
+        // hostfs honours MS_RDONLY only on a remount, so ask again rather than
+        // hand a workload a writable mount it was told was read-only.
+        if volume.read_only {
+            mount(
+                Some("none"),
+                target.as_str(),
+                Some("hostfs"),
+                flags | MsFlags::MS_REMOUNT,
+                Some(volume.source.as_str()),
+            )
+            .map_err(|error| InitError::syscall("mount-volume", error))?;
+        }
+        targets.push(target);
+    }
+    Ok(())
+}
+
+/// Resolve `relative` beneath `root` the way the guest will, and return the
+/// real path it names.
+///
+/// The directory itself must already exist; this only says where it is. The
+/// answer is always inside `root`, because `RESOLVE_IN_ROOT` makes an absolute
+/// symlink resolve against `root` rather than the filesystem root we are
+/// standing in, and the containment is re-checked on the returned path.
+fn resolve_beneath(root: &str, relative: &str) -> Result<String, InitError> {
+    let root_fd = open(
+        root,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| InitError::syscall("resolve-beneath", error))?;
+    let resolved = openat2(
+        &root_fd,
+        relative,
+        OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+            .resolve(ResolveFlag::RESOLVE_IN_ROOT | ResolveFlag::RESOLVE_NO_MAGICLINKS),
+    )
+    .map_err(|error| InitError::syscall("resolve-beneath", error))?;
+    let path = fs::read_link(format!("/proc/self/fd/{}", resolved.as_raw_fd()))
+        .map_err(|error| InitError::io("resolve-beneath", error))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| InitError::contract("resolve-beneath", "resolved path is not valid UTF-8"))?;
+    // RESOLVE_IN_ROOT already guarantees this; saying it again costs nothing
+    // and keeps a wrong answer from ever reaching mount().
+    if path != root && !path.starts_with(&format!("{root}/")) {
+        return Err(InitError::contract(
+            "resolve-beneath",
+            "resolved path escaped the image root",
+        ));
+    }
+    Ok(path)
 }
 
 /// Create `relative` beneath `root`, following symlinks that stay inside the
@@ -1441,6 +1553,8 @@ fn mount_workload_root(config: &GuestConfig, start: &Start) -> Result<WorkloadMo
         .map_err(|error| InitError::syscall("namespace-mounts", error))?;
         targets.push(target);
     }
+
+    mount_host_volumes(newroot, start, &mut targets)?;
 
     create_curated_devices(newroot)?;
 
@@ -2994,9 +3108,45 @@ mod tests {
         RawChildStatus, StreamPump, await_workload_release, decode_raw_wait_status,
         hostname_text_matches, loopback_flags_with_up, prepare_generated_target,
         prepare_generated_target_in_effective_root, publish_teardown_pid, read_teardown_pid,
-        recreate_devpts_mountpoint, release_workload, resolve_generated_target,
+        recreate_devpts_mountpoint, release_workload, resolve_beneath, resolve_generated_target,
         root_mount_is_private, verify_namespace_supervisor_liveness,
     };
+
+    /// `mount` follows symlinks in its target, so a share aimed at a path the
+    /// image made an absolute symlink would land on the initramfs we are still
+    /// standing in rather than on the image. Resolution happens in the image
+    /// root first, which is also what the guest itself will see.
+    #[test]
+    fn a_destination_is_resolved_inside_the_image_root() {
+        let temporary = tempdir().expect("temporary root");
+        let root = temporary.path().join("image");
+        fs::create_dir(&root).expect("create the image root");
+        fs::create_dir(root.join("etc")).expect("create etc");
+        fs::create_dir(root.join("plain")).expect("create a plain directory");
+        let root_text = root.to_str().expect("utf-8 root");
+
+        assert_eq!(
+            resolve_beneath(root_text, "plain").expect("a plain directory resolves"),
+            format!("{root_text}/plain")
+        );
+
+        // An absolute symlink resolves against the image root, not ours.
+        symlink("/etc", root.join("absolute")).expect("create an absolute symlink");
+        assert_eq!(
+            resolve_beneath(root_text, "absolute").expect("an absolute symlink resolves in root"),
+            format!("{root_text}/etc")
+        );
+
+        // A relative one that would climb out is clamped to the root as well.
+        symlink("../../../../etc", root.join("climbing")).expect("create a climbing symlink");
+        assert_eq!(
+            resolve_beneath(root_text, "climbing").expect("a climbing symlink resolves in root"),
+            format!("{root_text}/etc")
+        );
+
+        // A destination that is not there at all is an error, not a guess.
+        resolve_beneath(root_text, "absent").expect_err("an absent destination is refused");
+    }
 
     /// Drive an input pump to completion over real pipes and return what the
     /// workload side would have observed, plus whether its standard input was

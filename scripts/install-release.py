@@ -40,7 +40,144 @@ def parse_args() -> argparse.Namespace:
         child = subparsers.add_parser(command)
         child.add_argument("--archive", required=True, type=Path)
         child.add_argument("--prefix", required=True, type=Path)
+    install = subparsers.choices["install"]
+    install.add_argument(
+        "--store",
+        type=Path,
+        help="store recorded in the config file; defaults to "
+        "$XDG_DATA_HOME/pocket/store",
+    )
+    install.add_argument(
+        "--runtime-root",
+        type=Path,
+        help="runtime root recorded in the config file; defaults to "
+        "$XDG_RUNTIME_DIR/pocket/run, which is short and on tmpfs",
+    )
+    install.add_argument(
+        "--config",
+        type=Path,
+        help="config file to write; defaults to "
+        "$XDG_CONFIG_HOME/pocket/config.toml",
+    )
+    install.add_argument(
+        "--no-config",
+        action="store_true",
+        help="install without writing or updating a config file",
+    )
+    install.add_argument(
+        "--no-default-link",
+        action="store_true",
+        help="install without pointing <prefix>/bin/pocket at this release",
+    )
     return parser.parse_args()
+
+
+def default_config_path() -> Path:
+    if xdg := os.environ.get("XDG_CONFIG_HOME"):
+        return Path(xdg) / "pocket/config.toml"
+    return Path(user_home()) / ".config/pocket/config.toml"
+
+
+def default_store_path() -> Path:
+    if xdg := os.environ.get("XDG_DATA_HOME"):
+        return Path(xdg) / "pocket/store"
+    return Path(user_home()) / ".local/share/pocket/store"
+
+
+def default_runtime_root() -> Path:
+    # A runtime root on tmpfs keeps UML's own temporary files off disk, and
+    # $XDG_RUNTIME_DIR is both tmpfs and short -- managed paths are capped at
+    # 192 bytes because they become AF_UNIX socket paths inside UML.
+    if xdg := os.environ.get("XDG_RUNTIME_DIR"):
+        return Path(xdg) / "pocket/run"
+    return Path(user_home()) / ".local/state/pocket/run"
+
+
+def user_home() -> str:
+    return pwd.getpwuid(os.geteuid()).pw_dir
+
+
+def write_default_config(
+    path: Path, profile: Path, store: Path, runtime_root: Path
+) -> bool:
+    """Record the three paths so ordinary commands need no flags.
+
+    Returns whether the file was written. An existing config is never
+    overwritten: it is the operator's, and silently repointing it at a
+    different store would be exactly the surprise this project avoids.
+    """
+    for candidate in (store, runtime_root):
+        if not candidate.is_absolute() or os.path.normpath(
+            os.fspath(candidate)
+        ) != os.fspath(candidate):
+            raise ReleaseError(
+                f"configured path must be absolute and normalized: {candidate}"
+            )
+    # Make the directories that hold the store and the runtime root. Pocket
+    # creates each of those itself on first use, but not their parents, so
+    # without this the very first command after an install fails on a path
+    # this installer chose.
+    for candidate in (store, runtime_root):
+        candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if path.exists() or path.is_symlink():
+        return False
+    # 0700: this file names the profile bundle every later command trusts, so
+    # it is not left in a directory anyone else can write.
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require_absolute_normal_path(path, "config file", must_exist=False)
+    body = (
+        "# Written by install-release.py. Every command reads these, and any\n"
+        "# flag you pass still wins over them.\n"
+        f'profile_bundle = "{profile}"\n'
+        f'store = "{store}"\n'
+        f'runtime_root = "{runtime_root}"\n'
+    ).encode()
+    temporary = path.parent / f".config-{secrets.token_hex(8)}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(body)
+            output.flush()
+            os.fsync(output.fileno())
+        return publish_file_noreplace(temporary, path, exist_ok=True)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def link_default_launcher(prefix: Path, launcher: Path) -> None:
+    """Point `<prefix>/bin/pocket` at this release.
+
+    Replacing this one symlink is the whole point -- it is how an operator
+    selects which installed release is the default -- so unlike every other
+    published path it is allowed to move.
+    """
+    link = prefix / "bin/pocket"
+    # Not `require_absolute_normal_path`: this link is deliberately a symlink,
+    # which that helper exists to reject everywhere else.
+    if not link.is_absolute() or os.path.normpath(os.fspath(link)) != os.fspath(
+        link
+    ):
+        raise ReleaseError(
+            f"default launcher link must be absolute and normalized: {link}"
+        )
+    temporary = link.parent / f".pocket-{secrets.token_hex(8)}"
+    os.symlink(launcher.name, temporary)
+    try:
+        os.replace(temporary, link)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+    descriptor = os.open(
+        link.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+    )
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
@@ -96,9 +233,13 @@ def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
                     f"invoking user: {current}"
                 )
             if stat.S_IMODE(current_stat.st_mode) & 0o022:
+                mode = stat.S_IMODE(current_stat.st_mode)
                 raise ReleaseError(
                     "installation prefix component is group- or "
-                    f"other-writable: {current}"
+                    f"other-writable (mode {mode:04o}): {current}\n"
+                    f"  fix it with: chmod go-w {current}\n"
+                    "  or install somewhere else with: "
+                    "make install PREFIX=<dir>"
                 )
         if created:
             for directory in (current, current.parent):
@@ -625,6 +766,32 @@ def main() -> int:
             info,
             arguments.prefix,
         )
+        if arguments.no_default_link:
+            default_link = None
+        else:
+            link_default_launcher(arguments.prefix, launcher)
+            default_link = arguments.prefix / "bin/pocket"
+        if arguments.no_config:
+            for flag, value in (
+                ("--config", arguments.config),
+                ("--store", arguments.store),
+                ("--runtime-root", arguments.runtime_root),
+            ):
+                if value is not None:
+                    raise ReleaseError(
+                        f"{flag} configures the config file, which "
+                        "--no-config declines to write"
+                    )
+            config_path = None
+            config_written = False
+        else:
+            config_path = arguments.config or default_config_path()
+            config_written = write_default_config(
+                config_path,
+                profile,
+                arguments.store or default_store_path(),
+                arguments.runtime_root or default_runtime_root(),
+            )
     else:
         release, profile, launcher = verify(
             info, arguments.prefix
@@ -632,12 +799,19 @@ def main() -> int:
         release_changed = False
         profile_changed = False
         launcher_changed = False
+        default_link = None
+        config_path = None
+        config_written = False
     print(
         json.dumps(
             {
                 "changed": release_changed
                 or profile_changed
-                or launcher_changed,
+                or launcher_changed
+                or config_written,
+                "config": str(config_path) if config_path else None,
+                "config_written": config_written,
+                "default_launcher": str(default_link) if default_link else None,
                 "launcher": str(launcher),
                 "launcher_changed": launcher_changed,
                 "profile": str(profile),

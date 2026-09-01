@@ -96,8 +96,8 @@ umoci = "0.4.7"
 e2fsprogs = "1.47.2"
 
 [development_artifacts]
-linux_uml_sha256 = "de73a26e07af2f32997e19e7bf4efacda3b04e24a21ebb54b7c5e73717585c7d"
-linux_uml_config_sha256 = "702cd93edba8bc79c69f60ad14abea4fd646aa7122d175386ff30416927b7dd6"
+linux_uml_sha256 = "4a5a95df43ba73e7b9e13808bffd6d3af86dc6abbe117bc46a7a644482d37e7f"
+linux_uml_config_sha256 = "1e1adad52e1f9694181a3d9a007049b60457edb0a1b94746604a07db6d0e9200"
 probe_initramfs_sha256 = "4a53447c3834daee54381860931a37ea582c3072fb633c94e550073c606d451e"
 busybox_sha256 = "df12634c17fcdca839ae5dc47d7627b7558511f7645de7c99ccf097a0f28ed5b"
 umoci_sha256 = "4796f71e1dc93959b5d5c33066ee5a51542a16879df92a21fc0d6227a62d89d6"
@@ -109,7 +109,7 @@ skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b84988578
 registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
 mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
 e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-profile_template_sha256 = "c77f757e85420aa05f0f7e8a3de1d2e1f97aa00e9432e52266ea0e05ea51066e"
+profile_template_sha256 = "a4c809ee9cbe22d4004fc1eb33ca7b63d1dfba659d74cbb63fa52236c57d7c34"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

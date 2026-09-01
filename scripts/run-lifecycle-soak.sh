@@ -44,6 +44,12 @@ done
 [[ -n "$PROFILE_BUNDLE" && -d "$PROFILE_BUNDLE" ]] || usage
 [[ -n "$STORE" && -d "$STORE" ]] || usage
 [[ -n "$GENERATION" ]] || usage
+# A relative path passes the directory tests above and then fails every single
+# launch with a managed-path error, so the lane reports a hundred runtime
+# failures for what is an input mistake. Refuse it here instead.
+for path in "$PROFILE_BUNDLE" "$STORE"; do
+    [[ "$path" = /* ]] || die "profile bundle and store must be absolute: $path"
+done
 [[ -x "$POCKET_BIN" && ! -L "$POCKET_BIN" ]] || die "pocket executable is missing: $POCKET_BIN"
 [[ "$CPUS" =~ ^[1-9][0-9]*$ ]] || die "POCKET_SOAK_CPUS must be a positive integer"
 [[ "$ITERATIONS" =~ ^[1-9][0-9]*$ ]] || die "POCKET_SOAK_ITERATIONS must be a positive integer"

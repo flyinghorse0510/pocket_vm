@@ -23,6 +23,11 @@ for command in awk mkdir mktemp python3; do
 done
 [[ -n "$PROFILE_BUNDLE" && -d "$PROFILE_BUNDLE" ]] || \
     die "set POCKET_PROFILE_BUNDLE to an exact sealed profile directory"
+# A relative path passes the directory test above and then fails every single
+# launch with a managed-path error, which reads as a runtime fault rather than
+# an input mistake. Refuse it here instead.
+[[ "$PROFILE_BUNDLE" = /* ]] || \
+    die "POCKET_PROFILE_BUNDLE must be absolute: $PROFILE_BUNDLE"
 [[ -x "$POCKET_BIN" && ! -L "$POCKET_BIN" ]] || die "pocket executable is missing: $POCKET_BIN"
 safe_managed_root "$BUILD_ROOT"
 

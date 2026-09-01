@@ -6,34 +6,22 @@ pocket_vm boots an actual mainline Linux kernel per container using
 [User-Mode Linux](https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html),
 so a workload gets a genuine kernel of its own rather than a namespaced view of
 yours. It needs no root, no setuid helper, no `CAP_*`, no KVM, no user
-namespaces, and no host mounts — just an ordinary unprivileged process.
+namespaces, and no privileged mounts — just an ordinary unprivileged process.
 
 Your existing images work unchanged. Point it at anything on a registry.
 
 ## Quick start
 
 ```sh
-# Build the runtime (fetches and GPG-verifies Linux 7.2, then compiles it)
-make release-profile
+# Build and install. The build fetches and GPG-verifies Linux 7.2, compiles it,
+# then installs and writes a config file so no command needs path flags.
+make install PREFIX="$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
 
-export POCKET=$PWD/target/release/pocket
-export POCKET_PROFILE_BUNDLE=$(
-  ls -dt "$PWD"/build/profiles/x86_64-smp-p4k/*/ | head -1 | sed 's:/*$::'
-)
-export POCKET_STORE=$HOME/.pocket/store POCKET_RT=$HOME/.pocket/run
-
-# Pull an ordinary image
-"$POCKET" image pull \
-  --profile-bundle "$POCKET_PROFILE_BUNDLE" \
-  --store "$POCKET_STORE" --runtime-root "$POCKET_RT" \
-  --reference alpine:3.22 --platform linux/amd64 \
+pocket image pull --reference alpine:3.22 --platform linux/amd64 \
   docker://docker.io/library/alpine:3.22
 
-# Run it
-"$POCKET" run \
-  --profile-bundle "$POCKET_PROFILE_BUNDLE" \
-  --store "$POCKET_STORE" --runtime-root "$POCKET_RT" \
-  alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
+pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```
 
 ```
@@ -42,6 +30,17 @@ export POCKET_STORE=$HOME/.pocket/store POCKET_RT=$HOME/.pocket/run
 
 That is a Linux kernel booting, mounting the converted image, and running your
 command as an unprivileged user.
+
+Share a folder with the host, and ask for more of the machine:
+
+```sh
+pocket run --volume "$PWD:/work" --cpus 4 --memory 2G alpine:3.22 -- \
+  /bin/sh -c 'nproc && ls /work'
+```
+
+Building once and installing elsewhere? `make package` writes a single
+relocatable tarball that carries its own installer, so the receiving machine
+needs no toolchain and no checkout.
 
 Full walkthrough, prerequisites and gotchas: **[Getting started](docs/getting-started.md)**.
 
@@ -70,8 +69,9 @@ Full walkthrough, prerequisites and gotchas: **[Getting started](docs/getting-st
    a fresh copy-on-write overlay on top of it.
 
 Writes inside the container go to that overlay, so `apk add` works — but the
-overlay is discarded when the run ends. Persisting changes means building a new
-image.
+overlay is discarded when the run ends. To keep data, share a host directory
+with `--volume /host/dir:/guest/dir`; it is the host's own folder, so writes
+land there and survive.
 
 ## Status
 
@@ -91,8 +91,8 @@ than trust it:
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** networking, persistent volumes, arm64, private registries,
-and interactive TTYs. This is a runtime for workloads you already trust — it is
+**Not supported:** networking, arm64, private registries, and interactive
+TTYs. This is a runtime for workloads you already trust — it is
 deliberately **not** a security boundary against hostile code.
 
 ## Upstream kernel fix

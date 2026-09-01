@@ -892,8 +892,8 @@ Define deterministic Docker-compatible behavior:
 
 - The root is ephemeral and writable through COW by default.
 - A read-only-root option exposes the composed image root read-only to the workload after the bounded preparation step; runtime-generated files, curated `/dev`, `/run`, fixed-policy `/dev/shm` and kernel pseudo-filesystems are separate guest mounts with their own explicit flags. Image `/tmp` is not an implicit exception. The profile-bound capability drop and curated `/dev` make the image-root policy enforceable even for trusted guest UID 0 rather than merely advisory.
-- Persistent managed volumes are explicitly rejected in the MVP. A later version must define a name-to-file registry, immutable format/identity record, exclusive-writer lease (or a qualified clustered filesystem), deterministic UBD slot mapping, START reconciliation, destination-conflict and mount-flag policy, dirty-shutdown/fsck recovery, and crash-safe detach before exposing `--volume`.
-- Host-directory bind mounts are not in the MVP. Copy-in may construct a read-only payload UBD from an explicitly supplied directory.
+- Persistent managed volumes -- named, UBD-backed, with their own lifecycle -- remain rejected. A later version must define a name-to-file registry, immutable format/identity record, exclusive-writer lease (or a qualified clustered filesystem), deterministic UBD slot mapping, START reconciliation, destination-conflict and mount-flag policy, dirty-shutdown/fsck recovery, and crash-safe detach before any of that is exposed.
+- Host-directory sharing *is* implemented, through hostfs rather than a second block device, and needs none of that machinery: `--volume HOST:GUEST[:ro]` hands the guest the caller's own directory. One directory is used by one run at a time, enforced by an exclusive lock on the directory itself, and a second run is refused by name rather than serialized. What hostfs does not give is coherence with host-side changes, which the UML HOWTO states outright.
 - Stdin/stdout streaming is the simplest small-data interface.
 - Committing root.cow to an OCI image is a future feature, not a rename operation.
 
@@ -999,11 +999,12 @@ Before each conversion and run, apply a best-effort admission margin using curre
 
 ## Trust assumptions and engineering hygiene
 
-The runtime deliberately trusts the guest. UML's cooperative backend is unsuitable for hostile code, and hostfs-style facilities could expose host data if enabled. Therefore:
+The runtime deliberately trusts the guest. UML's cooperative backend is unsuitable for hostile code, and hostfs exposes real host data to it. Therefore:
 
 - do not market the product as a sandbox, tenant boundary, or security isolation;
 - do not accept untrusted public workloads under this profile;
-- keep HOSTFS, modules and unused host-facing devices off by default to reduce accidents and variability;
+- keep modules and unused host-facing devices off, and mount nothing from the host unless a `--volume` explicitly names it: HOSTFS is built in for that feature, but a run with no volume request mounts none of it, so the default remains a guest that can reach nothing of the host's;
+- treat a shared directory as host state with host permissions, outside everything the immutable store guarantees: a workload can write there anything the invoking user could, which is the purpose of the feature and the caller's judgement to make;
 - use digest verification, TLS policy and immutable cache records for integrity and reproducibility, not as a claim that guest code is contained;
 - use private directories, CLOEXEC, explicit FDs, atomic publication, bounded protocols, and exact cleanup to prevent ordinary bugs and cross-run confusion;
 - validate formats and sizes because trusted inputs can still be truncated, corrupt, incompatible, or operationally excessive;

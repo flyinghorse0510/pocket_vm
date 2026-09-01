@@ -1391,7 +1391,9 @@ fn validate_kernel_config(path: &Path, cpu: &CpuManifest) -> Result<(), Manifest
         ("CONFIG_PID_NS", "y"),
         ("CONFIG_SSL", "y"),
         ("CONFIG_NULL_CHAN", "y"),
-        ("CONFIG_HOSTFS", "n"),
+        // Required by `--volume`: hostfs is how a host directory is shared
+        // into the guest.
+        ("CONFIG_HOSTFS", "y"),
         ("CONFIG_MCONSOLE", "n"),
         ("CONFIG_MODULES", "n"),
         ("CONFIG_UML_NET_VECTOR", "n"),
@@ -2080,12 +2082,12 @@ mod tests {
             "CONFIG_NULL_CHAN",
             "CONFIG_DEBUG_INFO_NONE",
             "CONFIG_SMP",
+            "CONFIG_HOSTFS",
         ];
         let no = [
             "CONFIG_BLK_DEV_UBD_SYNC",
             "CONFIG_BLK_DEV_LOOP",
             "CONFIG_BLK_DEV_NBD",
-            "CONFIG_HOSTFS",
             "CONFIG_MCONSOLE",
             "CONFIG_MODULES",
             "CONFIG_UML_NET_VECTOR",

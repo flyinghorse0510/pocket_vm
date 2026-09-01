@@ -32,7 +32,10 @@ pub use manifest::{
 };
 /// The bound the runtime applies to an image `User` value, re-exported so a
 /// caller can reject an oversized one before opening anything.
-pub use pocket_protocol::MAX_ORIGINAL_USER_LENGTH;
+pub use pocket_protocol::{
+    MAX_ORIGINAL_USER_LENGTH, MAX_VOLUME_COUNT, RESERVED_GUEST_PATHS, VolumeSpec,
+    reserved_guest_path_conflict,
+};
 pub use profile_seal::{
     ProfileArtifactSources, ProfileSealRequest, SealedProfile, seal_profile_bundle,
 };

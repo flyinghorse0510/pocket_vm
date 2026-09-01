@@ -23,6 +23,7 @@ use nix::{
 use pocket_core::{ManagedUmlPath, ParsedMemory};
 use pocket_protocol::{
     Exit, MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, Ready, ResourceLimit, Start, ValidateMessage,
+    VolumeSpec,
 };
 use pocket_store::{AliasKey, Digest, GenerationId, GenerationSpec, Lease, Store};
 use sha2::{Digest as _, Sha256};
@@ -51,6 +52,10 @@ pub struct WorkloadSpec {
     pub rlimits: Vec<ResourceLimit>,
     pub hostname: String,
     pub root_read_only: bool,
+    /// Host directories to share into the guest, already validated and
+    /// canonicalized by the caller, and held under an exclusive lock for the
+    /// life of the run.
+    pub volumes: Vec<VolumeSpec>,
     pub stop_signal: u16,
 }
 
@@ -1297,7 +1302,7 @@ fn build_start(
         rlimits: workload.rlimits.clone(),
         hostname: workload.hostname.clone(),
         root_read_only: workload.root_read_only,
-        volumes: Vec::new(),
+        volumes: workload.volumes.clone(),
         terminal: false,
         network_mode: 0,
         stop_signal: workload.stop_signal,

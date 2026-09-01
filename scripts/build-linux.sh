@@ -35,7 +35,7 @@ prepared_source=$("$ROOT/scripts/apply-linux-patches.sh")
 
 preserve_generated_tree "$BUILD_STAGING" "$RECOVERY_DIR" x86_64-smp-p4k.interrupted-build
 preserve_generated_tree "$BUILD_HOME" "$RECOVERY_DIR" linux-build-home.interrupted
-mkdir -p -- "$BUILD_STAGING" "$BUILD_HOME"
+mkdir -p -- "$BUILD_STAGING" "$BUILD_HOME" "$BUILD_HOME/tmp"
 BUILD_PUBLISHED=0
 preserve_failed_build() {
     if [[ $BUILD_PUBLISHED -eq 0 && ( -e $BUILD_STAGING || -L $BUILD_STAGING ) ]]; then
@@ -49,10 +49,18 @@ trap preserve_failed_build EXIT
 
 BUILD_TIMESTAMP=$(date --utc --date="@$LINUX_SOURCE_DATE_EPOCH" '+%a %b %d %H:%M:%S UTC %Y')
 BUILD_PATH=$PATH
+# TMPDIR is set deliberately. A parallel kernel build writes a great deal
+# through the compiler's temporary directory, and left to default to /tmp it
+# competes with whatever else the host keeps there; a full or quota-limited
+# /tmp then fails the build with an error from inside gcc that reads as a
+# source problem. The path is derived from the build root, so the environment
+# stays as deterministic as `env -i` makes it, and it is removed with the rest
+# of the build home.
 run_build_command() {
     env -i \
         HOME="$BUILD_HOME" \
         PATH="$BUILD_PATH" \
+        TMPDIR="$BUILD_HOME/tmp" \
         LC_ALL=C \
         TZ=UTC0 \
         ARCH=um \

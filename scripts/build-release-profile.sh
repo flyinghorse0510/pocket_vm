@@ -154,7 +154,7 @@ CARGO_TARGET_DIR="$SEALER_TARGET_DIR" cargo build --locked --release -p pocket
 POCKET="$SEALER_TARGET_DIR/release/pocket"
 [[ -x "$POCKET" ]] || die "pocket profile sealer was not built"
 
-"$POCKET" profile seal \
+SEAL_JSON=$("$POCKET" profile seal \
     --template "$TEMPLATE" \
     --output-parent "$OUTPUT_PARENT" \
     --guard "$RELEASE_DIR/host/pocket-guard" \
@@ -171,4 +171,14 @@ POCKET="$SEALER_TARGET_DIR/release/pocket"
     --kernel-config "$KERNEL_DIR/.config" \
     --umoci-sha256 "$UMOCI_SHA256" \
     --umoci-version "$UMOCI_VERSION" \
-    --json
+    --json)
+printf '%s\n' "$SEAL_JSON"
+
+# Record which bundle this build sealed. Every build publishes a new revision
+# beside the old ones, so "the newest directory" is a guess that has already
+# picked a stale profile once; this is the answer.
+BUNDLE=$(printf '%s' "$SEAL_JSON" |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["bundle"])')
+[[ -d "$BUNDLE" ]] || die "sealed bundle path is not a directory: $BUNDLE"
+printf '%s\n' "$BUNDLE" > "$OUTPUT_PARENT/.latest.$$"
+mv -- "$OUTPUT_PARENT/.latest.$$" "$OUTPUT_PARENT/latest"

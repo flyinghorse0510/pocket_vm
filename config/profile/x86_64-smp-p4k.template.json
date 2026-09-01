@@ -42,6 +42,7 @@
       "fixed-capabilities-v1",
       "generated-etc-v1",
       "generation-marker-v3",
+      "host-volumes-v1",
       "loopback-ipv4-v1",
       "namespace-mounts",
       "nested-pidns",

@@ -286,12 +286,12 @@ fn kernel_config() -> String {
         "CONFIG_NULL_CHAN",
         "CONFIG_DEBUG_INFO_NONE",
         "CONFIG_SMP",
+        "CONFIG_HOSTFS",
     ];
     let no = [
         "CONFIG_BLK_DEV_UBD_SYNC",
         "CONFIG_BLK_DEV_LOOP",
         "CONFIG_BLK_DEV_NBD",
-        "CONFIG_HOSTFS",
         "CONFIG_MCONSOLE",
         "CONFIG_MODULES",
         "CONFIG_UML_NET_VECTOR",

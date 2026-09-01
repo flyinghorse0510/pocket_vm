@@ -73,8 +73,13 @@ CONFIG_CON_ZERO_CHAN="fd:0,fd:1"
 CONFIG_CON_CHAN="null"
 CONFIG_SSL_CHAN="null"
 
-# The baseline exposes no host filesystem or out-of-band management channel.
-# CONFIG_HOSTFS is not set
+# No out-of-band management channel, and no loadable code.
+# Host directory sharing. This is how `--volume` gives a workload a real host
+# folder rather than a copy: the guest mounts hostfs on an explicitly named
+# host path. It grants the guest exactly the access the invoking user already
+# has, which is consistent with a runtime that is deliberately not a boundary
+# against hostile code, and nothing is mounted unless a volume asks for it.
+CONFIG_HOSTFS=y
 # CONFIG_MCONSOLE is not set
 # CONFIG_MODULES is not set
 # CONFIG_UML_TIME_TRAVEL_SUPPORT is not set

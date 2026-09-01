@@ -27,6 +27,26 @@ host CLI must be a non-group-writable, executable, little-endian x86_64 ELF
 file. The package also includes both project license texts, Cargo.lock,
 config/sources.lock.toml, these release notes, and a generated SPDX file.
 
+The installer travels inside the archive it installs, so a machine holding
+only the tarball can still perform the digest-checked install rather than an
+unpacking that skips every check. Its one import sits beside it in bin/,
+because Python puts a script's own directory on the module path and nothing
+else about an extracted tree is guaranteed to be there. Take the two out and
+run the installer:
+
+    tar -xf pocket-vm-....tar --strip-components=2 --wildcards \
+      '*/bin/pocket-vm-install' '*/bin/pocket_release.py'
+    ./pocket-vm-install install --archive pocket-vm-....tar --prefix "$HOME/.local"
+
+Both files are part of the payload inventory, so editing either changes the
+release revision and the archive name.
+
+Unpacking the whole archive by hand is not a supported install path. Archive
+directories are 0555, mirroring the read-only tree the installer publishes,
+so a plain `tar -xf` fails part-way: it creates each directory read-only
+before writing what belongs in it. `--delay-directory-restore` unpacks it,
+but the result is unverified, has no launcher and no configuration.
+
 The output is a single uncompressed USTAR file. Publication uses an adjacent
 temporary file and a no-replace hard-link operation; an existing archive is
 never replaced. Every tar member has UID/GID 0, empty owner names, a mode of
@@ -38,6 +58,8 @@ Inside the archive:
 
     pocket-vm-<version>-<profile-id>-<full-release-revision>/
     |-- bin/pocket
+    |-- bin/pocket-vm-install          (scripts/install-release.py)
+    |-- bin/pocket_release.py          (its one import, beside it)
     |-- profiles/<profile-id>/<full-revision>/...
     +-- share/
         |-- licenses/pocket-vm/{LICENSE-APACHE,LICENSE-MIT}
@@ -126,11 +148,22 @@ A revision-specific launcher is created at:
 
     <prefix>/bin/pocket-<version>-<profile-id>-<full-release-revision>
 
-The launcher does not inject a profile silently. Continue to pass the exact
-installed --profile-bundle path shown in the installer's JSON output. An
-identical reinstall is an idempotent verification. An existing release tree
-or launcher that differs in any byte, mode, timestamp, or inventory entry is
-an error and is never overwritten.
+The launcher does not inject a profile silently. It passes no path of its
+own; what makes the flags unnecessary is a separate config file, written once
+at install time and readable in full:
+
+    $XDG_CONFIG_HOME/pocket/config.toml      (default ~/.config/pocket/config.toml)
+
+It names the installed profile, a store under $XDG_DATA_HOME and a runtime
+root under $XDG_RUNTIME_DIR, whose parents the installer creates with mode
+0700. An explicit flag always overrides it. An existing config is never
+overwritten -- a reinstall reports config_written false and leaves the file
+alone -- and --store, --runtime-root, --config or --no-config choose
+otherwise. The installer creates no other host state.
+
+An identical reinstall is an idempotent verification. An existing release
+tree or launcher that differs in any byte, mode, timestamp, or inventory
+entry is an error and is never overwritten.
 
 Profile publication happens before release-tree publication, and the
 versioned launcher is last. Each immutable tree is staged and published
@@ -140,11 +173,15 @@ consumer, but never a partially populated published tree. Re-running the
 same install verifies and reuses each valid tree before completing the next
 step.
 
-There is deliberately no installer-managed unversioned pocket link and no
-mutable current pointer. Rollback means invoking the launcher and exact
-profile path of a previously installed revision. Removal is not implemented;
-retain an archive and successful verification record before manually
-removing a versioned tree.
+<prefix>/bin/pocket is a symlink to that versioned launcher, and it is the
+one deliberately replaceable thing the installer publishes: rollback is
+repointing it at an earlier launcher, which is also what a reinstall of an
+earlier archive does. --no-default-link skips it. Every immutable tree stays
+exactly where it was, so an older revision remains runnable by its own
+launcher path whatever the link says.
+
+Removal is not implemented; retain an archive and successful verification
+record before manually removing a versioned tree.
 
 ## Local packaging test
 
@@ -152,5 +189,9 @@ scripts/test-release-packaging.sh constructs a small synthetic sealed profile,
 produces the package twice in separate directories, compares the archives
 byte-for-byte, installs and verifies it, exercises idempotent installation,
 and checks representative fail-closed corruption/link/foreign inventory
-cases. It does not replace the real-UML or clean-host release qualification
-matrix.
+cases. It also takes the installer out of the archive and installs with it,
+with no repository on the module path, which is the situation on a machine
+that received only the tarball; and it checks that the install writes a
+config file and a default link, that a second install rewrites neither, and
+that --no-config and --no-default-link leave both alone. It does not replace
+the real-UML or clean-host release qualification matrix.

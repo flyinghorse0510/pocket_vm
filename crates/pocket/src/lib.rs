@@ -24,6 +24,7 @@ use pocket_oci::{
     AcquisitionDirectory, SkopeoExecutionPolicy, SkopeoNormalizer, SkopeoOutput, SkopeoPlatform,
     SkopeoSource, SkopeoSourceKind, VerifiedImage,
 };
+use pocket_runtime::VolumeSpec;
 use pocket_runtime::{
     BuildOutput, BuildRequest, BuilderPolicy, BuilderToolContract, HostBuildError, HostBuilder,
     ImageArgv, ImageProcessOverrides, ManifestError, ProfileArtifactSources, ProfileMaturity,
@@ -51,7 +52,8 @@ const SIGNAL_EXIT_BASE: u16 = 128;
     about = "Run trusted, networkless workloads under verified User-Mode Linux artifacts",
     long_about = "Run trusted, networkless workloads under verified User-Mode Linux artifacts.\n\n\
 This build is intentionally strict: registry pulls are anonymous and explicit, and it does not support \
-slirp networking, managed volumes, PTYs, cpusets, or installed-profile discovery. Run resolves \
+slirp networking, PTYs, cpusets, or installed-profile discovery. Sharing a host directory is supported \
+with --volume; persistent named volumes are not. Run resolves \
 Entrypoint/Cmd/Env/User/WorkingDir/StopSignal only from hash-verified generation sidecars. \
 Unsupported requests fail before profile or store access. \
 Run only trusted images and workloads: this UML configuration is not a hostile-code sandbox."
@@ -258,19 +260,22 @@ enum CacheCommand {
 
 #[derive(Debug, Clone, Args)]
 struct StoreArgs {
-    /// Existing initialized Pocket store root.
+    /// Existing initialized Pocket store root. Defaults to `store` in the
+    /// config file.
     #[arg(long, value_name = "PATH")]
-    store: PathBuf,
+    store: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
 struct ProfileStoreArgs {
-    /// Exact verified profile bundle directory.
+    /// Exact verified profile bundle directory. Defaults to `profile_bundle`
+    /// in the config file.
     #[arg(long, value_name = "PATH")]
-    profile_bundle: PathBuf,
-    /// Existing initialized Pocket store root.
+    profile_bundle: Option<PathBuf>,
+    /// Existing initialized Pocket store root. Defaults to `store` in the
+    /// config file.
     #[arg(long, value_name = "PATH")]
-    store: PathBuf,
+    store: Option<PathBuf>,
     /// Optional native selector assertion: OS/ARCHITECTURE[/VARIANT].
     #[arg(long, value_name = "PLATFORM")]
     platform: Option<String>,
@@ -278,15 +283,18 @@ struct ProfileStoreArgs {
 
 #[derive(Debug, Clone, Args)]
 struct ImageBuildArgs {
-    /// Exact verified profile bundle directory.
+    /// Exact verified profile bundle directory. Defaults to `profile_bundle`
+    /// in the config file.
     #[arg(long, value_name = "PATH")]
-    profile_bundle: PathBuf,
+    profile_bundle: Option<PathBuf>,
     /// Existing valid store, or an absent path to initialize atomically.
+    /// Defaults to `store` in the config file.
     #[arg(long, value_name = "PATH")]
-    store: PathBuf,
-    /// Private mode-0700 root for acquisition and builder operation directories.
+    store: Option<PathBuf>,
+    /// Private mode-0700 root for acquisition and builder operation
+    /// directories. Defaults to `runtime_root` in the config file.
     #[arg(long, value_name = "PATH")]
-    runtime_root: PathBuf,
+    runtime_root: Option<PathBuf>,
     /// Exact profile-qualified alias reference to update after publication.
     #[arg(long, value_name = "REFERENCE")]
     reference: String,
@@ -317,15 +325,18 @@ enum PullPolicy {
 
 #[derive(Debug, Args)]
 struct RunArgs {
-    /// Exact verified profile bundle directory; no implicit default exists yet.
+    /// Exact verified profile bundle directory. Defaults to `profile_bundle`
+    /// in the config file.
     #[arg(long, value_name = "PATH")]
-    profile_bundle: PathBuf,
-    /// Existing initialized Pocket store root.
+    profile_bundle: Option<PathBuf>,
+    /// Existing initialized Pocket store root. Defaults to `store` in the
+    /// config file.
     #[arg(long, value_name = "PATH")]
-    store: PathBuf,
+    store: Option<PathBuf>,
     /// Private runtime root used for this process's run directories.
+    /// Defaults to `runtime_root` in the config file.
     #[arg(long, value_name = "PATH")]
-    runtime_root: PathBuf,
+    runtime_root: Option<PathBuf>,
     /// Optional native selector assertion: OS/ARCHITECTURE[/VARIANT].
     #[arg(long, value_name = "PLATFORM")]
     platform: Option<String>,
@@ -347,8 +358,11 @@ struct RunArgs {
     /// Only `none` is implemented.
     #[arg(long, value_enum, default_value = "none")]
     network: NetworkMode,
-    /// Unsupported managed volume request.
-    #[arg(long, value_name = "NAME:DEST")]
+    /// Share a host directory into the guest: HOST_PATH:GUEST_PATH[:ro|:rw].
+    /// Both paths must be absolute; the host path must already exist and may
+    /// not contain a colon. Writes are visible on the host immediately and
+    /// outlive the run. `:rw` is the default.
+    #[arg(long, value_name = "HOST_PATH:GUEST_PATH[:ro]")]
     volume: Vec<String>,
     /// Unsupported port-forward request.
     #[arg(short = 'p', long = "publish", value_name = "FORWARD")]
@@ -558,12 +572,72 @@ fn render_parse_error(error: clap::Error, stdout: &mut dyn Write, stderr: &mut d
     }
 }
 
+/// Fill unset path arguments from the config file. A flag that was given is
+/// never overridden.
+fn apply_config(command: &mut Command, config: &Config) {
+    let fill = |slot: &mut Option<PathBuf>, value: &Option<PathBuf>| {
+        if slot.is_none() {
+            slot.clone_from(value);
+        }
+    };
+    match command {
+        Command::Run(arguments) => {
+            fill(&mut arguments.profile_bundle, &config.profile_bundle);
+            fill(&mut arguments.store, &config.store);
+            fill(&mut arguments.runtime_root, &config.runtime_root);
+        }
+        Command::Image { command } => match command {
+            ImageCommand::Pull { context, .. } | ImageCommand::Import { context, .. } => {
+                fill(&mut context.profile_bundle, &config.profile_bundle);
+                fill(&mut context.store, &config.store);
+                fill(&mut context.runtime_root, &config.runtime_root);
+            }
+            ImageCommand::Inspect { context, .. } => {
+                fill(&mut context.profile_bundle, &config.profile_bundle);
+                fill(&mut context.store, &config.store);
+            }
+            ImageCommand::List => {}
+        },
+        Command::Generation { command } => match command {
+            GenerationCommand::Inspect { store, .. } | GenerationCommand::List { store, .. } => {
+                fill(&mut store.store, &config.store);
+            }
+        },
+        Command::Cache { command } => match command {
+            CacheCommand::Gc { store, .. }
+            | CacheCommand::Roots { store, .. }
+            | CacheCommand::Forget { store, .. } => fill(&mut store.store, &config.store),
+        },
+        Command::Profile { .. } => {}
+    }
+}
+
+/// A path argument that must be set by now, with a message naming both ways to
+/// supply it.
+fn required_path<'a>(
+    value: &'a Option<PathBuf>,
+    flag: &'static str,
+    key: &'static str,
+) -> Result<&'a Path, CliError> {
+    value.as_deref().ok_or_else(|| {
+        let location = Config::path().map_or_else(
+            || "a config file".to_owned(),
+            |path| path.display().to_string(),
+        );
+        invalid(flag, format!("pass --{flag} or set {key} in {location}"))
+    })
+}
+
 fn execute(
     cli: Cli,
     stdin: &mut dyn Read,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
+    let mut cli = cli;
+    // Fill any path the caller did not give from the config file, once, before
+    // anything is opened. A flag always wins; nothing is ever guessed.
+    apply_config(&mut cli.command, &Config::load()?);
     match cli.command {
         Command::Profile { command } => execute_profile(command, stdout),
         Command::Image { command } => execute_image(command, stdout),
@@ -657,9 +731,13 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
             json,
         } => {
             let target = target_kind(&target)?;
-            let profile = load_profile(&context.profile_bundle)?;
+            let profile = load_profile(required_path(
+                &context.profile_bundle,
+                "profile-bundle",
+                "profile_bundle",
+            )?)?;
             let requested_platform = requested_platform(&profile, context.platform.as_deref())?;
-            let store = open_store(&context.store)?;
+            let store = open_store(required_path(&context.store, "store", "store")?)?;
             let lease = lease_target(&store, &profile, target, requested_platform.clone())?;
             validate_generation_profile(&profile, lease.generation())?;
             validate_requested_platform(&requested_platform, lease.generation())?;
@@ -709,10 +787,18 @@ fn execute_image_import(
     };
     validate_import_path_syntax(source_path)?;
 
-    let profile = load_profile(&context.profile_bundle)?;
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
     let requested = requested_platform(&profile, Some(&context.platform))?;
-    let store = open_or_initialize_store(&context.store)?;
-    let runtime_root = managed_path(&context.runtime_root)?;
+    let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
+    let runtime_root = managed_path(required_path(
+        &context.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
     let builder = HostBuilder::new(
         &profile,
         &store,
@@ -793,10 +879,18 @@ fn execute_image_pull(
     validate_evidence_path(context.evidence_out.as_deref())?;
     let acquisition_timeout = parse_duration(acquisition_timeout)?;
 
-    let profile = load_profile(&context.profile_bundle)?;
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
     let requested = requested_platform(&profile, Some(&context.platform))?;
-    let store = open_or_initialize_store(&context.store)?;
-    let runtime_root = managed_path(&context.runtime_root)?;
+    let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
+    let runtime_root = managed_path(required_path(
+        &context.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
     let builder = HostBuilder::new(
         &profile,
         &store,
@@ -849,7 +943,7 @@ fn execute_generation(
     match command {
         GenerationCommand::Inspect { store, id, json } => {
             let id = parse_generation_id(&id)?;
-            let store = open_store(&store.store)?;
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
             let lease = store.acquire_lease(id)?;
             let summary = generation_summary(lease.generation());
             if json {
@@ -865,7 +959,7 @@ fn execute_generation(
             json,
         } => {
             let derivation = parse_derivation_key(&derivation)?;
-            let store = open_store(&store.store)?;
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
             let generations = store.generations_for_derivation(derivation)?;
             let summaries: Vec<Value> = generations.iter().map(generation_summary).collect();
             write_generation_output(stdout, &summaries, json)?;
@@ -883,13 +977,13 @@ fn execute_cache(command: CacheCommand, stdout: &mut dyn Write) -> Result<Comman
                     "the store currently exposes only an atomic apply operation; no deletion occurred",
                 ));
             }
-            let store = open_store(&store.store)?;
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
             let report = store.garbage_collect()?;
             write_gc_output(stdout, &report, json)?;
             Ok(CommandStatus::SUCCESS)
         }
         CacheCommand::Roots { store, json } => {
-            let store = open_store(&store.store)?;
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
             write_alias_roots_output(stdout, &store.alias_roots()?, json)?;
             Ok(CommandStatus::SUCCESS)
         }
@@ -900,7 +994,7 @@ fn execute_cache(command: CacheCommand, stdout: &mut dyn Write) -> Result<Comman
                     "must be an alias ID as printed by `pocket cache roots`",
                 )
             })?;
-            let store = open_store(&store.store)?;
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
             let removed = store.remove_alias_by_id(alias)?;
             writeln!(stdout, "alias={alias} removed={removed}")
                 .map_err(|source| output_error("write alias removal output", source))?;
@@ -964,7 +1058,11 @@ fn execute_run(
     } else {
         Vec::new()
     };
-    let profile = load_profile(&arguments.profile_bundle)?;
+    let profile = load_profile(required_path(
+        &arguments.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
     let requested_platform = requested_platform(&profile, arguments.platform.as_deref())?;
     let memory = match requested_memory {
         Some(memory) => memory,
@@ -989,7 +1087,7 @@ fn execute_run(
             field: "memory",
             reason: error.to_string(),
         })?;
-    let store = open_store(&arguments.store)?;
+    let store = open_store(required_path(&arguments.store, "store", "store")?)?;
     let lease = lease_target(&store, &profile, target, requested_platform.clone())?;
     validate_generation_profile(&profile, lease.generation())?;
     validate_requested_platform(&requested_platform, lease.generation())?;
@@ -1020,7 +1118,14 @@ fn execute_run(
         },
     )?;
     validate_guest_path("workdir", &process.working_dir)?;
-    let runtime_root = managed_path(&arguments.runtime_root)?;
+    // Held until the run ends: dropping these releases each shared directory
+    // for the next run.
+    let volumes = hold_volumes(&arguments.volume)?;
+    let runtime_root = managed_path(required_path(
+        &arguments.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
     let policy = RuntimePolicy {
         execution_timeout,
         ..RuntimePolicy::default()
@@ -1040,6 +1145,7 @@ fn execute_run(
             rlimits: Vec::new(),
             hostname: arguments.hostname,
             root_read_only: arguments.root_readonly,
+            volumes: volumes.iter().map(|held| held.spec.clone()).collect(),
             stop_signal: process.stop_signal,
         },
         stdin: input,
@@ -1068,6 +1174,249 @@ fn archive_normalization_timeout(archive_bytes: u64) -> Duration {
         .min(CEILING)
 }
 
+/// Defaults for the three paths every command needs, read from a config file.
+///
+/// Requiring `--profile-bundle`, `--store` and `--runtime-root` on every single
+/// invocation is friction with no safety value: the flags still win when given,
+/// and nothing is guessed -- a path only has a default because the operator
+/// wrote one down.
+#[derive(Debug, Default)]
+struct Config {
+    profile_bundle: Option<PathBuf>,
+    store: Option<PathBuf>,
+    runtime_root: Option<PathBuf>,
+}
+
+impl Config {
+    /// `$POCKET_CONFIG`, else `$XDG_CONFIG_HOME/pocket/config.toml`, else
+    /// `$HOME/.config/pocket/config.toml`.
+    fn path() -> Option<PathBuf> {
+        if let Some(explicit) = std::env::var_os("POCKET_CONFIG") {
+            return Some(PathBuf::from(explicit));
+        }
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+            && !xdg.is_empty()
+        {
+            return Some(PathBuf::from(xdg).join("pocket/config.toml"));
+        }
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/pocket/config.toml"))
+    }
+
+    fn load() -> Result<Self, CliError> {
+        let Some(path) = Self::path() else {
+            return Ok(Self::default());
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => {
+                return Err(invalid(
+                    "config",
+                    format!("cannot read {}: {error}", path.display()),
+                ));
+            }
+        };
+        Self::parse(&text, &path)
+    }
+
+    /// A deliberately small grammar: `key = "value"`, `#` comments, blank
+    /// lines. Anything else is refused and named rather than guessed at, so a
+    /// typo in a config file can never silently change which store is used.
+    fn parse(text: &str, path: &Path) -> Result<Self, CliError> {
+        let mut config = Self::default();
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let at = |reason: &str| {
+                invalid(
+                    "config",
+                    format!("{}:{}: {reason}", path.display(), index + 1),
+                )
+            };
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(at("expected key = \"value\""));
+            };
+            let value = value.trim();
+            let Some(value) = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+            else {
+                return Err(at(
+                    "value must be double-quoted, with nothing after the closing quote",
+                ));
+            };
+            if value.contains('\\') || value.contains('"') {
+                return Err(at("value must not contain quotes or escapes"));
+            }
+            let slot = match key.trim() {
+                "profile_bundle" => &mut config.profile_bundle,
+                "store" => &mut config.store,
+                "runtime_root" => &mut config.runtime_root,
+                other => return Err(at(&format!("unknown key {other:?}"))),
+            };
+            if slot.is_some() {
+                return Err(at(&format!("duplicate key {:?}", key.trim())));
+            }
+            *slot = Some(PathBuf::from(value));
+        }
+        Ok(config)
+    }
+}
+
+/// One host directory to share, plus the lock that keeps it to a single run.
+#[derive(Debug)]
+struct HeldVolume {
+    spec: VolumeSpec,
+    _lock: std::fs::File,
+}
+
+/// Parse and validate `HOST_PATH:GUEST_PATH[:ro]`, then take an exclusive lock
+/// on the host directory.
+///
+/// Concurrent use of one shared directory is refused rather than serialized or
+/// silently allowed: two guests writing one hostfs tree with independent page
+/// caches is a corruption the runtime cannot make safe, so it fails loudly and
+/// names the directory.
+fn hold_volumes(requests: &[String]) -> Result<Vec<HeldVolume>, CliError> {
+    if requests.len() > pocket_runtime::MAX_VOLUME_COUNT {
+        return Err(invalid(
+            "volume",
+            format!(
+                "at most {} volumes may be shared",
+                pocket_runtime::MAX_VOLUME_COUNT
+            ),
+        ));
+    }
+    let mut held: Vec<HeldVolume> = Vec::with_capacity(requests.len());
+    for request in requests {
+        validate_no_nul("volume", request)?;
+        let (source, rest) = request
+            .split_once(':')
+            .ok_or_else(|| invalid("volume", "must be HOST_PATH:GUEST_PATH[:ro]"))?;
+        let (destination, read_only) = match rest.rsplit_once(':') {
+            Some((destination, "ro")) => (destination, true),
+            Some((destination, "rw")) => (destination, false),
+            _ => (rest, false),
+        };
+        if source.is_empty() || destination.is_empty() {
+            return Err(invalid("volume", "must be HOST_PATH:GUEST_PATH[:ro]"));
+        }
+        validate_guest_path("volume.destination", destination)?;
+        if destination == "/" {
+            return Err(invalid(
+                "volume.destination",
+                "must not replace the image root",
+            ));
+        }
+        // Refused here as well as in the guest, so the caller hears which path
+        // is in the way before a kernel is started for a run that cannot work.
+        if let Some(reserved) = pocket_runtime::reserved_guest_path_conflict(destination) {
+            return Err(invalid(
+                "volume.destination",
+                format!(
+                    "{destination} collides with {reserved}, which the runtime \
+                     mounts or generates itself"
+                ),
+            ));
+        }
+
+        // Resolve the host path once, so the lock, the mount and any later
+        // message all name the same directory even if the caller wrote a
+        // symlinked or relative-looking spelling.
+        let source_path = Path::new(source);
+        if !source_path.is_absolute() {
+            return Err(invalid("volume.source", "host path must be absolute"));
+        }
+        let resolved = std::fs::canonicalize(source_path).map_err(|error| {
+            invalid(
+                "volume.source",
+                format!("host path {source} cannot be resolved: {error}"),
+            )
+        })?;
+        if !resolved.is_dir() {
+            return Err(invalid(
+                "volume.source",
+                format!("host path {source} is not a directory"),
+            ));
+        }
+        let resolved_text = resolved
+            .to_str()
+            .ok_or_else(|| invalid("volume.source", "host path is not valid UTF-8"))?
+            .to_owned();
+
+        if held.iter().any(|other| other.spec.source == resolved_text) {
+            return Err(invalid(
+                "volume.source",
+                format!("host path {resolved_text} is shared more than once"),
+            ));
+        }
+        // Checked here too, not only in the guest's START contract. Every
+        // other volume rule is refused by the CLI first so the caller hears
+        // which path is wrong; without this one a repeated destination came
+        // back as a protocol error, which reads as an internal fault.
+        if held
+            .iter()
+            .any(|other| other.spec.destination == destination)
+        {
+            return Err(invalid(
+                "volume.destination",
+                format!("guest path {destination} is used by more than one volume"),
+            ));
+        }
+
+        let lock = lock_volume_source(&resolved)?;
+        held.push(HeldVolume {
+            spec: VolumeSpec {
+                source: resolved_text,
+                destination: destination.to_owned(),
+                read_only,
+            },
+            _lock: lock,
+        });
+    }
+    Ok(held)
+}
+
+/// Take an exclusive lock on the shared host directory itself.
+///
+/// The lock is on the directory, not on a marker file inside it. A marker
+/// would be part of the share: the workload sees it, and a job that tidies its
+/// own output directory -- `find /data -delete` is enough -- removes the one
+/// thing keeping a second run out, after which a third run claims a directory
+/// the first is still writing to. That was reproducible. A directory cannot be
+/// unlinked while it is a live mount, so locking it has no such hole, leaves
+/// nothing behind in the caller's folder, and needs no write permission, which
+/// is what makes an ordinary read-only share work.
+///
+/// On a network filesystem `flock` may be local to this machine, so two hosts
+/// sharing one directory are not excluded from each other. That is stated in
+/// the guide rather than papered over; it is the same limit the marker had.
+fn lock_volume_source(resolved: &Path) -> Result<std::fs::File, CliError> {
+    let directory = std::fs::File::open(resolved).map_err(|error| {
+        invalid(
+            "volume.source",
+            format!("cannot claim {}: {error}", resolved.display()),
+        )
+    })?;
+    match directory.try_lock() {
+        Ok(()) => Ok(directory),
+        Err(std::fs::TryLockError::WouldBlock) => Err(invalid(
+            "volume.source",
+            format!(
+                "host path {} is already shared by another running pocket; \
+                 one shared directory is used by one run at a time",
+                resolved.display()
+            ),
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(invalid(
+            "volume.source",
+            format!("cannot claim {}: {error}", resolved.display()),
+        )),
+    }
+}
+
 fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
     if arguments.exact_argv && arguments.command.is_empty() {
         return Err(invalid(
@@ -1091,12 +1440,6 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
         return Err(unsupported(
             "network-slirp",
             "the selected runtime exposes network-none only",
-        ));
-    }
-    if !arguments.volume.is_empty() {
-        return Err(unsupported(
-            "managed-volumes",
-            "managed UBD volume lifecycle and exclusive writer leases are not implemented",
         ));
     }
     if !arguments.publish.is_empty() {
@@ -2306,7 +2649,6 @@ mod tests {
         for (extra, feature) in [
             (vec!["--tty"], "tty"),
             (vec!["--network", "slirp"], "network-slirp"),
-            (vec!["--volume", "data:/data"], "managed-volumes"),
             (vec!["--publish", "8080:80"], "port-forwarding"),
             (vec!["--cpuset", "0-1"], "cpuset"),
             (vec!["--pull", "missing"], "pull-policy"),
@@ -2345,6 +2687,201 @@ mod tests {
             assert_eq!(status, OPERATIONAL_ERROR_EXIT);
             assert!(text(&stderr).contains("E_FEATURE_UNSUPPORTED"));
         }
+    }
+
+    /// A typo in a config file must never silently change which store a
+    /// command uses, so the grammar is tiny and everything outside it is
+    /// refused and named.
+    #[test]
+    fn the_config_grammar_is_strict_and_reports_where_it_failed() {
+        let path = Path::new("/home/user/.config/pocket/config.toml");
+
+        let config = Config::parse(
+            "# a comment\n\nprofile_bundle = \"/p\"\n  store = \"/s\"\n\nruntime_root = \"/r\"\n",
+            path,
+        )
+        .expect("a well-formed config");
+        assert_eq!(config.profile_bundle, Some(PathBuf::from("/p")));
+        assert_eq!(config.store, Some(PathBuf::from("/s")));
+        assert_eq!(config.runtime_root, Some(PathBuf::from("/r")));
+
+        // An empty file is valid and simply supplies nothing.
+        let empty = Config::parse("", path).expect("an empty config");
+        assert!(empty.store.is_none());
+
+        for (text, expected, line) in [
+            ("store /s\n", "expected key", 1),
+            ("store = /s\n", "double-quoted", 1),
+            ("store = \"/s\"\nstore = \"/t\"\n", "duplicate key", 2),
+            ("stores = \"/s\"\n", "unknown key", 1),
+            ("store = \"/s\\\\bad\"\n", "quotes or escapes", 1),
+        ] {
+            let error = Config::parse(text, path).expect_err(&format!("{text:?} must be refused"));
+            let message = error.to_string();
+            assert!(message.contains(expected), "{text:?}: {message}");
+            // Every rejection names the file and the exact line, so it can be
+            // found without guessing.
+            assert!(
+                message.contains(&format!("config.toml:{line}:")),
+                "{text:?}: {message}"
+            );
+        }
+    }
+
+    /// A shared host directory is claimed exclusively for the length of a run.
+    /// Two guests writing one hostfs tree through independent page caches is a
+    /// corruption the runtime cannot make safe, so the second attempt is
+    /// refused loudly and names the directory rather than being serialized or
+    /// quietly allowed.
+    #[test]
+    fn a_shared_host_directory_is_claimed_exclusively_and_refused_twice() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let shared = temporary.path().join("shared");
+        std::fs::create_dir(&shared).expect("create the shared directory");
+        let request = format!("{}:/data", shared.display());
+
+        let held = hold_volumes(std::slice::from_ref(&request)).expect("claim once");
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].spec.destination, "/data");
+        assert!(!held[0].spec.read_only);
+        assert_eq!(
+            held[0].spec.source,
+            std::fs::canonicalize(&shared)
+                .expect("canonical shared path")
+                .to_str()
+                .expect("utf-8")
+        );
+
+        // A second claim while the first is held is refused, and says which
+        // directory is in use.
+        let error = hold_volumes(std::slice::from_ref(&request))
+            .expect_err("a second concurrent claim is refused");
+        assert!(error.to_string().contains("already shared"), "{error}");
+        assert!(
+            error.to_string().contains(&shared.display().to_string()),
+            "{error}"
+        );
+
+        // Releasing the first claim frees it for the next run.
+        drop(held);
+        hold_volumes(std::slice::from_ref(&request)).expect("claim again after release");
+    }
+
+    /// The spelling is checked before anything is opened, and `:ro` is honoured.
+    #[test]
+    fn volume_specs_are_validated_and_read_only_is_parsed() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let shared = temporary.path().join("shared");
+        std::fs::create_dir(&shared).expect("create the shared directory");
+        let file = temporary.path().join("a-file");
+        std::fs::write(&file, b"x").expect("create a file");
+
+        let held =
+            hold_volumes(&[format!("{}:/data:ro", shared.display())]).expect("read-only claim");
+        assert!(held[0].spec.read_only);
+        drop(held);
+
+        for (request, expected) in [
+            (shared.display().to_string(), "HOST_PATH:GUEST_PATH"),
+            (format!("{}:relative", shared.display()), "must be absolute"),
+            (format!("{}:/", shared.display()), "image root"),
+            // A colon in the host path is unrepresentable: the first colon is
+            // the separator, so the remainder is read as the source.
+            ("/has:colon:/data".to_owned(), "must be absolute"),
+            // A destination the runtime mounts or writes itself is refused
+            // rather than silently shadowed -- or, worse, used: a share at
+            // /etc had the generated hostname, hosts and resolv.conf created
+            // inside the caller's own directory, and left there.
+            (format!("{}:/proc", shared.display()), "collides with /proc"),
+            (
+                format!("{}:/dev/shm", shared.display()),
+                "collides with /dev",
+            ),
+            (
+                format!("{}:/etc", shared.display()),
+                "collides with /etc/hostname",
+            ),
+            (
+                format!("{}:/etc/hosts", shared.display()),
+                "collides with /etc/hosts",
+            ),
+            (format!("{}:/data", file.display()), "not a directory"),
+            (
+                format!("{}/absent:/data", shared.display()),
+                "cannot be resolved",
+            ),
+            ("relative/path:/data".to_owned(), "must be absolute"),
+        ] {
+            let error = hold_volumes(std::slice::from_ref(&request))
+                .expect_err(&format!("{request} must be refused"));
+            assert!(
+                error.to_string().contains(expected),
+                "{request}: expected {expected:?}, got {error}"
+            );
+        }
+
+        // Sharing one host directory twice in a single run is also refused,
+        // rather than taking the lock twice against itself.
+        let doubled = hold_volumes(&[
+            format!("{}:/one", shared.display()),
+            format!("{}:/two", shared.display()),
+        ])
+        .expect_err("the same host path twice is refused");
+        assert!(doubled.to_string().contains("more than once"), "{doubled}");
+    }
+
+    /// The claim is on the directory itself, so it needs no write permission
+    /// and leaves nothing in the caller's folder. An earlier version wrote a
+    /// `.pocket-volume.lock` marker inside the share, which the workload could
+    /// see and delete -- `find /data -delete` was enough -- after which a
+    /// third run claimed a directory a live run still held.
+    #[test]
+    fn a_shared_directory_is_claimed_without_writing_anything_into_it() {
+        let temporary = tempfile::tempdir().expect("temporary root");
+        let shared = temporary.path().join("read-only");
+        std::fs::create_dir(&shared).expect("create the shared directory");
+        std::fs::write(shared.join("data"), b"x").expect("write a file to share");
+        let mut permissions = std::fs::metadata(&shared)
+            .expect("read the directory mode")
+            .permissions();
+        permissions.set_mode(0o500);
+        std::fs::set_permissions(&shared, permissions).expect("make it unwritable");
+
+        // Unwritable is still claimable: nothing is written to take the claim.
+        let held = hold_volumes(&[format!("{}:/data:ro", shared.display())])
+            .expect("an unwritable directory is still claimable");
+        assert_eq!(held.len(), 1);
+
+        // The share contains exactly what it contained before.
+        let mut entries: Vec<String> = std::fs::read_dir(&shared)
+            .expect("list the share")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec!["data".to_owned()],
+            "the claim left a file behind"
+        );
+
+        // And it is genuinely exclusive while held.
+        let error = hold_volumes(&[format!("{}:/data", shared.display())])
+            .expect_err("a second claim on the same directory is refused");
+        assert!(error.to_string().contains("already shared"), "{error}");
+        drop(held);
+        hold_volumes(&[format!("{}:/data", shared.display())]).expect("claimable once released");
+
+        let mut restore = std::fs::metadata(&shared)
+            .expect("read the directory mode")
+            .permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&shared, restore).expect("restore the mode");
     }
 
     /// Ordinary host layouts put user data behind a symlinked ancestor -- on
@@ -2556,9 +3093,9 @@ mod tests {
             cache_hit: true,
         };
         let context = ImageBuildArgs {
-            profile_bundle: PathBuf::from("/tmp/pocket/test/profile"),
-            store: PathBuf::from("/tmp/pocket/test/store"),
-            runtime_root: PathBuf::from("/tmp/pocket/test/runtime"),
+            profile_bundle: Some(PathBuf::from("/tmp/pocket/test/profile")),
+            store: Some(PathBuf::from("/tmp/pocket/test/store")),
+            runtime_root: Some(PathBuf::from("/tmp/pocket/test/runtime")),
             reference: "registry.example/team/image:tag".to_owned(),
             platform: "linux/amd64".to_owned(),
             json: false,

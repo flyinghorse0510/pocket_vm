@@ -517,6 +517,96 @@ assert_conversion_metadata_is_deterministic() {
     remove_sealed_tree "$second_store"
 }
 
+# A shared host directory is the one thing a workload writes that outlives its
+# run. It has to be the host's own files -- visible on both sides, surviving
+# into the next run -- and a second concurrent user of the same directory has to
+# be refused loudly rather than allowed to corrupt it.
+assert_host_volumes_are_shared_persistent_and_exclusive() {
+    local version=$1
+    local generation=$2
+    local shared="$WORK_ROOT/shared"
+    local out="$LOG_ROOT/$version-volume"
+
+    rm -rf -- "$shared"
+    mkdir -m 0700 -- "$shared"
+    printf 'from the host\n' > "$shared/host.txt"
+
+    # The guest sees what the host wrote, and what it writes lands on the host.
+    run_guest "$version" "$generation" volume-rw 0 --volume "$shared:/data" -- \
+        /bin/sh -c 'cat /data/host.txt && printf "from the guest\n" > /data/guest.txt'
+    assert_exact_output "$LOG_ROOT/$version-volume-rw.stdout" $'from the host\n'
+    [[ -f "$shared/guest.txt" ]] || die "a guest write did not reach the host directory"
+    [[ $(cat "$shared/guest.txt") == "from the guest" ]] || \
+        die "the guest write reached the host with the wrong contents"
+
+    # It is still there on the next run, which a copy-on-write overlay is not.
+    run_guest "$version" "$generation" volume-persist 0 --volume "$shared:/data" -- \
+        /bin/sh -c 'cat /data/guest.txt'
+    assert_exact_output "$LOG_ROOT/$version-volume-persist.stdout" $'from the guest\n'
+
+    # :ro is enforced by the guest kernel, not merely promised. The guest
+    # reports the refusal itself: a shell's exit status after a failed
+    # redirection is 1 in bash and 2 in dash, so it says nothing portable.
+    run_guest "$version" "$generation" volume-ro 0 --volume "$shared:/data:ro" -- \
+        /bin/sh -c 'if touch /data/denied.txt 2>/dev/null; then echo wrote; else echo refused; fi'
+    assert_exact_output "$LOG_ROOT/$version-volume-ro.stdout" $'refused\n'
+    [[ ! -e "$shared/denied.txt" ]] || die "a read-only volume accepted a write"
+
+    # Two runs sharing one directory: the second is refused, and says so.
+    #
+    # Wait on a marker the *guest* writes: it means the guest is up, which is
+    # long after the host took the claim, so the second run below is racing
+    # nothing. The claim itself leaves no file to wait on by design.
+    rm -f -- "$shared/holding"
+    "$POCKET_BIN" run \
+        --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
+        --timeout 120s --volume "$shared:/data" \
+        "$generation" -- /bin/sh -c 'touch /data/holding; sleep 20' \
+        >"$out-holder.stdout" 2>"$out-holder.stderr" &
+    local holder=$!
+    local waited=0
+    while (( waited < 600 )) && [[ ! -e "$shared/holding" ]]; do
+        waited=$((waited + 1))
+        sleep 0.1
+    done
+    if [[ ! -e "$shared/holding" ]]; then
+        kill "$holder" 2>/dev/null || true
+        wait "$holder" 2>/dev/null || true
+        sed -n '1,40p' "$out-holder.stderr" >&2
+        die "the volume-holding run never reached the guest"
+    fi
+    local status=0
+    "$POCKET_BIN" run \
+        --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
+        --timeout 120s --volume "$shared:/data" \
+        "$generation" -- /bin/true >"$out-second.stdout" 2>"$out-second.stderr" || status=$?
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    (( status != 0 )) || die "a second concurrent user of one shared directory was allowed"
+    grep -q "already shared" "$out-second.stderr" || {
+        sed -n '1,20p' "$out-second.stderr" >&2
+        die "the concurrent-volume refusal did not name the cause"
+    }
+
+    # Taking the claim writes nothing into the share: a marker file would be
+    # part of what the workload sees, and deleting it let a third run claim a
+    # directory a live run still held.
+    local unexpected
+    unexpected=$(find "$shared" -mindepth 1 -maxdepth 1 \
+        ! -name host.txt ! -name guest.txt ! -name holding -print)
+    [[ -z "$unexpected" ]] || {
+        printf '%s\n' "$unexpected" >&2
+        die "claiming a shared directory left a file in it"
+    }
+
+    # And the directory is claimable again once the first run has finished.
+    rm -f -- "$shared/holding"
+    run_guest "$version" "$generation" volume-released 0 --volume "$shared:/data" -- \
+        /bin/sh -c 'cat /data/guest.txt'
+    assert_exact_output "$LOG_ROOT/$version-volume-released.stdout" $'from the guest\n'
+    rm -rf -- "$shared"
+}
+
 # An alias is the only thing that roots a generation, it outlives the profile
 # that created it, and reconstructing its key needs that bundle. Without a way
 # to see and drop one by its own ID, a resealed profile's aliases root their
@@ -822,6 +912,7 @@ done
 assert_archive_normalization 24.04 "${GENERATIONS[24.04]}"
 assert_concurrent_cow_isolation "${GENERATIONS[24.04]}"
 assert_conversion_metadata_is_deterministic 24.04 "${GENERATIONS[24.04]}"
+assert_host_volumes_are_shared_persistent_and_exclusive 24.04 "${GENERATIONS[24.04]}"
 assert_signal_killed_runs_are_reclaimed "${GENERATIONS[24.04]}"
 # The Docker-save archive built its own generation under its own alias, so it is
 # the one input this suite can release without losing anything it still checks.

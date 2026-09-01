@@ -62,9 +62,13 @@ does not satisfy any UML execution gate.
   writes the transcript on success and on failure, and the scan now fails
   closed on a transcript that is missing, or that carries no kernel banner.
   `assert_clean_uml_log` is hardened the same way. With both fixed, the lane
-  retains 32 non-empty transcripts, every one carrying the kernel banner, and
-  reports no validator complaint across thirty lifecycles at 1, 2 and 4 vCPUs
-  plus the stdin and process-churn cases.
+  retains a non-empty transcript for every case, each carrying the kernel
+  banner, and reports no validator complaint across thirty lifecycles at 1, 2
+  and 4 vCPUs plus the stdin, process-churn and shared-directory cases. The
+  last of those is there because hostfs is the newest guest-kernel surface
+  this runtime uses and the one a debug kernel has most to say about: it reads
+  a host file, writes 64 KiB back through the page cache, and then checks that
+  a read-only share refuses a write, with both consoles scanned.
 
   That lane's stdin payload is 256 KiB rather than 1 MB, and the size is
   measured rather than guessed. This kernel validates every lock and tracked
@@ -127,6 +131,27 @@ does not satisfy any UML execution gate.
   are permanent end-to-end cases, and a SIGKILLed run is now reclaimed by the
   next operation rather than leaking its directory. Injected protocol failure
   remains outstanding.
+- [x] Verify that a shared host directory is readable and writable from the
+  guest, survives the run, honours `:ro`, and is used by one run at a time.
+  `make rust-release-e2e` reads a file the host wrote, writes one back and
+  finds it on the host, reads that same file again in a later run, has a `:ro`
+  share report its own refusal from inside the guest with no file created, and
+  starts a second run against a directory a live run already holds: it is
+  refused, names the directory, and the directory is claimable again once the
+  holder exits. The claim is an exclusive lock on the directory itself rather
+  than a marker file inside the share: a marker is part of what the workload
+  sees, and deleting it let a third run claim a directory a live run still
+  held -- reproduced against the marker implementation and refuted against
+  this one. Taking the claim needs no write permission, so a read-only share
+  is claimed like any other; that case is a unit test rather than a lane. Two collisions are
+  refused rather than discovered afterwards, both unit-tested on the host and
+  on the guest contract: a destination that collides with a path the runtime
+  mounts or generates -- a share at `/etc` had the generated `hostname`,
+  `hosts` and `resolv.conf` created inside the caller's own directory and left
+  there -- and a destination the image made an absolute symlink, since `mount`
+  follows symlinks in its target and would otherwise resolve it against the
+  initramfs. Long-lived and multi-gigabyte hostfs workloads are not yet
+  exercised.
 - [ ] Verify builder byte and inode capacity retry policy at both boundaries,
   no partial generation publication, deterministic derivation identity, and
   independent ext4 clean-state/UUID/size/manifest/account validation. The
@@ -160,10 +185,16 @@ does not satisfy any UML execution gate.
   cache, no kernel object tree and no intermediate output, then requires the
   profile revision, the whole sealed bundle tree, the host CLI, and the release
   archive to match. The two roots produced profile revision
-  `739f92fd8919ec9b99be456837c0e3c6f1717df2f2931f0984d7d8aa59c6b272`, a
-  byte-identical bundle tree, an identical host CLI, and the identical release
-  archive
-  `aefe023bb85626ccb5da0341cf9906367ffb62237d634a80b01495d004976200`.
+  `6bfd5f936509de52e9c2c451eca6e3e05653f8572e3306b549a889e366401872`, a
+  byte-identical bundle tree, an identical host CLI, and an identical release
+  archive.
+
+  The archive's own digest is deliberately not quoted here. This file is one
+  of the archive's payloads, so writing that digest into it would change it;
+  the lane prints `release_archive_sha256=` when it runs, and that is the
+  number to record against a candidate. The profile revision above is stable
+  under documentation changes, because the sealed bundle holds only the
+  kernel, tools and initramfses.
 - [ ] Install and verify the archive as a fresh non-root account under a
   normal home directory; repeat on every declared host distribution/kernel.
   Two host-layout obstacles that made this impossible on whole families of
@@ -182,8 +213,25 @@ does not satisfy any UML execution gate.
   `scripts/test-release-packaging.sh` now covers idempotent reinstall, two
   coexisting revisions, corrupted archive and installed-tree rejection,
   symlink rejection, launcher recreation, and four installers racing on one
-  absent prefix: exactly one publishes and the rest verify what won. Installing
-  as a separate account and selecting an older launcher remain outstanding.
+  absent prefix: exactly one publishes and the rest verify what won. It also
+  takes the installer out of the archive and installs with it, with no
+  repository on the module path, which is the situation on a machine that
+  received only the tarball. Installing as a separate account and selecting an
+  older launcher remain outstanding; selection is now repointing
+  `<prefix>/bin/pocket`, which the same test exercises for creation but not
+  yet for rollback.
+- [x] Leave the machine usable after an install without any further setup.
+  `make install PREFIX=<dir>` publishes the versioned launcher, points
+  `<prefix>/bin/pocket` at it, creates the parents of the store and runtime
+  root it chose, and writes `$XDG_CONFIG_HOME/pocket/config.toml` naming all
+  three, so `pocket run IMAGE -- ...` works with no path flags. An existing
+  config is never overwritten, and `--no-config` / `--no-default-link` decline
+  each half; a flag that only configures the config file is refused rather
+  than ignored when `--no-config` is given. `make package` writes one
+  relocatable archive that carries the installer and its one import, so a
+  machine with no toolchain and no checkout performs the same digest-checked
+  install. All of this is covered by
+  `scripts/test-release-packaging.sh`.
 - [ ] Validate the SPDX JSON against an independent SPDX 2.3 schema/tool.
   Perform a separate license review and binary-composition SBOM if release
   policy requires either; this repository's generated document is explicitly
@@ -192,8 +240,11 @@ does not satisfy any UML execution gate.
   publication log, checksum distribution, revocation, and compromised-key
   response. The current packager does not sign output.
 - [ ] Document upgrade/removal policy and recovery from an interrupted
-  installation. The current versioned layout is rollback-friendly, but no
-  automated remover or mutable activation pointer is provided.
+  installation. The versioned layout is rollback-friendly and
+  `<prefix>/bin/pocket` is now the mutable activation pointer -- the one
+  deliberately replaceable path the installer publishes -- but no automated
+  remover is provided, and rollback is still a manual repointing rather than a
+  command.
 - [ ] Review both project licenses, all bundled third-party notices/source
   obligations, export controls, and distribution policy with the intended
   publisher.

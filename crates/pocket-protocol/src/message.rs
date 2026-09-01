@@ -15,6 +15,41 @@ pub const MAX_PATH_LENGTH: usize = 4096;
 pub const MAX_SUPPLEMENTARY_GIDS: usize = 64;
 pub const MAX_RLIMIT_COUNT: usize = 32;
 pub const MAX_VOLUME_COUNT: usize = 32;
+
+/// Guest paths the runtime mounts or writes itself.
+///
+/// A shared host directory may not collide with one of these. Placed under a
+/// runtime mount it is silently shadowed by it; placed over one, the runtime's
+/// own mounts and generated files are created inside the caller's directory
+/// and left there after the run. Neither is something to discover afterwards,
+/// so the collision is refused instead. A path that merely sits beside one --
+/// `/etc/myconfig` next to `/etc/hosts` -- is unaffected.
+pub const RESERVED_GUEST_PATHS: &[&str] = &[
+    "/dev",
+    "/etc/hostname",
+    "/etc/hosts",
+    "/etc/resolv.conf",
+    "/proc",
+    "/run",
+    "/sys",
+];
+
+/// The reserved path `destination` collides with, if any.
+///
+/// A collision is equality, or either path being a directory prefix of the
+/// other: `/dev/x` sits under a runtime mount, and `/etc` contains three
+/// generated files.
+pub fn reserved_guest_path_conflict(destination: &str) -> Option<&'static str> {
+    RESERVED_GUEST_PATHS.iter().copied().find(|reserved| {
+        destination == *reserved
+            || destination
+                .strip_prefix(reserved)
+                .is_some_and(|rest| rest.starts_with('/'))
+            || reserved
+                .strip_prefix(destination)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
 pub const MAX_DIAGNOSTIC_LENGTH: usize = 8192;
 pub const MAX_SHUTDOWN_GRACE_MS: u32 = 600_000;
 /// Exact upper bound on the synchronous standard-input payload the host may
@@ -62,9 +97,15 @@ pub struct ResourceLimit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 #[cbor(map)]
+/// One host directory shared into the guest.
+///
+/// `source` is a path on the **host**, mounted into the guest through hostfs,
+/// so the guest sees the host's own files rather than a copy and writes are
+/// visible on both sides immediately. It is validated with the same rules as a
+/// guest path -- absolute and lexically normalized -- because both must be.
 pub struct VolumeSpec {
     #[n(0)]
-    pub device: String,
+    pub source: String,
     #[n(1)]
     pub destination: String,
     #[n(2)]
@@ -300,8 +341,14 @@ impl ValidateMessage for Start {
         validate_count("volumes", self.volumes.len(), MAX_VOLUME_COUNT)?;
         let mut destinations = BTreeSet::new();
         for volume in &self.volumes {
-            validate_guest_path("volume.device", &volume.device, false)?;
+            validate_guest_path("volume.source", &volume.source, false)?;
             validate_guest_path("volume.destination", &volume.destination, false)?;
+            if reserved_guest_path_conflict(&volume.destination).is_some() {
+                return invalid(
+                    "volume.destination",
+                    "collides with a path the runtime mounts or generates",
+                );
+            }
             if !destinations.insert(&volume.destination) {
                 return invalid("volumes", "duplicate destination");
             }
@@ -719,7 +766,7 @@ mod tests {
     use super::{
         ErrorMessage, Exit, Hello, MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, Platform, Ready, Resize,
         ResourceLimit, Shutdown, Signal, Start, ValidateMessage, VolumeSpec, WorkloadMessage,
-        decode_payload, decode_workload_message, encode_payload,
+        decode_payload, decode_workload_message, encode_payload, reserved_guest_path_conflict,
     };
     use crate::{FrameHeader, MessageKind, ProtocolError, RawFrame};
 
@@ -777,7 +824,7 @@ mod tests {
             hostname: "pocket".to_owned(),
             root_read_only: false,
             volumes: vec![VolumeSpec {
-                device: "/dev/ubdb".to_owned(),
+                source: "/srv/shared".to_owned(),
                 destination: "/data".to_owned(),
                 read_only: false,
             }],
@@ -1001,5 +1048,30 @@ mod tests {
                 maximum: 64
             })
         ));
+    }
+
+    /// The rule is symmetric: a destination under a runtime mount is shadowed
+    /// by it, and one containing a generated file has that file written into
+    /// the caller's own directory. Both are collisions; a sibling is not.
+    #[test]
+    fn reserved_guest_paths_collide_in_both_directions() {
+        for (destination, expected) in [
+            ("/dev", Some("/dev")),
+            ("/dev/shm", Some("/dev")),
+            ("/proc", Some("/proc")),
+            ("/run/x/y", Some("/run")),
+            ("/etc", Some("/etc/hostname")),
+            ("/etc/hosts", Some("/etc/hosts")),
+            ("/etc/myconfig", None),
+            ("/devices", None),
+            ("/etc/hostnames", None),
+            ("/var/lib/data", None),
+        ] {
+            assert_eq!(
+                reserved_guest_path_conflict(destination),
+                expected,
+                "{destination}"
+            );
+        }
     }
 }

@@ -97,6 +97,8 @@ def main() -> int:
     license_mit_path = repo_root / "LICENSE-MIT"
     support_matrix_path = repo_root / "docs/release-support-matrix.md"
     packaging_doc_path = repo_root / "docs/release-packaging.md"
+    installer_path = repo_root / "scripts/install-release.py"
+    installer_library_path = repo_root / "scripts/pocket_release.py"
     cargo_bytes, source_lock_bytes, epoch, version = (
         source_epoch_and_version(cargo_path, source_lock_path)
     )
@@ -113,6 +115,22 @@ def main() -> int:
             pocket_state.size,
             pocket_digest,
             pocket_state,
+        ),
+        # The installer travels inside the archive it installs, so a machine
+        # that has only the tarball can still perform a digest-checked
+        # install rather than an unpacking that skips every check. Its one
+        # import sits beside it, because Python puts a script's own directory
+        # on the module path and nothing else about the extracted tree is
+        # guaranteed to be there.
+        disk_payload(
+            "bin/pocket-vm-install",
+            installer_path,
+            0o555,
+        ),
+        disk_payload(
+            "bin/pocket_release.py",
+            installer_library_path,
+            0o444,
         ),
         disk_payload(
             "share/licenses/pocket-vm/LICENSE-APACHE",
