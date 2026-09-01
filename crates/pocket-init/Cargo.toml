@@ -1,0 +1,20 @@
+[package]
+name = "pocket-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "=0.2.189"
+minicbor.workspace = true
+nix = { workspace = true, features = ["hostname", "ioctl", "reboot"] }
+pocket-core = { path = "../pocket-core" }
+pocket-protocol = { path = "../pocket-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

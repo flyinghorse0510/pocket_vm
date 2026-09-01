@@ -1,0 +1,26 @@
+# Diagnostic-only kernel options. This fragment is never part of a release
+# profile: it exists so the correctness lane behind the SMP gate is
+# reproducible instead of narrated.
+#
+# CONFIG_DEBUG_ATOMIC_SLEEP is the option that names the defect the 0003-0005
+# series fixes: it reports any might_sleep() reached from atomic or interrupt
+# context, which is exactly what free_irq() from the SIGIO signal handler was.
+CONFIG_DEBUG_ATOMIC_SLEEP=y
+CONFIG_PROVE_LOCKING=y
+CONFIG_DEBUG_LOCK_ALLOC=y
+CONFIG_LOCKDEP=y
+CONFIG_DEBUG_SPINLOCK=y
+CONFIG_DEBUG_MUTEXES=y
+CONFIG_DEBUG_RWSEMS=y
+CONFIG_PROVE_RCU=y
+CONFIG_RCU_EQS_DEBUG=y
+CONFIG_DEBUG_OBJECTS=y
+CONFIG_DEBUG_OBJECTS_RCU_HEAD=y
+CONFIG_DEBUG_OBJECTS_WORK=y
+CONFIG_DEBUG_OBJECTS_TIMERS=y
+CONFIG_PREEMPT_COUNT=y
+CONFIG_DEBUG_LIST=y
+CONFIG_DEBUG_PLIST=y
+CONFIG_DEBUG_SG=y
+CONFIG_DEBUG_NOTIFIERS=y
+CONFIG_DEBUG_IRQFLAGS=y

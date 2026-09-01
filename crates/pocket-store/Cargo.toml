@@ -1,0 +1,19 @@
+[package]
+name = "pocket-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hex.workspace = true
+nix = { workspace = true, features = ["dir"] }
+pocket-core = { path = "../pocket-core" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

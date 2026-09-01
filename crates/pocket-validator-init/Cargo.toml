@@ -1,0 +1,21 @@
+[package]
+name = "pocket-validator-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc = "=0.2.189"
+minicbor.workspace = true
+nix = { workspace = true, features = ["hostname", "reboot"] }
+pocket-core = { path = "../pocket-core" }
+pocket-protocol = { path = "../pocket-protocol" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

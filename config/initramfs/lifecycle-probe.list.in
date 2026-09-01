@@ -1,0 +1,14 @@
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0555 0 0
+dir /sys 0555 0 0
+dir /run 0755 0 0
+dir /tmp 01777 0 0
+dir /bin 0755 0 0
+file /bin/busybox @BUSYBOX@ 0755 0 0
+file /bin/pocket-panic @PANIC_PROBE@ 0755 0 0
+slink /bin/sh busybox 0777 0 0
+slink /bin/mount busybox 0777 0 0
+slink /bin/cat busybox 0777 0 0
+slink /bin/sleep busybox 0777 0 0
+file /init @PROJECT_ROOT@/guest/lifecycle-probe/init 0755 0 0

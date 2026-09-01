@@ -1,0 +1,175 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: chan: free channel IRQs from process context
+
+free_irq() may sleep, so the deferred channel-IRQ list must be drained from
+process context rather than from the SIGIO signal handler that the previous
+patch stopped calling.
+
+Drain it from a work item, which is what the neighbouring WINCH IRQ teardown in
+line.c already does. Callers that are about to request the interrupts again, or
+to destroy the channel, drain it synchronously first. Both removal paths run in
+process context and hold chan_irq_free_mutex across every free, so a channel is
+never freed twice and a re-enabled channel keeps its interrupts. Queueing is
+also made idempotent: repeated -EIO on one channel used to add it to the list
+again, corrupting the list.
+---
+ arch/um/drivers/chan_kern.c | 112 +++++++++++++++++++++++++++++---------------
+ 1 file changed, 73 insertions(+), 39 deletions(-)
+
+diff --git a/arch/um/drivers/chan_kern.c b/arch/um/drivers/chan_kern.c
+index db2bb032be30..03407fda3f2e 100644
+--- a/arch/um/drivers/chan_kern.c
++++ b/arch/um/drivers/chan_kern.c
+@@ -3,9 +3,11 @@
+  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{linux.intel,addtoit}.com)
+  */
+ 
++#include <linux/mutex.h>
+ #include <linux/slab.h>
+ #include <linux/tty.h>
+ #include <linux/tty_flip.h>
++#include <linux/workqueue.h>
+ #include "chan.h"
+ #include <os.h>
+ #include <irq_kern.h>
+@@ -170,12 +172,79 @@ static void line_timer_cb(struct work_struct *work)
+ 		chan_interrupt(line, line->read_irq);
+ }
+ 
++/* Channels are added in IRQ context, where free_irq() must not be called,
++ * and are removed either by the work item below or synchronously by a caller
++ * that is about to request the interrupts again or to destroy the channel.
++ * This handles interrupt sources which disappear, and which need to
++ * be permanently disabled.  This is discovered in IRQ context, but
++ * the freeing of the IRQ must be done later.
++ */
++static DEFINE_RAW_SPINLOCK(irqs_to_free_lock);
++static LIST_HEAD(irqs_to_free);
++static DEFINE_MUTEX(chan_irq_free_mutex);
++
++static void free_chan_irqs(struct chan *chan)
++{
++	if (chan->input && chan->enabled)
++		um_free_irq(chan->line->read_irq, chan);
++	if (chan->output && chan->enabled &&
++	    !need_output_blocking())
++		um_free_irq(chan->line->write_irq, chan);
++	chan->enabled = 0;
++}
++
++/* Drain the deferred list, then optionally free @chan too. Every free happens
++ * under chan_irq_free_mutex, so the two removal paths exclude each other, a
++ * channel is never freed twice, and a re-enabled channel keeps its interrupts.
++ */
++static void free_chan_irqs_locked(struct chan *chan)
++{
++	struct chan *pending;
++	unsigned long flags;
++
++	mutex_lock(&chan_irq_free_mutex);
++
++	while (true) {
++		raw_spin_lock_irqsave(&irqs_to_free_lock, flags);
++		pending = list_first_entry_or_null(&irqs_to_free, struct chan,
++						   free_list);
++		if (pending)
++			list_del_init(&pending->free_list);
++		raw_spin_unlock_irqrestore(&irqs_to_free_lock, flags);
++
++		if (!pending)
++			break;
++
++		free_chan_irqs(pending);
++	}
++
++	if (chan)
++		free_chan_irqs(chan);
++
++	mutex_unlock(&chan_irq_free_mutex);
++}
++
++static void free_pending_chan_irqs(void)
++{
++	free_chan_irqs_locked(NULL);
++}
++
++static void free_irqs_handler(struct work_struct *unused)
++{
++	free_pending_chan_irqs();
++}
++
++static DECLARE_WORK(free_irqs_work, free_irqs_handler);
++
+ int enable_chan(struct line *line)
+ {
+ 	struct list_head *ele;
+ 	struct chan *chan;
+ 	int err;
+ 
++	/* A pending deferred free must not race with the requests below. */
++	free_pending_chan_irqs();
++
+ 	INIT_DELAYED_WORK(&line->task, line_timer_cb);
+ 
+ 	list_for_each(ele, &line->chan_list) {
+@@ -206,38 +275,6 @@ int enable_chan(struct line *line)
+ 	return err;
+ }
+ 
+-/* Items are added in IRQ context, when free_irq can't be called, and
+- * removed in process context, when it can.
+- * This handles interrupt sources which disappear, and which need to
+- * be permanently disabled.  This is discovered in IRQ context, but
+- * the freeing of the IRQ must be done later.
+- */
+-static DEFINE_RAW_SPINLOCK(irqs_to_free_lock);
+-static LIST_HEAD(irqs_to_free);
+-
+-void free_irqs(void)
+-{
+-	struct chan *chan;
+-	LIST_HEAD(list);
+-	struct list_head *ele;
+-	unsigned long flags;
+-
+-	raw_spin_lock_irqsave(&irqs_to_free_lock, flags);
+-	list_splice_init(&irqs_to_free, &list);
+-	raw_spin_unlock_irqrestore(&irqs_to_free_lock, flags);
+-
+-	list_for_each(ele, &list) {
+-		chan = list_entry(ele, struct chan, free_list);
+-
+-		if (chan->input && chan->enabled)
+-			um_free_irq(chan->line->read_irq, chan);
+-		if (chan->output && chan->enabled &&
+-		    !need_output_blocking())
+-			um_free_irq(chan->line->write_irq, chan);
+-		chan->enabled = 0;
+-	}
+-}
+-
+ static void close_one_chan(struct chan *chan, int delay_free_irq)
+ {
+ 	unsigned long flags;
+@@ -247,15 +284,12 @@ static void close_one_chan(struct chan *chan, int delay_free_irq)
+ 
+ 	if (delay_free_irq) {
+ 		raw_spin_lock_irqsave(&irqs_to_free_lock, flags);
+-		list_add(&chan->free_list, &irqs_to_free);
++		if (list_empty(&chan->free_list))
++			list_add(&chan->free_list, &irqs_to_free);
+ 		raw_spin_unlock_irqrestore(&irqs_to_free_lock, flags);
++		schedule_work(&free_irqs_work);
+ 	} else {
+-		if (chan->input && chan->enabled)
+-			um_free_irq(chan->line->read_irq, chan);
+-		if (chan->output && chan->enabled &&
+-		    !need_output_blocking())
+-			um_free_irq(chan->line->write_irq, chan);
+-		chan->enabled = 0;
++		free_chan_irqs_locked(chan);
+ 	}
+ 	if (chan->fd_out != chan->fd_in)
+ 		os_close_file(chan->fd_out);
+-- 
+2.53.0

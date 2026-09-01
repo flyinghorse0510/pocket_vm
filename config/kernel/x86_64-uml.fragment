@@ -1,0 +1,89 @@
+# Architecture and cooperative SMP profile.
+CONFIG_64BIT=y
+CONFIG_X86_64=y
+CONFIG_SMP=y
+CONFIG_NR_CPUS=16
+CONFIG_STATIC_LINK=y
+CONFIG_LD_SCRIPT_STATIC=y
+CONFIG_LOCALVERSION="-pocket.1"
+# CONFIG_LOCALVERSION_AUTO is not set
+
+# The runtime supplies a separate, measured initramfs.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_XZ=y
+
+# Image and managed-volume devices/filesystems.
+CONFIG_BLK_DEV_UBD=y
+# CONFIG_BLK_DEV_UBD_SYNC is not set
+# CONFIG_BLK_DEV_LOOP is not set
+# CONFIG_BLK_DEV_NBD is not set
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_FS_POSIX_ACL=y
+CONFIG_EXT4_FS_SECURITY=y
+CONFIG_FS_POSIX_ACL=y
+CONFIG_TMPFS=y
+CONFIG_TMPFS_POSIX_ACL=y
+CONFIG_TMPFS_XATTR=y
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=y
+CONFIG_UNIX98_PTYS=y
+
+# Workload ABI and process supervision primitives.
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_MULTIUSER=y
+CONFIG_SYSVIPC=y
+CONFIG_POSIX_MQUEUE=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_MEMFD_CREATE=y
+CONFIG_SECCOMP=y
+CONFIG_SECCOMP_FILTER=y
+
+# Guest-only namespaces. Host user namespaces are never required.
+CONFIG_NAMESPACES=y
+CONFIG_UTS_NS=y
+CONFIG_IPC_NS=y
+CONFIG_PID_NS=y
+# CONFIG_USER_NS is not set
+
+# A loopback-capable guest stack is useful even in network-none mode. No host
+# network transport is compiled into this first static profile.
+CONFIG_NET=y
+CONFIG_UNIX=y
+CONFIG_INET=y
+# CONFIG_IPV6 is not set
+# CONFIG_NETDEVICES is not set
+# CONFIG_UML_NET_VECTOR is not set
+
+# Explicit inherited-FD console and serial channels.
+CONFIG_SSL=y
+CONFIG_NULL_CHAN=y
+# CONFIG_PORT_CHAN is not set
+# CONFIG_PTY_CHAN is not set
+CONFIG_TTY_CHAN=y
+# CONFIG_XTERM_CHAN is not set
+CONFIG_CON_ZERO_CHAN="fd:0,fd:1"
+CONFIG_CON_CHAN="null"
+CONFIG_SSL_CHAN="null"
+
+# The baseline exposes no host filesystem or out-of-band management channel.
+# CONFIG_HOSTFS is not set
+# CONFIG_MCONSOLE is not set
+# CONFIG_MODULES is not set
+# CONFIG_UML_TIME_TRAVEL_SUPPORT is not set
+
+# Deterministic diagnostics without build-path-heavy debug information.
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+CONFIG_PRINTK=y
+CONFIG_PRINTK_TIME=y
+CONFIG_DEBUG_KERNEL=y
+CONFIG_DEBUG_INFO_NONE=y
+# CONFIG_KALLSYMS_ALL is not set

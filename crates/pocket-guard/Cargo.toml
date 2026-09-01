@@ -1,0 +1,18 @@
+[package]
+name = "pocket-guard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Single-operation process lifetime guard for pocket_vm"
+
+[dependencies]
+clap.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

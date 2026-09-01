@@ -1,0 +1,65 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: arm userspace stubs with parent-death signal before exec
+
+The embedded stub asks for PR_SET_PDEATHSIG only after exec. If the UML
+creator dies between clone and the first instruction of the new executable,
+the stub can be reparented before it arms the signal and survive the kernel.
+
+Arm SIGKILL in the clone trampoline before execveat and immediately recheck
+the expected parent. PR_SET_PDEATHSIG is retained across this non-privileged
+exec, while the existing in-stub call remains a defensive second arm.
+
+This is a lifecycle/correctness invariant for the no-cgroup runtime. It does
+not claim to make cooperative UML safe for hostile guest userspace.
+---
+ arch/um/os-Linux/skas/process.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/arch/um/os-Linux/skas/process.c b/arch/um/os-Linux/skas/process.c
+index d6c22f8aa06d..aced69dc4aab 100644
+--- a/arch/um/os-Linux/skas/process.c
++++ b/arch/um/os-Linux/skas/process.c
+@@ -14,6 +14,7 @@
+ #include <sys/wait.h>
+ #include <sys/stat.h>
+ #include <sys/socket.h>
++#include <sys/prctl.h>
+ #include <asm/unistd.h>
+ #include <as-layout.h>
+ #include <init.h>
+@@ -283,6 +284,7 @@ struct tramp_data {
+ 	struct stub_data *stub_data;
+ 	/* 0 is inherited, 1 is the kernel side */
+ 	int sockpair[2];
++	pid_t expected_parent;
+ };
+ 
+ #ifndef CLOSE_RANGE_CLOEXEC
+@@ -300,6 +302,18 @@ static int userspace_tramp(void *data)
+ 	};
+ 	int ret;
+ 
++	/*
++	 * Arm this before exec so there is no window in which a stub can be
++	 * reparented and then survive the UML kernel. PR_SET_PDEATHSIG follows
++	 * the creating thread, which is the lifetime relationship we need.
++	 */
++	if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
++		exit(6);
++
++	/* The parent may have died immediately before prctl(). */
++	if (getppid() != tramp_data->expected_parent)
++		exit(7);
++
+ 	if (using_seccomp) {
+ 		init_data.signal_handler = STUB_CODE +
+ 					   (unsigned long) stub_signal_interrupt -
+@@ -449,5 +463,6 @@ int start_userspace(struct mm_id *mm_id)
+ 	struct tramp_data tramp_data = {
+ 		.stub_data = proc_data,
++		.expected_parent = getpid(),
+ 	};
+ 	void *stack;
+ 	unsigned long sp;
+-- 
+2.53.0

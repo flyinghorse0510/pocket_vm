@@ -1,0 +1,34 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: drop the free_irqs() call from the SIGIO handler
+
+_sigio_handler() runs as a signal handler, so it must not call anything that
+can sleep. free_irqs() reaches the generic free_irq(), and on a CONFIG_SMP=y
+kernel __synchronize_irq() gets there to synchronize_irqwork(), whose
+irq_work_sync() waits on an rcuwait and then calls synchronize_rcu(). Tree RCU
+blocks, so schedule() runs from the interrupted, frequently idle, task inside
+an interrupt and produces "bad: scheduling from the idle thread!", runqueue and
+RCU corruption and a kernel fault. A uniprocessor kernel survives only because
+Tiny RCU and the UP synchronize_irqwork() stub never block.
+
+Remove the call. The following patch moves the drain into process context; a
+channel queued between these two patches is simply freed on the next drain.
+---
+ arch/um/kernel/irq.c | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/arch/um/kernel/irq.c b/arch/um/kernel/irq.c
+index ddfd6e9bd8c7..f421e2ed23f0 100644
+--- a/arch/um/kernel/irq.c
++++ b/arch/um/kernel/irq.c
+@@ -234,9 +234,6 @@ static void _sigio_handler(struct uml_pt_regs *regs,
+ 						  timetravel_handlers_only);
+ 		}
+ 	}
+-
+-	if (!timetravel_handlers_only)
+-		free_irqs();
+ }
+ 
+ void sigio_handler(int sig, struct siginfo *unused_si, struct uml_pt_regs *regs,
+-- 
+2.53.0

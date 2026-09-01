@@ -1,0 +1,32 @@
+#!/bin/sh
+
+set -eu
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t ext4 -o ro /dev/ubda /volume
+
+echo 'POCKET_PROBE_BEGIN'
+printf 'uts_machine='
+uname -m
+printf 'kernel_release='
+uname -r
+printf 'online_cpus='
+cat /sys/devices/system/cpu/online
+printf 'cpu_count='
+grep -c '^processor' /proc/cpuinfo
+printf 'accepted_physmem_bytes='
+cat /proc/uml_physmem_bytes
+printf 'guest_cmdline='
+cat /proc/cmdline
+printf 'pid_namespace='
+readlink /proc/self/ns/pid
+printf 'ubd_marker='
+cat /volume/pocket-probe
+printf 'backend_contract=seccomp-on-required\n'
+echo 'POCKET_PROBE_OK'
+
+sync
+umount /volume
+poweroff -f

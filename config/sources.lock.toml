@@ -1,0 +1,128 @@
+# Every downloaded executable input is immutable. Update this file only after
+# reviewing the new upstream source and rerunning the qualification suite.
+
+[linux]
+release = "7.2"
+tag = "v7.2"
+tag_object = "237a1c39e8dfd3e1c6f1f023eea37a48ec04cc63"
+commit = "8d3ae59288f1e7d58d76558a6ee96d533bc5019f"
+tarball_url = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.xz"
+signature_url = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.sign"
+tarball_sha256 = "f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3"
+signature_sha256 = "5b0efe843da506fb58849e9abc4baf85e0517269f0d24a404aff447082a0faab"
+signed_tar_sha256 = "772bec644c5532319f1987a3bd99b6d7f13ab40222a4de4ff98bc39857ed8f2b"
+signer_email = "gregkh@kernel.org"
+signer_fingerprint = "647F28654894E3BD457199BE38DBBDC86092693E"
+upstream_tree_sha1 = "a25d6a94ad99aa059aa6dc728c45052fb2968352"
+upstream_manifest_sha256 = "904af608b9cfcfad86faab7a69acf8128d1ea838d2bb1201e4a31b92c7d68223"
+patch_series_sha256 = "edf2c2b07963102061074b5e889f93e84c542c1d08c79a93966f50acb642b255"
+patched_tree_sha1 = "72a9bfeef8f112701291b141b37d16a4d55648b3"
+patched_manifest_sha256 = "06f554fae053473ad4953f148a149cbbeb75623a2c215fbcbaaba3eccfdb8b61"
+source_date_epoch = 1786940622
+
+[e2fsprogs]
+release = "1.47.2"
+tarball_url = "https://cdn.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.2/e2fsprogs-1.47.2.tar.xz"
+signed_checksums_url = "https://cdn.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.2/sha256sums.asc"
+tarball_sha256 = "08242e64ca0e8194d9c1caad49762b19209a06318199b63ce74ae4ef2d74e63c"
+signed_checksums_sha256 = "cbfc602aa3efc08502352f28a573b72df1690d0663cab832763ad269595d2c12"
+checksum_signer_fingerprint = "B8868C80BA62A1FFFAF5FDA9632D3A06589DA6B1"
+source_date_epoch = 1735716385
+
+[skopeo]
+release = "1.23.0"
+module = "go.podman.io/skopeo"
+tag = "v1.23.0"
+repository_url = "https://github.com/containers/skopeo.git"
+tag_object = "0215995053b78878f5491980d44311c2eb4bd3ed"
+commit = "9645b282ca2d8792235db5a3e142ea9ae2f0c63b"
+tree = "5f7437a8b441c632b2f42a780f4481699e3f0280"
+module_sum = "h1:JnzawQosV0o2A2fwMG16YkffZvI0AU1Kp3wepuv9Eww="
+module_mod_sum = "h1:1FUlKYS8NwKOUGLBKlxOubc5ZM9oyO9VKwt0P1FqtDw="
+module_zip_sha256 = "8e21e25ea5f2df9fef991388bec50c300af41700244c342f9a7110402310801a"
+module_mod_sha256 = "125f484e43e6333124082733656e136fafda3db60a20eae577be2d1d5230d058"
+source_date_epoch = 1779821906
+
+[go_toolchain]
+release = "1.25.6"
+archive_url = "https://go.dev/dl/go1.25.6.linux-amd64.tar.gz"
+archive_sha256 = "f022b6aad78e362bcba9b0b94d09ad58c5a70c6ba3b7582905fababf5fe0181a"
+archive_size = 59768880
+
+[registry_ca]
+revision = "2026-08-13"
+bundle_url = "https://curl.se/ca/cacert-2026-08-13.pem"
+checksum_url = "https://curl.se/ca/cacert-2026-08-13.pem.sha256"
+bundle_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
+checksum_sha256 = "2d55c7d3d1f3ed1989e4ad5f4e8124df16eb42ae8a88715385dd4348b2efc986"
+bundle_size = 188900
+checksum_size = 88
+certificate_count = 121
+
+[profile]
+id = "x86_64-smp-p4k"
+revision_schema = "pocket-profile-v1"
+architecture = "x86_64"
+oci_os = "linux"
+oci_architecture = "amd64"
+guest_page_size = 4096
+smp_enabled = true
+compiled_nr_cpus = 16
+product_max_cpus = 16
+effective_max_cpus = 16
+minimum_memory_bytes = 67108864
+default_memory_bytes = 268435456
+product_max_memory_bytes = 4294967296
+effective_max_memory_bytes = 4294967296
+builder_memory_bytes = 536870912
+validator_memory_bytes = 536870912
+memory_alignment_bytes = 4096
+cpu_state_hwcap_policy = "native-x86_64-v1"
+guest_capability_policy = "fixed-capabilities-v1"
+ipv6_enabled = false
+root_layout = "pocket-root-v1"
+filesystem_contract = "ext4-v1-b4096"
+backend = "seccomp-on-required"
+trust_model = "trusted-guest-userspace"
+
+[development_tools]
+host_distribution = "Ubuntu 26.04"
+cc_family = "gcc"
+cc_major = 15
+rust = "1.93.1"
+go = "1.25.6"
+skopeo = "1.23.0"
+umoci = "0.4.7"
+e2fsprogs = "1.47.2"
+
+[development_artifacts]
+linux_uml_sha256 = "de73a26e07af2f32997e19e7bf4efacda3b04e24a21ebb54b7c5e73717585c7d"
+linux_uml_config_sha256 = "702cd93edba8bc79c69f60ad14abea4fd646aa7122d175386ff30416927b7dd6"
+probe_initramfs_sha256 = "4a53447c3834daee54381860931a37ea582c3072fb633c94e550073c606d451e"
+busybox_sha256 = "df12634c17fcdca839ae5dc47d7627b7558511f7645de7c99ccf097a0f28ed5b"
+umoci_sha256 = "4796f71e1dc93959b5d5c33066ee5a51542a16879df92a21fc0d6227a62d89d6"
+glibc_sha256 = "a3947513a02831ec692ebf13053c07614882ab54a2101fb91a1b15724062ed0c"
+glibc_loader_sha256 = "c5e80a563850d6ab5c2f2482e4202d9c1b71fbf44854b8c399e63527202c64e1"
+mke2fs_sha256 = "1513871ea05424b488136cfb146e618e12e4e673c653fe5371b0a677316a5a55"
+e2fsck_sha256 = "f8632c92b49cb458d6856200baaf601a7f1a3f68e56cc4723b93645776194978"
+skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b849885780"
+registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
+mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
+e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+profile_template_sha256 = "c77f757e85420aa05f0f7e8a3de1d2e1f97aa00e9432e52266ea0e05ea51066e"
+
+[fixtures.ubuntu_24_04]
+reference = "docker://docker.io/library/ubuntu:24.04"
+resolved_manifest = "sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517"
+platform = "linux/amd64"
+observed = "2026-08-28"
+payload_ext4_uuid = "8b4c6476-27ed-5579-bfc8-4d5147b37aa3"
+root_ext4_uuid = "432e05c8-2460-5cb2-bda0-e3da146d3ad1"
+
+[fixtures.ubuntu_26_04]
+reference = "docker://docker.io/library/ubuntu:26.04"
+resolved_manifest = "sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b"
+platform = "linux/amd64"
+observed = "2026-08-28"
+payload_ext4_uuid = "1ee9e6b0-77b8-53a9-b5ce-01c5247b2186"
+root_ext4_uuid = "c58e961d-0624-550d-bb9b-b86afafeab43"

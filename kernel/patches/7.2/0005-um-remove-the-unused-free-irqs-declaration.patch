@@ -1,0 +1,22 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: remove the now unused free_irqs() declaration
+
+free_irqs() no longer exists: the previous patch replaced it with a static
+work-item drain inside arch/um/drivers/chan_kern.c, and nothing outside that
+file calls it.
+---
+ arch/um/include/shared/irq_kern.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/um/include/shared/irq_kern.h b/arch/um/include/shared/irq_kern.h
+index 44357fa6ee29..f2dc817abb7c 100644
+--- a/arch/um/include/shared/irq_kern.h
++++ b/arch/um/include/shared/irq_kern.h
+@@ -76,5 +76,4 @@ static inline bool um_irq_timetravel_handler_used(void)
+ }
+ 
+ void um_free_irq(int irq, void *dev_id);
+-void free_irqs(void);
+ #endif
+-- 
+2.53.0

@@ -1,0 +1,9 @@
+/build/
+/build[0-9]*/
+/build-reproduce/
+/target/
+/.pocket/
+__pycache__/
+*.pyc
+*.cow
+*.ext4

@@ -1,0 +1,35 @@
+#!/bin/sh
+
+set -eu
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+
+printf 'POCKET_LIFECYCLE_READY pid=%s online=' "$$"
+cat /sys/devices/system/cpu/online
+
+case " $(cat /proc/cmdline) " in
+    *" pocket.lifecycle=reboot "*)
+        printf 'POCKET_RESTART_REQUESTED\n'
+        # Give the host probe time to record the guarded process relationship
+        # before issuing the real Linux reboot syscall.
+        sleep 1
+        /bin/busybox reboot -f
+        printf 'POCKET_RESTART_FAILED\n'
+        exit 70
+        ;;
+    *" pocket.lifecycle=panic "*)
+        printf 'POCKET_PANIC_REQUESTED\n'
+        # The static probe replaces PID 1 and faults synchronously. Linux then
+        # takes the real panic/restart path governed by panic=1 and noreboot.
+        sleep 1
+        exec /bin/pocket-panic
+        printf 'POCKET_PANIC_EXEC_FAILED\n'
+        exit 71
+        ;;
+esac
+
+while :; do
+    sleep 60
+done

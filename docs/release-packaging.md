@@ -1,0 +1,156 @@
+# Experimental release packaging
+
+This repository contains a source-only packaging foundation. It can turn one
+already sealed x86_64-smp-p4k profile revision and one x86_64 pocket CLI into
+a deterministic archive, then install that archive below an unprivileged
+user's home directory. This does **not** make the project release-ready; the
+qualification gates in
+[release-support-matrix.md](release-support-matrix.md) remain mandatory.
+
+## Package contract
+
+scripts/package-release.py accepts explicit absolute paths. It does not
+select a "latest" profile:
+
+    mkdir -p "$PWD/build/packages"
+    ./scripts/package-release.py \
+      --profile "$PWD/build/profiles/x86_64-smp-p4k/FULL_64_HEX_REVISION" \
+      --pocket "$PWD/build/release/x86_64-smp-p4k/host/pocket" \
+      --output-dir "$PWD/build/packages"
+
+The packager verifies a closed profile inventory against profile.json,
+including every artifact's size and SHA-256. The profile directory and files
+must already have the sealed modes (0555 directories, 0444 data, and 0555
+executables). Symbolic links, hard-linked input files, devices, FIFOs,
+sockets, empty foreign directories, and unlisted files are rejected. The
+host CLI must be a non-group-writable, executable, little-endian x86_64 ELF
+file. The package also includes both project license texts, Cargo.lock,
+config/sources.lock.toml, these release notes, and a generated SPDX file.
+
+The output is a single uncompressed USTAR file. Publication uses an adjacent
+temporary file and a no-replace hard-link operation; an existing archive is
+never replaced. Every tar member has UID/GID 0, empty owner names, a mode of
+0444 or 0555, and the frozen linux.source_date_epoch timestamp from
+config/sources.lock.toml. Member order and JSON serialization are canonical.
+No host path is recorded.
+
+Inside the archive:
+
+    pocket-vm-<version>-<profile-id>-<full-release-revision>/
+    |-- bin/pocket
+    |-- profiles/<profile-id>/<full-revision>/...
+    +-- share/
+        |-- licenses/pocket-vm/{LICENSE-APACHE,LICENSE-MIT}
+        |-- doc/pocket-vm/...
+        +-- pocket-vm/
+            |-- Cargo.lock
+            |-- config/sources.lock.toml
+            |-- pocket-vm-source-inputs.spdx.json
+            |-- release-manifest.json
+            +-- SHA256SUMS
+
+The full release revision is a SHA-256 over the canonical identity fields and
+the complete pre-manifest payload inventory. It therefore changes when the
+CLI, sealed profile, locks, licenses, documentation, or generated SBOM
+changes. It is distinct from, and binds, the full profile revision.
+
+release-manifest.json inventories every payload except itself and
+SHA256SUMS, with exact relative path, mode, byte count, and SHA-256.
+SHA256SUMS covers every payload plus the canonical manifest; it omits only
+itself to avoid a recursive digest. The archive SHA-256 printed by the
+packager is a transport digest and should be recorded by the publication
+system. No signature is produced by this foundation.
+
+## SPDX scope
+
+The standalone generator is:
+
+    ./scripts/generate-release-sbom.py \
+      --cargo-lock "$PWD/Cargo.lock" \
+      --source-lock "$PWD/config/sources.lock.toml" \
+      --output "$PWD/build/packages/source-inputs.spdx.json"
+
+It emits deterministic SPDX 2.3 JSON. It enumerates all Cargo lockfile
+entries and the pinned Linux, e2fsprogs, Skopeo, Go-toolchain, and CA-bundle
+source coordinates from sources.lock.toml. Cargo archive checksums and pinned
+downloadable-source checksums are included when the locks contain them. Git
+object IDs are described as source coordinates, not mislabeled as file
+checksums. License fields remain NOASSERTION because neither lock is a
+license-analysis database.
+
+This is intentionally a **source-input lock inventory**, not a binary SBOM.
+It does not scan ELF dependencies, infer license conclusions, determine which
+target-specific or development Cargo entries were linked, enumerate
+unrecorded host build inputs, perform vulnerability analysis, or attest
+reproducibility. Those limitations are embedded in the SPDX document.
+
+## User-prefix installation and rollback
+
+The installer refuses effective UID 0 and accepts only an absolute prefix
+strictly below the invoking account's passwd-database home directory. Every
+existing prefix component below the home directory must be owned by that user
+and must not be group- or other-writable. It performs ordinary file-system
+operations only; it does not call sudo, a package manager, set-ID helpers, or
+privilege APIs.
+
+    ./scripts/install-release.py install \
+      --archive "$PWD/build/packages/pocket-vm-...-linux-x86_64.tar" \
+      --prefix "$HOME/.local"
+
+    ./scripts/install-release.py verify \
+      --archive "$PWD/build/packages/pocket-vm-...-linux-x86_64.tar" \
+      --prefix "$HOME/.local"
+
+The exact archive is revalidated before either operation. The validator
+rejects compression, multiple roots, duplicate paths, non-canonical paths,
+PAX metadata, links, special files, unexpected ownership/modes/timestamps,
+inventory drift, and checksum drift. Extraction is member-by-member into a
+private sibling staging directory; extractall is never used. The completed
+tree is published with Linux renameat2(RENAME_NOREPLACE).
+
+Installation deliberately separates each short immutable release tree from
+the shared immutable profile tree. This avoids nesting two full SHA-256
+identities, which can exceed pocket's 192-byte managed-path limit. The
+installer also checks the longest installed profile artifact path against
+that limit before publishing anything.
+
+Installed releases coexist at:
+
+    <prefix>/lib/pocket-vm/r/<full-release-revision>/
+
+Exact profiles coexist at:
+
+    <prefix>/lib/pocket-vm/p/<profile-id>/<full-profile-revision>/
+
+A revision-specific launcher is created at:
+
+    <prefix>/bin/pocket-<version>-<profile-id>-<full-release-revision>
+
+The launcher does not inject a profile silently. Continue to pass the exact
+installed --profile-bundle path shown in the installer's JSON output. An
+identical reinstall is an idempotent verification. An existing release tree
+or launcher that differs in any byte, mode, timestamp, or inventory entry is
+an error and is never overwritten.
+
+Profile publication happens before release-tree publication, and the
+versioned launcher is last. Each immutable tree is staged and published
+atomically on its own, and each relevant directory is fsynced. A crash can
+therefore leave an already valid profile or release tree without its later
+consumer, but never a partially populated published tree. Re-running the
+same install verifies and reuses each valid tree before completing the next
+step.
+
+There is deliberately no installer-managed unversioned pocket link and no
+mutable current pointer. Rollback means invoking the launcher and exact
+profile path of a previously installed revision. Removal is not implemented;
+retain an archive and successful verification record before manually
+removing a versioned tree.
+
+## Local packaging test
+
+scripts/test-release-packaging.sh constructs a small synthetic sealed profile,
+produces the package twice in separate directories, compares the archives
+byte-for-byte, installs and verifies it, exercises idempotent installation,
+and checks representative fail-closed corruption/link/foreign inventory
+cases. It does not replace the real-UML or clean-host release qualification
+matrix.

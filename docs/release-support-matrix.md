@@ -1,0 +1,218 @@
+# Experimental support matrix and release checklist
+
+The only packaging target described here is the current mainline Linux 7.2
+UML profile for x86_64 hosts and linux/amd64 OCI images. The package and
+installer scripts preserve the profile's own maturity field. They do not
+promote an experimental profile to release status. The `CONFIG_SMP=y`
+scheduler/RCU lifecycle panic that previously blocked this profile is fixed by
+Linux patches `0003`-`0005`; the profile is still experimental because the
+portability, byte-reproducibility, distribution, and signing gates below
+remain open, and packaging success cannot override any of them.
+
+## Declared support boundary
+
+| Dimension | Packaged boundary | Current status |
+|---|---|---|
+| Host kernel/userspace | x86_64 Linux able to execute the sealed UML and host binaries | Experimental; qualified-host range not frozen |
+| Guest architecture | x86_64 UML (EM_X86_64 host executables) | Implemented profile only |
+| OCI platform | linux/amd64, subject to the profile's accepted variants | Experimental |
+| CPU count | SMP range is 1 through the sealed profile's effective maximum (currently 16) | Qualified on this host by `make lifecycle-soak`: 100 consecutive fresh full-lifecycle launches at each of 1, 2, 4, 12, and 16 vCPUs, plus five eight-way concurrent waves, with no failure and no leaked runtime directory; `make smp-scaling` measured between 3.48x and 3.86x for four separate guest processes at four vCPUs across runs, varying with host load |
+| Guest memory | Profile minimum through effective maximum, aligned to 4096 bytes | Exact accepted physical memory observed at 64 MiB, 256 MiB, and 4 GiB through the full workload lifecycle; installed-package matrix remains a gate |
+| Networking | None | Intentional current boundary |
+| Trust model | Trusted guest userspace supplied by the user | Intentional current boundary |
+| Registry acquisition | Anonymous, fully qualified docker transport, sealed CA/Skopeo policy | Experimental |
+| Local image input | Canonical OCI layout plus constrained single-image OCI/Docker archives | Experimental |
+| Installation | User-owned prefix below passwd home; version-exact side-by-side releases | Foundation implemented; clean-host qualification pending |
+| Host libc/runtime | Not yet declared portable | Release blocker; host CLI linkage and minimum ABI need qualification |
+| arm64 UML | Not in this package/profile | Separate, recent out-of-tree port whose exact seed is Linux 7.2-rc4 plus 54 commits; native execution is feasible, but seed reproduction and a separately identified reviewed transplant onto the selected maintained release are both required—no implied mainline support |
+| Security isolation | Not a hostile-workload sandbox | Out of scope for this trusted-input profile |
+
+## Mandatory release gates
+
+Every item below must have retained, revision-bound evidence before changing
+the profile/package maturity or publishing a release. A packaging test alone
+does not satisfy any UML execution gate.
+
+- [x] Complete the Phase 0-x86-SMP corrective gate. The defect was isolated to
+  `arch/um/drivers/chan_kern.c` draining its deferred channel-IRQ list from the
+  SIGIO signal handler, where the generic `free_irq()` sleeps on a
+  `CONFIG_SMP=y` kernel. Patches `0003`-`0005` move that drain into process
+  context, and the series is bisectable: every intermediate state builds.
+  Reproduce the evidence rather than trusting this paragraph:
+  `make lifecycle-soak` ran 100 consecutive fresh full lifecycles at each of
+  1, 2, 4, 12, and 16 vCPUs plus five eight-way concurrent waves with no
+  failure and no leaked runtime directory, and `make rust-release-e2e` passes
+  for Ubuntu 24.04 and 26.04. `make diagnostic-lifecycle` rebuilds the same
+  patched source with `CONFIG_DEBUG_ATOMIC_SLEEP`, `CONFIG_PROVE_LOCKING`,
+  `CONFIG_PROVE_RCU`, `CONFIG_DEBUG_OBJECTS`, `CONFIG_DEBUG_LIST`,
+  `CONFIG_DEBUG_SPINLOCK`, and `CONFIG_DEBUG_MUTEXES`, runs the import,
+  validation, and workload lifecycles against it, and fails on any guest
+  console report; it reported none. That lane differs from the release
+  configuration in exactly two ways, both printed when it runs and both caused
+  by the kernel being a debug build: the diagnostic Kconfig fragment is merged,
+  and the guest's exact accepted-physical-memory assertion is relaxed to a
+  lower bound because a larger kernel image widens UML's own exec-shield gap
+  adjustment.
+
+  That result only became meaningful in this revision. `--console-log` set the
+  guest loglevel but never passed its path to the runtime, so it wrote no file,
+  and the scan called `grep` on a path that did not exist -- which exits 2 and
+  reads as "found nothing" to the surrounding `if`. Every earlier console scan
+  therefore passed having scanned nothing. Both halves are fixed: the runtime
+  writes the transcript on success and on failure, and the scan now fails
+  closed on a transcript that is missing, or that carries no kernel banner.
+  `assert_clean_uml_log` is hardened the same way. With both fixed, the lane
+  retains 32 non-empty transcripts, every one carrying the kernel banner, and
+  reports no validator complaint across thirty lifecycles at 1, 2 and 4 vCPUs
+  plus the stdin and process-churn cases.
+
+  That lane's stdin payload is 256 KiB rather than 1 MB, and the size is
+  measured rather than guessed. This kernel validates every lock and tracked
+  object, and the guest serial line is a per-character path, so cost per byte
+  explodes once a payload exceeds the tty buffer and flow control starts
+  cycling it. On the same host, same host binary and same guest init: 256 KiB
+  took 1.9 s on the release kernel and 2.3 s on the diagnostic one; 1 MB took
+  2.2 s on the release kernel and did not finish in 922 s on the diagnostic
+  one; 3 MB took 3.1 s on the release kernel. The release kernel is linear,
+  the debug kernel is not, and the large-payload stdin contract stays covered
+  at 3 MB by `make rust-release-e2e`. Long-duration soak testing is still
+  outstanding.
+- [x] Rebuild Linux 7.2 from the authenticated tarball and exact patch series
+  in a clean source tree; match both the Git-tree identity and canonical
+  SHA-256 source manifest before and after the build. `make kernel` performs
+  this on every invocation, and `make audit-linux-source` plus
+  `make test-linux-source-pipeline` pass against the published tree.
+- [ ] Build every Rust host/guest artifact with the pinned Rust toolchain,
+  Cargo.lock, locked/offline dependency availability, and recorded target
+  configuration. Record whether each host artifact is static and its minimum
+  required kernel/libc ABI. `make release-artifacts` pins the toolchain, the
+  lock file, and the target, and `scripts/verify-artifacts.sh` now enforces the
+  locked kernel and probe-initramfs digests; the minimum kernel/libc ABI of
+  each host artifact is still undeclared.
+- [x] Rebuild pinned e2fsprogs and Skopeo inputs from their authenticated
+  sources in the documented environment and match every artifact digest in
+  the profile. A completely fresh build root, including a new Go module cache,
+  reproduced both byte-for-byte.
+- [x] Seal a fresh profile, independently validate it in the dedicated
+  validator UML, and retain the validator transcript/evidence bound to the
+  exact profile revision. Each published generation carries a mode-0400
+  `validation-evidence.cbor` and `build-record.json`.
+- [x] Run the Rust-driven end-to-end suite with Ubuntu 24.04 and Ubuntu 26.04
+  OCI inputs through import, immutable generation publication, and workload
+  execution. `make rust-release-e2e` reports `POCKET_RUST_RELEASE_E2E_OK`.
+- [x] Exercise image Entrypoint/Cmd/Env/User/WorkingDir/StopSignal defaults,
+  explicit overrides, numeric and named users, stdin/stdout/stderr, exit
+  status, normal and real-time signals, and descendant teardown. All of these
+  are permanent end-to-end cases, including that a workload is PID 1 of its own
+  namespace and therefore discards a default-disposition signal it sends to
+  itself, exactly as Docker does.
+- [x] Exercise 1, 2, 4, 12, and 16 vCPUs (subject to host capacity), plus
+  64 MiB, 256 MiB, and 4 GiB guest memory, through the complete workload and
+  teardown lifecycle while checking accepted physical memory and absence of
+  warnings, RCU stalls, scheduler corruption, panics, dirty filesystems, or
+  post-exit failures. `make lifecycle-soak` ran one hundred consecutive fresh
+  lifecycles at each of 1, 2, 4, 12, and 16 vCPUs -- five hundred launches --
+  plus five eight-way concurrent waves, with no failure and no leaked runtime
+  directory; each memory lane reported its exact requested byte count from
+  inside the workload.
+- [x] Re-run the controlled multiprocess scaling probe and record host CPU,
+  kernel, scheduler, workload, raw timings, and speedup. `make smp-scaling`
+  measured 1678296064 ns at one vCPU against 435147776 ns at four on an idle
+  host, a 3.856x speedup, and 3.484x on a loaded one. The probe reports its raw
+  timings, so the number is a measurement rather than a constant.
+- [ ] Verify COW isolation, read-only base-image integrity, concurrent
+  launches, runtime-directory cleanup, guard cleanup after normal exit,
+  signals, protocol failure, and forced host-side interruption. COW isolation,
+  base integrity, concurrent launches, cleanup after normal exit and signals
+  are permanent end-to-end cases, and a SIGKILLed run is now reclaimed by the
+  next operation rather than leaking its directory. Injected protocol failure
+  remains outstanding.
+- [ ] Verify builder byte and inode capacity retry policy at both boundaries,
+  no partial generation publication, deterministic derivation identity, and
+  independent ext4 clean-state/UUID/size/manifest/account validation. The
+  authenticated half is now measured: two conversions of one image produce
+  byte-identical filesystem manifests, account databases and image configs.
+  The generation ID is still per-build, because the guest clock keeps running
+  and leaves every created inode's `ctime`/`crtime` -- which no syscall can
+  set -- and the journal's committed records in the raw image.
+- [x] Show that nothing in the runtime is specific to the Ubuntu fixtures.
+  `make distro-matrix` pulls and runs Debian 13, Alpine 3.22, Arch, Fedora and
+  BusyBox, and runs a scratch image that has no shell, no libc and no `/etc`
+  through its own image `Cmd`. Debian is deliberately included: its manifest
+  inlines a copy of the config blob in the descriptor's optional `data` field,
+  which the layout verifier must check rather than refuse.
+- [x] Import the same pinned OCI fixture through canonical OCI layout,
+  single-image OCI archive, and single-image Docker archive; verify the
+  documented normalization boundary and cache identity. The OCI archive
+  normalizes to the identical generation and reuses it; the Docker save archive
+  is a distinct authenticated input that builds and runs on its own.
+- [x] Run all Rust tests, Clippy with warnings denied, Rust formatting, shell
+  syntax checks, ShellCheck, Linux-source pipeline tests, and packaging tests.
+  All pass; ShellCheck reports one `SC2001` style suggestion and no warning or
+  error. These are now one committed target, `make test`, rather than commands
+  a reader had to know to type -- which is the state that lets a claim outlive
+  the check behind it. Running them from a genuinely clean checkout in
+  continuous integration is still outstanding.
+- [x] Produce the release archive twice in independent clean build roots and
+  compare the archive bytes. `make reproduce-release` does exactly this, so the
+  claim is a committed target rather than a recorded anecdote: it builds
+  everything a second time in a root that shares no download, no Go module
+  cache, no kernel object tree and no intermediate output, then requires the
+  profile revision, the whole sealed bundle tree, the host CLI, and the release
+  archive to match. The two roots produced profile revision
+  `739f92fd8919ec9b99be456837c0e3c6f1717df2f2931f0984d7d8aa59c6b272`, a
+  byte-identical bundle tree, an identical host CLI, and the identical release
+  archive
+  `aefe023bb85626ccb5da0341cf9906367ffb62237d634a80b01495d004976200`.
+- [ ] Install and verify the archive as a fresh non-root account under a
+  normal home directory; repeat on every declared host distribution/kernel.
+  Two host-layout obstacles that made this impossible on whole families of
+  hosts are now removed and covered by unit tests: a `--store` behind a
+  symlinked ancestor is resolved once rather than refused, which is what
+  rpm-ostree systems (Fedora Silverblue/Kinoite/CoreOS, Bluefin, Bazzite) need
+  because `/home` is a symlink there; and a store on NFS, 9p or FUSE falls back
+  to a checked rename instead of dying on the `EINVAL` those filesystems answer
+  to `RENAME_NOREPLACE`, at the stated cost that the store's locks rather than
+  the kernel then enforce non-replacement. Neither is yet exercised on a real
+  NFS or rpm-ostree host, which is what this gate still wants.
+- [ ] Test idempotent reinstall, coexistence of two revisions, selection of
+  an older versioned launcher/profile, corrupted archive rejection,
+  corrupted installed-tree rejection, symlink/special-member rejection, and
+  no-replace behavior under concurrent install/package attempts.
+  `scripts/test-release-packaging.sh` now covers idempotent reinstall, two
+  coexisting revisions, corrupted archive and installed-tree rejection,
+  symlink rejection, launcher recreation, and four installers racing on one
+  absent prefix: exactly one publishes and the rest verify what won. Installing
+  as a separate account and selecting an older launcher remain outstanding.
+- [ ] Validate the SPDX JSON against an independent SPDX 2.3 schema/tool.
+  Perform a separate license review and binary-composition SBOM if release
+  policy requires either; this repository's generated document is explicitly
+  source-input scoped.
+- [ ] Define artifact signing, signer identity, key custody, transparency or
+  publication log, checksum distribution, revocation, and compromised-key
+  response. The current packager does not sign output.
+- [ ] Document upgrade/removal policy and recovery from an interrupted
+  installation. The current versioned layout is rollback-friendly, but no
+  automated remover or mutable activation pointer is provided.
+- [ ] Review both project licenses, all bundled third-party notices/source
+  obligations, export controls, and distribution policy with the intended
+  publisher.
+
+## Release evidence record
+
+For each candidate, retain at least:
+
+- Git commit and clean-worktree status.
+- Complete config/sources.lock.toml and Cargo lock digests.
+- Profile ID, full profile revision, maturity, and profile.json digest.
+- Kernel, kernel config, initramfs, guard, OCI tooling, filesystem tooling,
+  and pocket CLI digests.
+- Package filename, byte size, SHA-256, canonical manifest, and SPDX digest.
+- Build host/container identity, compiler/linker versions, CPU architecture,
+  host kernel, page size, and relevant environment allowlist.
+- Commands, logs, exit statuses, and start/end timestamps for every gate.
+- Independent archive reproduction and installed-package verification
+  results.
+
+Until the checklist is complete, documentation and generated metadata must
+continue to call the result **experimental**.

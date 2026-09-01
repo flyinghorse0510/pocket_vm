@@ -1,0 +1,9 @@
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0555 0 0
+dir /sys 0555 0 0
+dir /run 0755 0 0
+dir /tmp 01777 0 0
+dir /volume 0755 0 0
+dir /newroot 0755 0 0
+file /init @POCKET_INIT@ 0755 0 0

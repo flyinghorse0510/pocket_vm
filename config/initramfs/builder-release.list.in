@@ -1,0 +1,17 @@
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0555 0 0
+dir /sys 0555 0 0
+dir /run 0755 0 0
+dir /tmp 01777 0 0
+dir /input 0755 0 0
+dir /target 0755 0 0
+dir /usr 0755 0 0
+dir /usr/bin 0755 0 0
+file /usr/bin/umoci @UMOCI@ 0755 0 0
+dir /lib 0755 0 0
+dir /lib/x86_64-linux-gnu 0755 0 0
+file /lib/x86_64-linux-gnu/libc.so.6 @LIBC@ 0755 0 0
+dir /lib64 0755 0 0
+file /lib64/ld-linux-x86-64.so.2 @LOADER@ 0755 0 0
+file /init @POCKET_BUILDER_INIT@ 0755 0 0

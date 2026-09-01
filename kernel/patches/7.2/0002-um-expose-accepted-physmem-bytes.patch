@@ -1,0 +1,51 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: expose accepted physical memory size to guest userspace
+
+UML may silently shrink an oversized mem= request to fit its host-process
+address-space layout.  /proc/meminfo reports usable guest RAM after kernel
+reservations, not the exact accepted physmem_size, so a userspace supervisor
+cannot prove that the requested amount was honored.
+
+Expose the final, page-aligned physmem_size through a UML-specific read-only
+proc file.  Pocket's guest init reports this value during its measured HELLO
+and the host refuses requested/accepted inequality.
+---
+ arch/um/kernel/um_arch.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/arch/um/kernel/um_arch.c b/arch/um/kernel/um_arch.c
+index 2141f5f1f5a2..6c6cea0fb11b 100644
+--- a/arch/um/kernel/um_arch.c
++++ b/arch/um/kernel/um_arch.c
+@@ -10,6 +10,7 @@
+ #include <linux/ctype.h>
+ #include <linux/module.h>
+ #include <linux/panic_notifier.h>
++#include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
+ #include <linux/string.h>
+ #include <linux/string_choices.h>
+@@ -137,5 +138,21 @@ static int have_console __initdata;
+ unsigned long long physmem_size = 64 * 1024 * 1024;
+ EXPORT_SYMBOL(physmem_size);
+ 
++static int uml_physmem_bytes_show(struct seq_file *m, void *unused)
++{
++	seq_printf(m, "%llu\n", physmem_size);
++	return 0;
++}
++
++static int __init uml_physmem_proc_init(void)
++{
++	if (!proc_create_single("uml_physmem_bytes", 0444, NULL,
++				uml_physmem_bytes_show))
++		return -ENOMEM;
++
++	return 0;
++}
++arch_initcall(uml_physmem_proc_init);
++
+ static const char *usage_string =
+ "User Mode Linux v%s\n"
+-- 
+2.53.0

@@ -1,0 +1,6 @@
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0555 0 0
+dir /sys 0555 0 0
+dir /candidate 0555 0 0
+file /init @POCKET_VALIDATOR_INIT@ 0755 0 0

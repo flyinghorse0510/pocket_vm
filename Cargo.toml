@@ -1,0 +1,61 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/pocket-core",
+    "crates/pocket-protocol",
+    "crates/pocket-guard",
+    "crates/pocket-oci",
+    "crates/pocket-init",
+    "crates/pocket-store",
+    "crates/pocket-runtime",
+    "crates/pocket-builder-init",
+    "crates/pocket-validator-init",
+    "crates/pocket",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0 OR MIT"
+
+[workspace.dependencies]
+anyhow = "=1.0.104"
+clap = { version = "=4.6.6", features = ["derive"] }
+flate2 = { version = "=1.1.10", default-features = false, features = ["rust_backend"] }
+hex = "=0.4.3"
+minicbor = { version = "=2.3.0", features = ["std", "derive"] }
+nix = { version = "=0.31.3", default-features = false, features = [
+    "fs",
+    "mount",
+    "poll",
+    "process",
+    "resource",
+    "sched",
+    "signal",
+    "socket",
+    "term",
+    "user",
+] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.11.0"
+tempfile = "=3.27.0"
+thiserror = "=2.0.20"
+zstd = { version = "=0.13.3", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+undocumented_unsafe_blocks = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

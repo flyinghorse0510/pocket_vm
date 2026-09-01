@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -u
+
+mount -t proc proc /proc || exit 20
+mount -t sysfs sysfs /sys || exit 21
+mount -t devtmpfs devtmpfs /dev || exit 22
+mount -t ext4 -o ro /dev/ubda /input || exit 23
+mount -t ext4 /dev/ubdb /target || exit 24
+
+if [ -e /target/rootfs ]; then
+    echo 'POCKET_BUILD_ERROR target-rootfs-exists'
+    sync
+    umount /target
+    umount /input
+    poweroff -f
+fi
+
+echo 'POCKET_BUILD_BEGIN'
+if /usr/bin/umoci raw unpack --image /input:root /target/rootfs; then
+    printf '%s\n' 'pocket-root-v1' > /target/.pocket-generation
+    sync
+    echo 'POCKET_BUILD_OK'
+    umount /target
+    umount /input
+    poweroff -f
+else
+    status=$?
+    echo "POCKET_BUILD_ERROR umoci-status-$status"
+    sync
+    umount /target || true
+    umount /input || true
+    poweroff -f
+fi

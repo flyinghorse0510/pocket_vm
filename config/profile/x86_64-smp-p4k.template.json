@@ -1,0 +1,170 @@
+{
+  "schema_version": 3,
+  "profile_id": "x86_64-smp-p4k",
+  "profile_revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "maturity": "experimental",
+  "host_architecture": "x86_64",
+  "host_elf_machine": 62,
+  "oci_os": "linux",
+  "oci_architecture": "amd64",
+  "accepted_oci_variants": [null, "v1"],
+  "uml_subarchitecture": "x86_64",
+  "guest_page_size": 4096,
+  "cpu": {
+    "smp_enabled": true,
+    "product_max_cpus": 16,
+    "compiled_nr_cpus": 16,
+    "effective_max_cpus": 16
+  },
+  "memory": {
+    "minimum_bytes": 67108864,
+    "default_memory_bytes": 268435456,
+    "product_maximum_bytes": 4294967296,
+    "effective_max_memory_bytes": 4294967296,
+    "builder_memory_bytes": 536870912,
+    "validator_memory_bytes": 536870912,
+    "alignment_bytes": 4096
+  },
+  "contracts": {
+    "selector_policy": "native-amd64-v1",
+    "root_layout": "pocket-root-v1",
+    "filesystem": "ext4-v1-b4096",
+    "cpu_state_hwcap_policy": "native-x86_64-v1",
+    "guest_capability_policy": "fixed-capabilities-v1"
+  },
+  "hello": {
+    "guest_contract_id": "0000000000000000000000000000000000000000000000000000000000000000",
+    "init_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+    "kernel_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+    "required_features": [
+      "curated-dev-v1",
+      "exact-stdin-length-v1",
+      "fixed-capabilities-v1",
+      "generated-etc-v1",
+      "generation-marker-v3",
+      "loopback-ipv4-v1",
+      "namespace-mounts",
+      "nested-pidns",
+      "pre-hello-error-v1",
+      "separate-stdio",
+      "signal-forwarding",
+      "terminal-pty",
+      "terminal-resize"
+    ]
+  },
+  "builder": {
+    "hello": {
+      "guest_contract_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "init_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "kernel_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "required_features": [
+        "account-db-v1",
+        "canonical-manifest-v1",
+        "generation-marker-v3",
+        "named-user-resolution-v1",
+        "oci-input-reverify-v1",
+        "source-date-epoch-v1"
+      ]
+    },
+    "manifest_schema": "pocket-fs-manifest-v1",
+    "required_tools": [
+      {
+        "role": "umoci",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "version": "placeholder"
+      }
+    ],
+    "source_date_epoch": 1786940622
+  },
+  "validator": {
+    "hello": {
+      "guest_contract_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "init_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "kernel_build_id": "0000000000000000000000000000000000000000000000000000000000000000",
+      "required_features": [
+        "account-db-rebuild-v1",
+        "challenge-bound-evidence-v1",
+        "ext4-clean-state-v1",
+        "generation-marker-verify-v3",
+        "independent-manifest-rewalk-v1",
+        "read-only-candidate-v1"
+      ]
+    },
+    "manifest_schema": "pocket-fs-manifest-v1"
+  },
+  "launch": {
+    "linkage": "static",
+    "cooperative_backend": "seccomp-on",
+    "noreboot": true,
+    "rdinit": "/init",
+    "rootfstype": "ramfs",
+    "ubd": "cow-v3",
+    "serial": "ssl-fd-v1",
+    "network": "none",
+    "max_ubd_path_bytes": 4095,
+    "max_umid_bytes": 63,
+    "max_unix_path_bytes": 107
+  },
+  "artifacts": {
+    "guard": {
+      "path": "host/pocket-guard",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "uml": {
+      "path": "host/linux",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "skopeo": {
+      "path": "host/skopeo",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "registry_ca_bundle": {
+      "path": "host/registry-ca.pem",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "workload_initramfs": {
+      "path": "guest/workload.cpio",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "builder_initramfs": {
+      "path": "guest/builder.cpio",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "validator_initramfs": {
+      "path": "guest/validator.cpio",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "mke2fs": {
+      "path": "host/mke2fs",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "e2fsck": {
+      "path": "host/e2fsck",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "mke2fs_config": {
+      "path": "host/mke2fs.conf",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "e2fsck_config": {
+      "path": "host/e2fsck.conf",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "normalized_kernel_config": {
+      "path": "config/linux.config",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    }
+  }
+}

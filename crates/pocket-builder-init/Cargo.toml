@@ -1,0 +1,25 @@
+[package]
+name = "pocket-builder-init"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+flate2.workspace = true
+libc = "=0.2.189"
+minicbor.workspace = true
+nix = { workspace = true, features = ["hostname", "reboot", "time"] }
+pocket-core = { path = "../pocket-core" }
+pocket-protocol = { path = "../pocket-protocol" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
