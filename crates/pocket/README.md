@@ -7,7 +7,8 @@ the current UML runtime is not a security boundary for hostile code.
 The CLI never invokes a shell. It constructs an argument vector from the
 authenticated image configuration and explicit run overrides, and all profile,
 store, and runtime roots must be absolute, normalized, narrowly scoped managed
-paths.
+paths of at most 3840 bytes. The runtime root is capped at 66 instead, because
+a run's sockets live inside it and the kernel's `sockaddr_un` is 108 bytes.
 
 ## Implemented commands
 
@@ -20,8 +21,8 @@ pocket image inspect \
   IMAGE_OR_GENERATION [--json]
 
 pocket image import \
-  --profile-bundle BUNDLE --store STORE --runtime-root RUNTIME_ROOT \
-  --reference REFERENCE --platform OS/ARCH[/VARIANT] \
+  [--profile-bundle BUNDLE] [--store STORE] [--runtime-root RUNTIME_ROOT] \
+  --reference REFERENCE [--platform OS/ARCH[/VARIANT]] \
   (--oci ABSOLUTE_CANONICAL_OCI_LAYOUT | \
    --oci-archive ABSOLUTE_SINGLE_IMAGE_TAR | \
    --docker-archive ABSOLUTE_SINGLE_IMAGE_TAR) \
@@ -101,8 +102,8 @@ profile's sealed Skopeo. Archive selectors and multi-image archives are rejected
 instead of choosing an implicit tag or ordering. Relative paths and daemon
 imports remain unsupported.
 
-`image pull` accepts only an explicit, fully-qualified `docker://` registry
-source. It runs the verified profile's exact static Skopeo artifact beneath
+`image pull` accepts a registry name or an explicit `docker://` source; other
+transports are refused. It runs the verified profile's exact static Skopeo artifact beneath
 `pocket-guard`; neither executable is resolved through `PATH`. HOME, XDG,
 temporary, registry-policy, registry-configuration, and authentication state
 are private per operation. TLS verification uses the CA bundle sealed into the
@@ -214,13 +215,11 @@ does not approximate a dry run or delete anything.
 `pocket ps` lists the runs in a runtime root whose owner is still alive, one
 `id= generation= pid= started= cpus= memory_bytes=` line each, or `--json`.
 
-It reads the runtime root directly, because there is no daemon to ask. A run
-holds an exclusive lock on its own directory for its whole life, and the
-kernel releases that lock when the owner dies however it dies -- so a
-directory whose lock cannot be taken has a living owner. This is the
-reclamation sweep's test read the other way round, which is why the listing
-cannot drift out of step with reality: it *is* reality. A run killed with
-SIGKILL stops being listed immediately, without anything having to notice.
+There is no daemon to ask. A run holds an exclusive lock on its own directory
+for its whole life, and the kernel releases it when the owner dies however it
+dies, so a directory whose lock cannot be taken has a living owner. The listing
+reads that state rather than recording its own, which is why a SIGKILLed run
+leaves it immediately.
 
 ## Capabilities
 
@@ -242,10 +241,12 @@ the host's own kernel.
 
 ## Mounts the runtime provides
 
-A workload's namespace receives, in order: the image root, `procfs`, `sysfs`
-(read-only), a `tmpfs` `/dev` with a curated device set, `devpts`, `mqueue`,
-`/dev/shm` (64 MiB), a writable `cgroup2` at `/sys/fs/cgroup`, and a `tmpfs`
-`/run` (16 MiB). The cgroup hierarchy is the guest kernel's own; a container
+A workload's namespace receives the image root, `sysfs` (read-only), a `tmpfs`
+`/dev` with a curated device set, `devpts`, `mqueue`, `/dev/shm` (64 MiB), a
+writable `cgroup2` at `/sys/fs/cgroup`, a `tmpfs` `/run` (16 MiB), and
+`procfs` -- which is mounted last, by the child created after
+`CLONE_NEWPID`, so it shows that child's PID namespace rather than its
+parent's. The cgroup hierarchy is the guest kernel's own; a container
 engine will not start without one it can write.
 
 Anything the workload mounts for itself is unmounted at teardown, deepest
@@ -293,8 +294,8 @@ file and line rather than a silently ignored setting.
 
 ## Sharing host directories
 
-`--volume HOST_DIR:GUEST_DIR[:ro]` mounts a host directory into the guest over
-`hostfs`. The host directory must already exist; the guest mount point is
+`--volume HOST_DIR:GUEST_DIR[:ro|:rw]` mounts a host directory into the guest
+over `hostfs`. `:rw` is the default, written out. The host directory must already exist; the guest mount point is
 created if it does not. Writes land in the host's own directory, so unlike the
 copy-on-write root they survive the run. `:ro` mounts it read-only.
 
@@ -311,22 +312,19 @@ directory is refused with `E_CLI_INVALID_INPUT` rather than serialized or
 silently allowed: `hostfs` does not track host-side changes, so two guests
 writing through their own caches would corrupt each other's view.
 
-The claim is an advisory lock on the shared directory itself, released when the
-run's process exits. It is deliberately not a marker file inside the share: a
-marker is part of what the workload sees, and a job that tidies its own output
-directory removes the one thing keeping a second run out, after which a third
-run claims a directory the first is still writing to. Locking the directory has
-no such hole, writes nothing into the caller's folder, and needs no write
-permission, which is what makes an ordinary read-only share work. On a network
-filesystem the lock may be local to one machine, so two hosts sharing a
-directory are not excluded from each other.
+The claim is an advisory lock on the directory itself, released when the run's
+process exits. Not a marker file inside the share: a workload can see and
+delete that, and one that tidies its own output directory did. Locking the
+directory writes nothing into the caller's folder and needs no write
+permission, which is what makes a read-only share work. On a network
+filesystem the lock may be local to one machine.
 
 At most 32 volumes per run. A host path may not contain a colon, because the
 first colon separates it from the guest path. Two volumes may not name the same
 host path or the same guest path.
 
-Because `hostfs` does not track host-side changes, a file altered on the host
-while a run holds the directory may still be served from the guest's cache.
+A file altered on the host while a run holds the directory may still be served
+from the guest's cache.
 
 A shared directory is host state with host permissions. It is outside
 everything the immutable store guarantees, and a workload can write anything
@@ -338,8 +336,9 @@ caller's judgement to make.
 This build does not implement:
 
 - authenticated registry pulls, credential-helper/Docker-config discovery,
-  Docker daemon imports, archive selectors or multi-image archives, image
-  removal, or global alias/image listing;
+  Docker daemon imports, archive selectors or multi-image archives, or image
+  removal. `cache roots` lists the aliases a store holds; `image list` does not
+  exist;
 - installed-profile discovery, implicit profile selection, or `probe`;
 - PTYs, inbound port forwards, or host CPU affinity;
 - `attach`, `exec`, and `run --detach`. Each is a named command or flag that

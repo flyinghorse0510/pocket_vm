@@ -9,7 +9,14 @@ qualification gates in
 
 ## Package contract
 
-scripts/package-release.py accepts explicit absolute paths. It does not
+Most callers want the make targets, which pick the profile the last build
+sealed and pass these paths for you:
+
+    make package                       # writes build/package/<archive>.tar
+    make install PREFIX=<dir>          # builds, packages and installs
+    make install-archive ARCHIVE=<tar> PREFIX=<dir>
+
+The script beneath them accepts explicit absolute paths only. It does not
 select a "latest" profile:
 
     mkdir -p "$PWD/build/packages"
@@ -23,9 +30,10 @@ including every artifact's size and SHA-256. The profile directory and files
 must already have the sealed modes (0555 directories, 0444 data, and 0555
 executables). Symbolic links, hard-linked input files, devices, FIFOs,
 sockets, empty foreign directories, and unlisted files are rejected. The
-host CLI must be a non-group-writable, executable, little-endian x86_64 ELF
-file. The package also includes both project license texts, Cargo.lock,
-config/sources.lock.toml, these release notes, and a generated SPDX file.
+host CLI must be an executable, little-endian x86_64 ELF file that is neither
+group- nor other-writable. The package also includes both project license texts, Cargo.lock,
+config/sources.lock.toml, this document, the support matrix, and a generated
+SPDX file.
 
 The installer travels inside the archive it installs, so a machine holding
 only the tarball can still perform the digest-checked install rather than an
@@ -36,7 +44,10 @@ run the installer:
 
     tar -xf pocket-vm-....tar --strip-components=2 --wildcards \
       '*/bin/pocket-vm-install' '*/bin/pocket_release.py'
-    ./pocket-vm-install install --archive pocket-vm-....tar --prefix "$HOME/.local"
+    # The archive path must be absolute: the installer refuses one it cannot
+    # resolve without depending on the working directory.
+    ./pocket-vm-install install --archive "$PWD/pocket-vm-....tar" \
+      --prefix "$HOME/.local"
 
 Both files are part of the payload inventory, so editing either changes the
 release revision and the archive name.
@@ -47,9 +58,9 @@ so a plain `tar -xf` fails part-way: it creates each directory read-only
 before writing what belongs in it. `--delay-directory-restore` unpacks it,
 but the result is unverified, has no launcher and no configuration.
 
-The output is a single uncompressed USTAR file. Publication uses an adjacent
-temporary file and a no-replace hard-link operation; an existing archive is
-never replaced. Every tar member has UID/GID 0, empty owner names, a mode of
+The output is a single uncompressed USTAR file. Publication renames an adjacent
+temporary with `renameat2(RENAME_NOREPLACE)`; an existing archive is never
+replaced. Every tar member has UID/GID 0, empty owner names, a mode of
 0444 or 0555, and the frozen linux.source_date_epoch timestamp from
 config/sources.lock.toml. Member order and JSON serialization are canonical.
 No host path is recorded.

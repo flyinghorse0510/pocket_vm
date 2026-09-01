@@ -137,7 +137,10 @@ nothing else is needed — take it out and run it:
 tar -xf pocket-vm-....tar --strip-components=2 --wildcards \
   '*/bin/pocket-vm-install' '*/bin/pocket_release.py'
 
-./pocket-vm-install install --archive pocket-vm-....tar --prefix "$HOME/.local"
+# An absolute archive path: the installer will not resolve one against the
+# working directory.
+./pocket-vm-install install --archive "$PWD/pocket-vm-....tar" \
+  --prefix "$HOME/.local"
 ```
 
 That is the same digest-checked install as `make install`, and it writes the

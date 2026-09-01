@@ -1,19 +1,20 @@
 # pocket-runtime
 
-`pocket-runtime` is the host-side library for one trusted, networkless UML
-workload. It is not a public CLI and it is not a sandbox.
+`pocket-runtime` is the host-side library for one trusted UML workload. It is
+not a public CLI and it is not a sandbox.
 
 The implemented profile loader accepts only the current static x86_64
 contract: native `linux/amd64`, 4 KiB guest pages, a Linux 7.2-compatible
-networkless kernel configuration, ext4 with 4 KiB blocks, UML COW v3,
+kernel configuration, ext4 with 4 KiB blocks, UML COW v3,
 `seccomp=on`, `noreboot`, the fixed serial-FD topology, and the fixed guest
 capability policy. Unknown JSON fields and dynamic-linkage manifests are
-rejected. Dynamic bundles need the separately designed closed loader/library
-contract and are intentionally not guessed here.
+rejected: a dynamically linked kernel would bind the sealed profile to the
+host's libraries.
 
 `seal_profile_bundle` is the sole release-profile assembler. It copies exact
-non-symlink inputs into private staging, binds static Skopeo and a separate
-registry CA bundle alongside the UML/guard/e2fs/initramfs artifacts, derives
+non-symlink inputs into private staging, binds static Skopeo, the slirp4netns network
+helper and a separate registry CA bundle alongside the UML/guard/e2fs/initramfs
+artifacts, derives
 the guest/build identities from the measured bytes and exact protocol feature
 sets, computes the non-circular revision, and verifies the result through
 `VerifiedProfile::load`. Publication uses Linux
@@ -30,11 +31,14 @@ For every start the library:
   alias with `Store::lease_alias`, before observing generation paths;
 - verifies generation/profile/platform/filesystem agreement and the clean
   4-KiB ext4 superblock before creating any per-run state;
-- creates a mode-0700 run directory and leaves `root.cow` absent for UML to
-  initialize over the immutable base;
+- creates a mode-0700 run directory, holds an exclusive `owner.lock` on it for
+  the run's whole life -- which is what lets a later operation reclaim an
+  abandoned one and what `live_operations` reads to list running work -- and
+  leaves `root.cow` absent for UML to initialize over the immutable base;
 - maps lease, liveness, control, standard streams, and console to fixed FDs
   8–14 in a pre-exec child, then starts the verified `pocket-guard` directly
-  with a cleared environment and explicit argv;
+  with a cleared environment and explicit argv, handing it the profile's
+  network helper to start and stop for a networked run;
 - always supplies `--uml-personality`, `seccomp=on`, `noreboot`, `panic=1`,
   explicit memory/guest-memory assertions, and the SMP/guest-CPU assertion
   pair (the deliberately UP profile omits only UML's unavailable `ncpus=`
@@ -43,9 +47,9 @@ For every start the library:
   identity, and a valid COW v3 backing binding before READY;
 - captures and drains distinct stdout, stderr, console, and guard diagnostics
   with hard retained-byte caps; and
-- closes the liveness pipe, reaps or kills the guard, verifies the immutable
-  base again, and deletes only the recorded run-directory inode on failure or
-  handle drop.
+- closes the liveness pipe, reaps or kills the guard, re-verifies the immutable
+  base, and removes the run directory it recorded -- on success, on failure and
+  on handle drop alike.
 
 `HostBuilder` implements the bounded host half of the release-profile build
 contract for a direct canonical OCI layout. It authenticates the selected
@@ -64,16 +68,19 @@ It publishes the verified base and canonical `accounts.cbor`, artifact digest,
 build record, bounded log, authenticated image config, and metadata-manifest
 sidecars before updating the platform-qualified alias.
 
-Current limitations are explicit:
+Current limitations:
 
-- No terminal/PTY, managed-volume, slirp/BESS, dynamic UML/helper, or
-  retained-COW workflow is implemented by this crate.
+- No terminal/PTY, persistent managed-volume, dynamic UML/helper, or
+  retained-COW workflow is implemented by this crate. Host-directory shares and
+  slirp/BESS networking are implemented, and are carried per run in `START`
+  along with the capability policy.
 - The host builder accepts only the qualified x86 release contract and a
   direct canonical OCI image layout. It does not normalize Docker media types,
   nested indexes, or remote references, and it makes no arm64 qualification
   claim.
-- Publication is supported by builder evidence plus a guarded host `e2fsck`;
-  an independent validation-UML boot is not implemented. The build record
+- Publication is supported by builder evidence, a guarded host `e2fsck`, and an
+  independent read-only validator UML boot carrying a fresh random challenge.
+  The build record
   truthfully labels the result as exact-output-digest-only: the guest clock is
   initialized from the bounded epoch before target mount, but advancing
   realtime, generated ctime, ext4 inode generation, and journal/runtime entropy

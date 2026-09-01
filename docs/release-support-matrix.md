@@ -18,9 +18,12 @@ remain open, and packaging success cannot override any of them.
 | OCI platform | linux/amd64, subject to the profile's accepted variants | Experimental |
 | CPU count | SMP range is 1 through the sealed profile's effective maximum (currently 16) | Qualified on this host by `make lifecycle-soak`: 100 consecutive fresh full-lifecycle launches at each of 1, 2, 4, 12, and 16 vCPUs, plus five eight-way concurrent waves, with no failure and no leaked runtime directory; `make smp-scaling` measured between 3.48x and 3.86x for four separate guest processes at four vCPUs across runs, varying with host load |
 | Guest memory | Profile minimum through effective maximum, aligned to 4096 bytes | Exact accepted physical memory observed at 64 MiB, 256 MiB, and 4 GiB through the full workload lifecycle; installed-package matrix remains a gate |
-| Networking | None | Intentional current boundary |
+| Networking | Outbound NAT by default over an unprivileged userspace stack; `--network none` opts out | Implemented; inbound port forwarding is not |
+| Host directory sharing | One directory per run through hostfs, claimed by an exclusive lock on the directory | Implemented; no coherence with host-side changes while a run holds it |
+| Guest capabilities | Fixed 12-capability allowlist; `--privileged` grants the guest kernel's full set | Implemented; grants nothing on the host |
+| Managed path lengths | Store and profile up to 3840 bytes; runtime root capped at 66, derived from the kernel's 108-byte `sockaddr_un` | Hard kernel limit, not a policy choice |
 | Trust model | Trusted guest userspace supplied by the user | Intentional current boundary |
-| Registry acquisition | Anonymous, fully qualified docker transport, sealed CA/Skopeo policy | Experimental |
+| Registry acquisition | Anonymous `docker` transport, sealed CA/Skopeo policy. A bare name expands the way a registry client would; other transports are refused | Experimental |
 | Local image input | Canonical OCI layout plus constrained single-image OCI/Docker archives | Experimental |
 | Installation | User-owned prefix below passwd home; version-exact side-by-side releases | Foundation implemented; clean-host qualification pending |
 | Host libc/runtime | Not yet declared portable | Release blocker; host CLI linkage and minimum ABI need qualification |
@@ -114,8 +117,9 @@ does not satisfy any UML execution gate.
   64 MiB, 256 MiB, and 4 GiB guest memory, through the complete workload and
   teardown lifecycle while checking accepted physical memory and absence of
   warnings, RCU stalls, scheduler corruption, panics, dirty filesystems, or
-  post-exit failures. `make lifecycle-soak` ran one hundred consecutive fresh
-  lifecycles at each of 1, 2, 4, 12, and 16 vCPUs -- five hundred launches --
+  post-exit failures. `make lifecycle-soak` runs one hundred consecutive fresh
+  lifecycles at a single vCPU count, and is invoked once per count; five
+  hundred launches across 1, 2, 4, 12 and 16 vCPUs --
   plus five eight-way concurrent waves, with no failure and no leaked runtime
   directory; each memory lane reported its exact requested byte count from
   inside the workload.
@@ -217,9 +221,9 @@ does not satisfy any UML execution gate.
 - [x] Run all Rust tests, Clippy with warnings denied, Rust formatting, shell
   syntax checks, ShellCheck, Linux-source pipeline tests, and packaging tests.
   All pass; ShellCheck reports one `SC2001` style suggestion and no warning or
-  error. These are now one committed target, `make test`, rather than commands
-  a reader had to know to type -- which is the state that lets a claim outlive
-  the check behind it. Running them from a genuinely clean checkout in
+  error. The first five are one committed target, `make test`. The
+  Linux-source pipeline and packaging tests are separate targets, because both
+  rebuild or repackage and neither belongs in a check meant to be fast. Running them from a genuinely clean checkout in
   continuous integration is still outstanding.
 - [x] Produce the release archive twice in independent clean build roots and
   compare the archive bytes. `make reproduce-release` does exactly this, so the
