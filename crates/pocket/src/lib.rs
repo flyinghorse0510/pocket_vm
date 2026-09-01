@@ -154,6 +154,12 @@ struct ProfileSealArgs {
     mke2fs: PathBuf,
     #[arg(long, value_name = "PATH")]
     e2fsck: PathBuf,
+    /// Sealed static resize2fs, used by `image adjust`.
+    #[arg(long, value_name = "PATH")]
+    resize2fs: PathBuf,
+    /// Sealed static debugfs, used by `image adjust` to locate the marker.
+    #[arg(long, value_name = "PATH")]
+    debugfs: PathBuf,
     #[arg(long, value_name = "PATH")]
     mke2fs_config: PathBuf,
     #[arg(long, value_name = "PATH")]
@@ -204,6 +210,20 @@ enum ImageCommand {
         context: ImageBuildArgs,
         #[command(flatten)]
         source: ImageImportSourceArgs,
+    },
+    /// Republish an image's filesystem at a different size.
+    ///
+    /// The source is never modified: a generation is immutable, so this
+    /// publishes a new one and leaves the original in place.
+    Adjust {
+        #[command(flatten)]
+        context: ImageBuildArgs,
+        /// Image to read, as an alias reference.
+        source: String,
+        /// New filesystem size (`K`, `M`, `G`, or plain bytes), a multiple of
+        /// the 4096-byte block.
+        #[arg(long)]
+        size: String,
     },
 }
 
@@ -623,7 +643,9 @@ fn apply_config(command: &mut Command, config: &Config) {
             fill(&mut arguments.runtime_root, &config.runtime_root);
         }
         Command::Image { command } => match command {
-            ImageCommand::Pull { context, .. } | ImageCommand::Import { context, .. } => {
+            ImageCommand::Pull { context, .. }
+            | ImageCommand::Import { context, .. }
+            | ImageCommand::Adjust { context, .. } => {
                 fill(&mut context.profile_bundle, &config.profile_bundle);
                 fill(&mut context.store, &config.store);
                 fill(&mut context.runtime_root, &config.runtime_root);
@@ -751,6 +773,8 @@ fn execute_profile_seal(
             validator_initramfs: arguments.validator_initramfs,
             mke2fs: arguments.mke2fs,
             e2fsck: arguments.e2fsck,
+            resize2fs: arguments.resize2fs,
+            debugfs: arguments.debugfs,
             mke2fs_config: arguments.mke2fs_config,
             e2fsck_config: arguments.e2fsck_config,
             normalized_kernel_config: arguments.kernel_config,
@@ -808,7 +832,61 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
             acquisition_timeout,
         } => execute_image_pull(context, &source, &acquisition_timeout, stdout),
         ImageCommand::Import { context, source } => execute_image_import(context, source, stdout),
+        ImageCommand::Adjust {
+            context,
+            source,
+            size,
+        } => execute_image_adjust(context, &source, &size, stdout),
     }
+}
+
+/// Republish one image's filesystem at a different size.
+///
+/// The reference is the source's, so an adjusted image replaces its own alias
+/// and the original generation stays addressable by ID. Naming the result
+/// something else is `--reference`, exactly as for a pull.
+fn execute_image_adjust(
+    context: ImageBuildArgs,
+    source: &str,
+    size: &str,
+    stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let target_bytes = ParsedMemory::from_str(size)
+        .map_err(|error| invalid("size", error.to_string()))?
+        .bytes();
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
+    let requested_platform = requested_platform(&profile, context.platform.as_deref())?;
+    let store = open_store(required_path(&context.store, "store", "store")?)?;
+    let runtime_root = managed_runtime_root(required_path(
+        &context.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
+    let alias = alias_key(&profile, source, requested_platform.clone())?;
+    let reference = context
+        .reference
+        .clone()
+        .unwrap_or_else(|| source.to_owned());
+    let builder = HostBuilder::new(&profile, &store, runtime_root, BuilderPolicy::default())?;
+    let output = builder.adjust(pocket_runtime::AdjustRequest {
+        source: alias,
+        reference: reference.clone(),
+        target_bytes,
+    })?;
+    write_build_output(
+        stdout,
+        &context,
+        &output,
+        "adjust",
+        json!({ "source_reference": source, "target_bytes": target_bytes }),
+        &reference,
+        &platform_text(&requested_platform),
+    )?;
+    Ok(CommandStatus::SUCCESS)
 }
 
 fn execute_image_import(

@@ -541,6 +541,33 @@ Two things to know:
   the session, so the guest decides what a keystroke means. Exit the workload
   to end the run.
 
+## Disk space inside the guest
+
+A converted image's filesystem is at least **8 GiB**, and that is also the
+workload's writable space: everything outside a `--volume` goes to the
+copy-on-write overlay above it, including `/tmp`.
+
+```sh
+pocket run alpine:3.22 -- df -h /
+```
+
+The space is fixed when the image is converted, not when it runs, so change it
+on the image:
+
+```sh
+pocket image adjust --size 32G alpine:3.22     # same name, bigger filesystem
+pocket image adjust --size 2G --reference alpine:small alpine:3.22
+```
+
+Sizes must be a multiple of 4096 bytes. The original image is not modified --
+`adjust` publishes a new one and moves the alias, and `--reference` keeps the
+old name pointing where it did.
+
+The file is sparse, so a large filesystem is cheap to keep: an 8 GiB base
+holding Alpine occupies about 14 MB on disk. It is not free to *publish*,
+because the whole logical file is hashed -- roughly 20 seconds at 8 GiB, and
+proportionally longer above that.
+
 ## Using a local image instead of a registry
 
 ```sh

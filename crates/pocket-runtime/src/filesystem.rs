@@ -86,6 +86,35 @@ pub(crate) fn validate_ext4_base(path: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// The inode count and 4096-byte block count an existing ext4 image declares.
+///
+/// `image adjust` needs the source geometry before it resizes anything: the
+/// new generation's identity binds the size it was asked for and the inode
+/// count it carries over, and both have to be known before the derivation lock
+/// is taken.
+pub(crate) fn ext4_geometry(path: &Path) -> Result<(u64, u64), RuntimeError> {
+    validate_ext4_base(path)?;
+    let mut superblock = [0_u8; EXT_SUPERBLOCK_BYTES];
+    let mut file =
+        File::open(path).map_err(|error| RuntimeError::io("open ext4 base", path, error))?;
+    file.seek(SeekFrom::Start(EXT_SUPERBLOCK_OFFSET))
+        .and_then(|_| file.read_exact(&mut superblock))
+        .map_err(|error| RuntimeError::io("read ext4 superblock", path, error))?;
+    let inodes = u64::from(le_u32(&superblock, 0x00, path)?);
+    let incompat = le_u32(&superblock, 0x60, path)?;
+    let blocks_low = u64::from(le_u32(&superblock, 0x04, path)?);
+    let blocks_high = if incompat & EXT4_FEATURE_INCOMPAT_64BIT != 0 {
+        u64::from(le_u32(&superblock, 0x150, path)?)
+    } else {
+        0
+    };
+    let blocks = blocks_low | (blocks_high << 32);
+    if inodes == 0 || blocks == 0 {
+        return Err(invalid(path, "filesystem declares no inodes or no blocks"));
+    }
+    Ok((inodes, blocks))
+}
+
 fn le_u16(bytes: &[u8], offset: usize, path: &Path) -> Result<u16, RuntimeError> {
     let field = bytes
         .get(offset..offset + 2)

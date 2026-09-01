@@ -89,6 +89,8 @@ verify_digest "$KERNEL_DIR/linux" "$(lock_value development_artifacts linux_uml_
 verify_digest "$KERNEL_DIR/.config" "$(lock_value development_artifacts linux_uml_config_sha256)"
 verify_digest "$E2FS_DIR/mke2fs" "$(lock_value development_artifacts mke2fs_sha256)"
 verify_digest "$E2FS_DIR/e2fsck" "$(lock_value development_artifacts e2fsck_sha256)"
+verify_digest "$E2FS_DIR/resize2fs" "$(lock_value development_artifacts resize2fs_sha256)"
+verify_digest "$E2FS_DIR/debugfs" "$(lock_value development_artifacts debugfs_sha256)"
 verify_digest "$SKOPEO_DIR/skopeo" "$(lock_value development_artifacts skopeo_sha256)"
 verify_digest "$SKOPEO_DIR/registry-ca.pem" \
     "$(lock_value development_artifacts registry_ca_sha256)"
@@ -168,6 +170,8 @@ SEAL_JSON=$("$POCKET" profile seal \
     --validator-initramfs "$RELEASE_DIR/guest/validator.cpio" \
     --mke2fs "$E2FS_DIR/mke2fs" \
     --e2fsck "$E2FS_DIR/e2fsck" \
+    --resize2fs "$E2FS_DIR/resize2fs" \
+    --debugfs "$E2FS_DIR/debugfs" \
     --mke2fs-config "$MKE2FS_CONFIG" \
     --e2fsck-config "$E2FSCK_CONFIG" \
     --kernel-config "$KERNEL_DIR/.config" \

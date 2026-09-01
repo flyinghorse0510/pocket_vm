@@ -34,6 +34,8 @@ const BUILDER_INITRAMFS_PATH: &str = "guest/builder.cpio";
 const VALIDATOR_INITRAMFS_PATH: &str = "guest/validator.cpio";
 const MKE2FS_PATH: &str = "host/mke2fs";
 const E2FSCK_PATH: &str = "host/e2fsck";
+const RESIZE2FS_PATH: &str = "host/resize2fs";
+const DEBUGFS_PATH: &str = "host/debugfs";
 const MKE2FS_CONFIG_PATH: &str = "host/mke2fs.conf";
 const E2FSCK_CONFIG_PATH: &str = "host/e2fsck.conf";
 const KERNEL_CONFIG_PATH: &str = "config/linux.config";
@@ -52,6 +54,8 @@ pub struct ProfileArtifactSources {
     pub validator_initramfs: PathBuf,
     pub mke2fs: PathBuf,
     pub e2fsck: PathBuf,
+    pub resize2fs: PathBuf,
+    pub debugfs: PathBuf,
     pub mke2fs_config: PathBuf,
     pub e2fsck_config: PathBuf,
     pub normalized_kernel_config: PathBuf,
@@ -156,6 +160,18 @@ pub fn seal_profile_bundle(request: &ProfileSealRequest) -> Result<SealedProfile
         )?,
         mke2fs: copy_artifact(&request.artifacts.mke2fs, stage.path(), MKE2FS_PATH, 0o555)?,
         e2fsck: copy_artifact(&request.artifacts.e2fsck, stage.path(), E2FSCK_PATH, 0o555)?,
+        resize2fs: copy_artifact(
+            &request.artifacts.resize2fs,
+            stage.path(),
+            RESIZE2FS_PATH,
+            0o555,
+        )?,
+        debugfs: copy_artifact(
+            &request.artifacts.debugfs,
+            stage.path(),
+            DEBUGFS_PATH,
+            0o555,
+        )?,
         mke2fs_config: copy_artifact(
             &request.artifacts.mke2fs_config,
             stage.path(),
@@ -349,6 +365,7 @@ fn validate_template_placeholders(manifest: &ProfileManifest) -> Result<(), Mani
         ),
         ("artifacts.mke2fs", &artifacts.mke2fs, MKE2FS_PATH),
         ("artifacts.e2fsck", &artifacts.e2fsck, E2FSCK_PATH),
+        ("artifacts.resize2fs", &artifacts.resize2fs, RESIZE2FS_PATH),
         (
             "artifacts.mke2fs_config",
             &artifacts.mke2fs_config,
@@ -781,10 +798,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        BUILDER_INITRAMFS_PATH, E2FSCK_CONFIG_PATH, E2FSCK_PATH, GUARD_PATH, KERNEL_CONFIG_PATH,
-        MKE2FS_CONFIG_PATH, MKE2FS_PATH, NETWORK_HELPER_PATH, ProfileArtifactSources,
-        ProfileSealRequest, REGISTRY_CA_PATH, SKOPEO_PATH, UML_PATH, VALIDATOR_INITRAMFS_PATH,
-        WORKLOAD_INITRAMFS_PATH, seal_profile_bundle,
+        BUILDER_INITRAMFS_PATH, DEBUGFS_PATH, E2FSCK_CONFIG_PATH, E2FSCK_PATH, GUARD_PATH,
+        KERNEL_CONFIG_PATH, MKE2FS_CONFIG_PATH, MKE2FS_PATH, NETWORK_HELPER_PATH,
+        ProfileArtifactSources, ProfileSealRequest, REGISTRY_CA_PATH, RESIZE2FS_PATH, SKOPEO_PATH,
+        UML_PATH, VALIDATOR_INITRAMFS_PATH, WORKLOAD_INITRAMFS_PATH, seal_profile_bundle,
     };
     use crate::{
         ArtifactDigest, BuilderToolContract, ProfileRevision, manifest::synthetic_profile,
@@ -920,7 +937,16 @@ mod tests {
         fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).expect("output mode");
 
         let source = |name: &str| sources.join(name);
-        for name in ["guard", "uml", "skopeo", "slirp4netns", "mke2fs", "e2fsck"] {
+        for name in [
+            "guard",
+            "uml",
+            "skopeo",
+            "slirp4netns",
+            "mke2fs",
+            "e2fsck",
+            "resize2fs",
+            "debugfs",
+        ] {
             fs::write(source(name), minimal_static_elf()).expect("static ELF source");
         }
         fs::write(source("registry-ca.pem"), certificate_fixture()).expect("CA source");
@@ -978,6 +1004,8 @@ mod tests {
             ),
             (&mut manifest.artifacts.mke2fs, MKE2FS_PATH),
             (&mut manifest.artifacts.e2fsck, E2FSCK_PATH),
+            (&mut manifest.artifacts.resize2fs, RESIZE2FS_PATH),
+            (&mut manifest.artifacts.debugfs, DEBUGFS_PATH),
             (&mut manifest.artifacts.mke2fs_config, MKE2FS_CONFIG_PATH),
             (&mut manifest.artifacts.e2fsck_config, E2FSCK_CONFIG_PATH),
             (
@@ -1009,6 +1037,8 @@ mod tests {
                 validator_initramfs: source("validator.cpio"),
                 mke2fs: source("mke2fs"),
                 e2fsck: source("e2fsck"),
+                resize2fs: source("resize2fs"),
+                debugfs: source("debugfs"),
                 mke2fs_config: source("mke2fs.conf"),
                 e2fsck_config: source("e2fsck.conf"),
                 normalized_kernel_config: source("linux.config"),

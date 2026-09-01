@@ -125,6 +125,7 @@ than trust it:
 | `make distro-matrix` | six unrelated image families |
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
 | `make terminal-session` | one interactive `-t` session driven through a real PTY |
+| `make image-adjust` | an image resized both ways, each result booted |
 | `make container-engine` | dockerd inside the guest, running containers of its own |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 

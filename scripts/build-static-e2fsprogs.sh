@@ -236,9 +236,9 @@ build_once() {
             --enable-libuuid \
             --enable-libblkid \
             --disable-backtrace \
-            --disable-debugfs \
+            --enable-debugfs \
             --disable-imager \
-            --disable-resizer \
+            --enable-resizer \
             --disable-defrag \
             --disable-fsck \
             --disable-e2initrd-helper \
@@ -263,10 +263,18 @@ build_once() {
         make -C "$build_dir/e2fsck" -j "$JOBS" e2fsck.static
     timeout --signal=TERM --kill-after=30s 600s "${build_environment[@]}" \
         make -C "$build_dir/misc" -j "$JOBS" mke2fs.static
+    timeout --signal=TERM --kill-after=30s 600s "${build_environment[@]}" \
+        make -C "$build_dir/resize" -j "$JOBS" resize2fs.static
+    timeout --signal=TERM --kill-after=30s 600s "${build_environment[@]}" \
+        make -C "$build_dir/debugfs" -j "$JOBS" debugfs.static
 
     install -m 0755 "$build_dir/misc/mke2fs.static" "$result_dir/mke2fs"
     install -m 0755 "$build_dir/e2fsck/e2fsck.static" "$result_dir/e2fsck"
-    strip --strip-all --remove-section=.comment "$result_dir/mke2fs" "$result_dir/e2fsck"
+    install -m 0755 "$build_dir/resize/resize2fs.static" "$result_dir/resize2fs"
+    install -m 0755 "$build_dir/debugfs/debugfs.static" "$result_dir/debugfs"
+    strip --strip-all --remove-section=.comment \
+        "$result_dir/mke2fs" "$result_dir/e2fsck" "$result_dir/resize2fs" \
+        "$result_dir/debugfs"
 }
 
 build_once first
@@ -277,6 +285,10 @@ cmp --silent "$FIRST_RESULT/mke2fs" "$SECOND_RESULT/mke2fs" || \
     die "independent mke2fs builds are not byte-for-byte reproducible"
 cmp --silent "$FIRST_RESULT/e2fsck" "$SECOND_RESULT/e2fsck" || \
     die "independent e2fsck builds are not byte-for-byte reproducible"
+cmp --silent "$FIRST_RESULT/resize2fs" "$SECOND_RESULT/resize2fs" || \
+    die "independent resize2fs builds are not byte-for-byte reproducible"
+cmp --silent "$FIRST_RESULT/debugfs" "$SECOND_RESULT/debugfs" || \
+    die "independent debugfs builds are not byte-for-byte reproducible"
 
 verify_static_binary() {
     local binary=$1
@@ -301,6 +313,8 @@ verify_static_binary() {
 
 verify_static_binary "$FIRST_RESULT/mke2fs" mke2fs
 verify_static_binary "$FIRST_RESULT/e2fsck" e2fsck
+verify_static_binary "$FIRST_RESULT/resize2fs" resize2fs
+verify_static_binary "$FIRST_RESULT/debugfs" debugfs
 
 MKE2FS_VERSION=$("$FIRST_RESULT/mke2fs" -V 2>&1 || true)
 E2FSCK_VERSION=$("$FIRST_RESULT/e2fsck" -V 2>&1 || true)
@@ -308,6 +322,12 @@ E2FSCK_VERSION=$("$FIRST_RESULT/e2fsck" -V 2>&1 || true)
     die "unexpected mke2fs version output"
 [[ "$E2FSCK_VERSION" == *"e2fsck 1.47.2 (1-Jan-2025)"* ]] || \
     die "unexpected e2fsck version output"
+RESIZE2FS_VERSION=$("$FIRST_RESULT/resize2fs" 2>&1 || true)
+[[ "$RESIZE2FS_VERSION" == *"resize2fs 1.47.2 (1-Jan-2025)"* ]] || \
+    die "unexpected resize2fs version output"
+DEBUGFS_VERSION=$("$FIRST_RESULT/debugfs" -V 2>&1 || true)
+[[ "$DEBUGFS_VERSION" == *"debugfs 1.47.2 (1-Jan-2025)"* ]] || \
+    die "unexpected debugfs version output"
 
 SMOKE_ROOT="$WORK_ROOT/smoke-root"
 SMOKE_IMAGE="$WORK_ROOT/smoke.ext4"
@@ -335,22 +355,54 @@ timeout --signal=TERM --kill-after=5s 30s env -i \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
     "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
 
+# resize2fs is what `image adjust` runs, in both directions. Grow the smoke
+# image and shrink it back, checking the filesystem after each: a resize tool
+# that produces an unmountable result must fail here, not on an operator's
+# image.
+truncate -s 67108864 "$SMOKE_IMAGE"
+timeout --signal=TERM --kill-after=5s 60s env -i \
+    BLKID_FILE="$SMOKE_BLKID_FILE" \
+    E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
+    "$FIRST_RESULT/resize2fs" "$SMOKE_IMAGE"
+timeout --signal=TERM --kill-after=5s 30s env -i \
+    E2FSCK_CONFIG="$E2FSCK_CONFIG" BLKID_FILE="$SMOKE_BLKID_FILE" \
+    E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
+    "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
+timeout --signal=TERM --kill-after=5s 60s env -i \
+    BLKID_FILE="$SMOKE_BLKID_FILE" \
+    E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
+    "$FIRST_RESULT/resize2fs" "$SMOKE_IMAGE" 8192
+timeout --signal=TERM --kill-after=5s 30s env -i \
+    E2FSCK_CONFIG="$E2FSCK_CONFIG" BLKID_FILE="$SMOKE_BLKID_FILE" \
+    E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
+    "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
+
 MKE2FS_SHA256=$(sha256sum "$FIRST_RESULT/mke2fs" | awk '{print $1}')
 E2FSCK_SHA256=$(sha256sum "$FIRST_RESULT/e2fsck" | awk '{print $1}')
+RESIZE2FS_SHA256=$(sha256sum "$FIRST_RESULT/resize2fs" | awk '{print $1}')
+DEBUGFS_SHA256=$(sha256sum "$FIRST_RESULT/debugfs" | awk '{print $1}')
 printf 'mke2fs_sha256=%s\n' "$MKE2FS_SHA256"
 printf 'e2fsck_sha256=%s\n' "$E2FSCK_SHA256"
+printf 'resize2fs_sha256=%s\n' "$RESIZE2FS_SHA256"
+printf 'debugfs_sha256=%s\n' "$DEBUGFS_SHA256"
 [[ "$MKE2FS_SHA256" == "$(lock_value development_artifacts mke2fs_sha256)" ]] || \
     die "mke2fs SHA-256 does not match sources.lock.toml"
 [[ "$E2FSCK_SHA256" == "$(lock_value development_artifacts e2fsck_sha256)" ]] || \
     die "e2fsck SHA-256 does not match sources.lock.toml"
+[[ "$RESIZE2FS_SHA256" == "$(lock_value development_artifacts resize2fs_sha256)" ]] || \
+    die "resize2fs SHA-256 does not match sources.lock.toml"
+[[ "$DEBUGFS_SHA256" == "$(lock_value development_artifacts debugfs_sha256)" ]] || \
+    die "debugfs SHA-256 does not match sources.lock.toml"
 
 PUBLISH_DIR="$WORK_ROOT/publish"
 mkdir -p -- "$PUBLISH_DIR"
 install -m 0755 "$FIRST_RESULT/mke2fs" "$PUBLISH_DIR/mke2fs"
 install -m 0755 "$FIRST_RESULT/e2fsck" "$PUBLISH_DIR/e2fsck"
+install -m 0755 "$FIRST_RESULT/resize2fs" "$PUBLISH_DIR/resize2fs"
+install -m 0755 "$FIRST_RESULT/debugfs" "$PUBLISH_DIR/debugfs"
 (
     cd -- "$PUBLISH_DIR" || exit 1
-    sha256sum mke2fs e2fsck > SHA256SUMS
+    sha256sum mke2fs e2fsck resize2fs debugfs > SHA256SUMS
 )
 printf '%s\n' \
     'schema=pocket-static-e2fsprogs-v1' \
@@ -362,6 +414,7 @@ printf '%s\n' \
     'target=x86_64-pc-linux-gnu' \
     'linkage=static' > "$PUBLISH_DIR/BUILD-METADATA"
 touch -d "@$SOURCE_DATE_EPOCH" "$PUBLISH_DIR/mke2fs" "$PUBLISH_DIR/e2fsck" \
+    "$PUBLISH_DIR/resize2fs" "$PUBLISH_DIR/debugfs" \
     "$PUBLISH_DIR/SHA256SUMS" "$PUBLISH_DIR/BUILD-METADATA"
 
 mkdir -p -- "$(dirname -- "$OUTPUT_DIR")"

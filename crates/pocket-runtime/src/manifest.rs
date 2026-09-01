@@ -219,6 +219,8 @@ pub struct ArtifactManifest {
     pub validator_initramfs: ArtifactSpec,
     pub mke2fs: ArtifactSpec,
     pub e2fsck: ArtifactSpec,
+    pub resize2fs: ArtifactSpec,
+    pub debugfs: ArtifactSpec,
     pub mke2fs_config: ArtifactSpec,
     pub e2fsck_config: ArtifactSpec,
     pub normalized_kernel_config: ArtifactSpec,
@@ -340,6 +342,8 @@ pub struct VerifiedProfile {
     builder_initramfs: VerifiedArtifact,
     validator_initramfs: VerifiedArtifact,
     mke2fs: VerifiedArtifact,
+    resize2fs: VerifiedArtifact,
+    debugfs: VerifiedArtifact,
     e2fsck: VerifiedArtifact,
     mke2fs_config: VerifiedArtifact,
     e2fsck_config: VerifiedArtifact,
@@ -417,6 +421,16 @@ impl VerifiedProfile {
             &manifest.artifacts.e2fsck,
             ArtifactRole::HostExecutable,
         )?;
+        let resize2fs = verified_artifact(
+            &bundle_root,
+            &manifest.artifacts.resize2fs,
+            ArtifactRole::HostExecutable,
+        )?;
+        let debugfs = verified_artifact(
+            &bundle_root,
+            &manifest.artifacts.debugfs,
+            ArtifactRole::HostExecutable,
+        )?;
         let mke2fs_config = verified_artifact(
             &bundle_root,
             &manifest.artifacts.mke2fs_config,
@@ -448,6 +462,8 @@ impl VerifiedProfile {
             builder_initramfs.path.as_path(),
             validator_initramfs.path.as_path(),
             mke2fs.path.as_path(),
+            resize2fs.path.as_path(),
+            debugfs.path.as_path(),
             e2fsck.path.as_path(),
             mke2fs_config.path.as_path(),
             e2fsck_config.path.as_path(),
@@ -477,6 +493,8 @@ impl VerifiedProfile {
             builder_initramfs,
             validator_initramfs,
             mke2fs,
+            resize2fs,
+            debugfs,
             e2fsck,
             mke2fs_config,
             e2fsck_config,
@@ -571,6 +589,16 @@ impl VerifiedProfile {
     #[must_use]
     pub fn mke2fs_path(&self) -> &Path {
         &self.mke2fs.path
+    }
+
+    #[must_use]
+    pub fn resize2fs_path(&self) -> &Path {
+        &self.resize2fs.path
+    }
+
+    #[must_use]
+    pub fn debugfs_path(&self) -> &Path {
+        &self.debugfs.path
     }
 
     #[must_use]
@@ -1669,6 +1697,8 @@ pub(crate) fn synthetic_profile(root: ManagedUmlPath, smp: bool) -> VerifiedProf
             validator_initramfs: empty_artifact("guest/validator.cpio"),
             mke2fs: empty_artifact("host/mke2fs"),
             e2fsck: empty_artifact("host/e2fsck"),
+            resize2fs: empty_artifact("host/resize2fs"),
+            debugfs: empty_artifact("host/debugfs"),
             mke2fs_config: empty_artifact("host/mke2fs.conf"),
             e2fsck_config: empty_artifact("host/e2fsck.conf"),
             normalized_kernel_config: empty_artifact("audit/kernel.config"),
@@ -1727,6 +1757,16 @@ pub(crate) fn synthetic_profile(root: ManagedUmlPath, smp: bool) -> VerifiedProf
         mke2fs: VerifiedArtifact {
             path: root.as_path().join("host/mke2fs"),
             spec: manifest.artifacts.mke2fs.clone(),
+            role: ArtifactRole::HostExecutable,
+        },
+        resize2fs: VerifiedArtifact {
+            path: root.as_path().join("host/resize2fs"),
+            spec: manifest.artifacts.resize2fs.clone(),
+            role: ArtifactRole::HostExecutable,
+        },
+        debugfs: VerifiedArtifact {
+            path: root.as_path().join("host/debugfs"),
+            spec: manifest.artifacts.debugfs.clone(),
             role: ArtifactRole::HostExecutable,
         },
         e2fsck: VerifiedArtifact {
@@ -1967,6 +2007,8 @@ mod tests {
             "host/slirp4netns",
             "host/mke2fs",
             "host/e2fsck",
+            "host/resize2fs",
+            "host/debugfs",
         ] {
             let path = root_path.join(executable);
             fs::write(&path, minimal_elf(false)).expect("ELF");
@@ -2034,6 +2076,8 @@ mod tests {
             validator_initramfs: artifact(root, "guest/validator.cpio"),
             mke2fs: artifact(root, "host/mke2fs"),
             e2fsck: artifact(root, "host/e2fsck"),
+            resize2fs: artifact(root, "host/resize2fs"),
+            debugfs: artifact(root, "host/debugfs"),
             mke2fs_config: artifact(root, "host/mke2fs.conf"),
             e2fsck_config: artifact(root, "host/e2fsck.conf"),
             normalized_kernel_config: artifact(root, "audit/kernel.config"),

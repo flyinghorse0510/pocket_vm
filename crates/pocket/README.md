@@ -20,6 +20,11 @@ pocket image inspect \
   --profile-bundle BUNDLE --store STORE [--platform OS/ARCH[/VARIANT]] \
   IMAGE_OR_GENERATION [--json]
 
+pocket image adjust \
+  [--profile-bundle BUNDLE] [--store STORE] [--runtime-root RUNTIME_ROOT] \
+  [--reference REFERENCE] [--platform OS/ARCH[/VARIANT]] --size SIZE \
+  [--json] IMAGE
+
 pocket image import \
   [--profile-bundle BUNDLE] [--store STORE] [--runtime-root RUNTIME_ROOT] \
   --reference REFERENCE [--platform OS/ARCH[/VARIANT]] \
@@ -274,6 +279,41 @@ stops it with the run, so a SIGKILLed caller cannot orphan it.
 
 `-p/--publish` remains refused: the helper accepts forwards over an API socket
 that is not wired up.
+
+## Filesystem size
+
+A converted image's filesystem is sized from its contents, with a floor of
+**8 GiB**. The floor exists because the filesystem is also the workload's
+writable space: everything outside a `--volume` lands in the copy-on-write
+overlay above it, `/tmp` included, and that space is fixed when the image is
+converted rather than when it runs.
+
+It is cheap to store and not free to publish. The file is sparse -- an 8 GiB
+base holding Alpine occupies about 14 MiB -- but publication hashes the
+complete logical file, so the cost of a larger floor is time rather than disk:
+roughly 20 seconds at 8 GiB, scaling linearly.
+
+`image adjust` republishes an image's filesystem at another size, in either
+direction:
+
+```sh
+pocket image adjust --size 32G alpine:3.22
+pocket image adjust --size 2G --reference alpine:small alpine:3.22
+```
+
+The size must be a multiple of the 4096-byte block. Shrinking below what the
+contents occupy is refused by `resize2fs` rather than truncated.
+
+The source is never modified. A generation is immutable, so `adjust` copies the
+base -- preserving its holes, so the copy costs what is allocated rather than
+what is addressable -- resizes the copy, checks it with `e2fsck` before and
+after, and publishes the result as its own generation. Size is part of a
+generation's identity, because the build contract binds it, so the adjusted
+image has a different derivation key and sits beside the original rather than
+replacing it. Only the alias moves, and `--reference` keeps even that.
+
+The contents are untouched by a resize, so every sidecar the source carries
+still describes the result exactly and is copied across unchanged.
 
 ## Terminal sessions
 

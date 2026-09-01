@@ -77,6 +77,8 @@ fn profile_fixture() -> ProfileFixture {
         "host/slirp4netns",
         "host/mke2fs",
         "host/e2fsck",
+        "host/resize2fs",
+        "host/debugfs",
     ] {
         write_artifact(&root.join(relative), &minimal_elf(), 0o555);
     }
@@ -115,6 +117,8 @@ fn profile_fixture() -> ProfileFixture {
         validator_initramfs: artifact(&root, "guest/validator.cpio"),
         mke2fs: artifact(&root, "host/mke2fs"),
         e2fsck: artifact(&root, "host/e2fsck"),
+        resize2fs: artifact(&root, "host/resize2fs"),
+        debugfs: artifact(&root, "host/debugfs"),
         mke2fs_config: artifact(&root, "host/mke2fs.conf"),
         e2fsck_config: artifact(&root, "host/e2fsck.conf"),
         normalized_kernel_config: artifact(&root, "audit/kernel.config"),

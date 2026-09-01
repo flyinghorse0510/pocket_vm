@@ -19,7 +19,7 @@ mod protocol;
 mod runtime;
 mod terminal;
 
-pub use builder::{BuildOutput, BuildRequest, BuilderPolicy, HostBuilder};
+pub use builder::{AdjustRequest, BuildOutput, BuildRequest, BuilderPolicy, HostBuilder};
 pub use error::{HostBuildError, ManifestError, RuntimeError};
 pub use image::{
     ImageArgv, ImageProcessOverrides, ResolvedImageProcess, parse_image_signal,

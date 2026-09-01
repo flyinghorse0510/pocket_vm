@@ -50,7 +50,20 @@ const MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_LOG_BYTES: usize = 64 * 1024 * 1024;
 const MAX_LAYOUT_ENTRIES: usize = 16_384;
 const PAYLOAD_MINIMUM_BYTES: u64 = 128 * 1024 * 1024;
-const TARGET_MINIMUM_BYTES: u64 = 1024 * 1024 * 1024;
+/// Floor for a converted image's filesystem.
+///
+/// An image's own contents rarely need this much, but the filesystem is also
+/// the workload's writable space for the life of a run: everything outside a
+/// `--volume` lands in the copy-on-write overlay on top of it, `/tmp`
+/// included. The floor buys that room once, at image-conversion time, rather
+/// than leaving every run a few hundred megabytes from ENOSPC.
+///
+/// It is cheap because the file is sparse: an 8 GiB base costs about 69 MiB on
+/// disk, most of it the journal that `lazy_journal_init=0` writes for
+/// reproducibility. It is not free, because publication hashes the complete
+/// logical file: about 20 seconds at this size. `image adjust` moves an
+/// existing image to another size when the default does not fit.
+const TARGET_MINIMUM_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const SIZE_CLASS_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024 * 1024;
 const MAX_TARGET_BYTES: u64 = 512 * 1024 * 1024 * 1024;
@@ -161,6 +174,323 @@ struct BuildContractRecord<'a> {
     protocol_minor: u16,
 }
 
+/// One request to republish an image's filesystem at a different size.
+#[derive(Debug, Clone)]
+pub struct AdjustRequest {
+    /// The image to read. It is never modified.
+    pub source: AliasKey,
+    /// The reference the adjusted image is published under.
+    pub reference: String,
+    /// Requested filesystem size in bytes, a multiple of the 4096-byte block.
+    pub target_bytes: u64,
+}
+
+const EXT4_BLOCK_BYTES_U32: u32 = 4096;
+
+/// Bound and align one requested filesystem size.
+fn validate_target_size(bytes: u64) -> Result<u64, HostBuildError> {
+    if !bytes.is_multiple_of(u64::from(EXT4_BLOCK_BYTES_U32)) {
+        return Err(HostBuildError::invalid(
+            "target_bytes",
+            format!("must be a multiple of the {EXT4_BLOCK_BYTES_U32}-byte block size"),
+        ));
+    }
+    // The floor is the smallest filesystem the conversion contract will build,
+    // so an adjusted image stays inside the range a fresh one can occupy.
+    if bytes < PAYLOAD_MINIMUM_BYTES {
+        return Err(HostBuildError::invalid(
+            "target_bytes",
+            format!("must be at least {PAYLOAD_MINIMUM_BYTES} bytes"),
+        ));
+    }
+    if bytes > MAX_TARGET_BYTES {
+        return Err(HostBuildError::invalid(
+            "target_bytes",
+            format!("exceeds the {MAX_TARGET_BYTES}-byte maximum"),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Copy a file while preserving its holes.
+///
+/// A base image is mostly hole -- an 8 GiB filesystem holding a 10 MiB image
+/// is nearly all zero -- so a byte-for-byte copy would write gigabytes that
+/// were never allocated. `SEEK_DATA`/`SEEK_HOLE` walk only what exists.
+fn copy_sparse(source: &Path, target: &Path) -> Result<(), HostBuildError> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut input = File::open(source)
+        .map_err(|error| HostBuildError::io("open source base", source, error))?;
+    let length = input
+        .metadata()
+        .map_err(|error| HostBuildError::io("stat source base", source, error))?
+        .len();
+    // The staged base does not exist yet: on the conversion path mke2fs
+    // creates it, and here nothing has yet. `create_new` keeps that an
+    // assertion rather than an overwrite of somebody else's file.
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(target)
+        .map_err(|error| HostBuildError::io("create staged base", target, error))?;
+    output
+        .set_len(length)
+        .map_err(|error| HostBuildError::io("size staged base", target, error))?;
+
+    let mut offset = 0_u64;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    while offset < length {
+        let data = match seek_hole_aware(&input, offset, true) {
+            Some(position) => position,
+            None => break,
+        };
+        if data >= length {
+            break;
+        }
+        let end = seek_hole_aware(&input, data, false)
+            .unwrap_or(length)
+            .min(length);
+        input
+            .seek(SeekFrom::Start(data))
+            .map_err(|error| HostBuildError::io("seek source base", source, error))?;
+        output
+            .seek(SeekFrom::Start(data))
+            .map_err(|error| HostBuildError::io("seek staged base", target, error))?;
+        let mut remaining = end - data;
+        while remaining > 0 {
+            let want = usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+            let read = input
+                .read(&mut buffer[..want])
+                .map_err(|error| HostBuildError::io("read source base", source, error))?;
+            if read == 0 {
+                break;
+            }
+            output
+                .write_all(&buffer[..read])
+                .map_err(|error| HostBuildError::io("write staged base", target, error))?;
+            remaining -= read as u64;
+        }
+        offset = end;
+    }
+    output
+        .sync_all()
+        .map_err(|error| HostBuildError::io("flush staged base", target, error))
+}
+
+/// `lseek` to the next data or hole, returning `None` at end of file.
+fn seek_hole_aware(file: &File, from: u64, want_data: bool) -> Option<u64> {
+    let whence = if want_data {
+        nix::libc::SEEK_DATA
+    } else {
+        nix::libc::SEEK_HOLE
+    };
+    // SAFETY: a live descriptor and a plain integer whence; lseek touches no
+    // memory this owns.
+    let position = unsafe {
+        nix::libc::lseek(
+            std::os::fd::AsRawFd::as_raw_fd(file),
+            from as nix::libc::off_t,
+            whence,
+        )
+    };
+    if position < 0 {
+        return None;
+    }
+    u64::try_from(position).ok()
+}
+
+/// Replace the generation marker inside a staged filesystem, in place.
+///
+/// Every base carries `/.pocket-generation.cbor`, and the guest refuses to run
+/// one whose marker does not reconcile with the START it was sent. An adjusted
+/// image is a new generation with a new derivation key, so it needs a new
+/// marker or it cannot boot.
+///
+/// The replacement is exactly as long as the original -- only a fixed-width
+/// hex derivation key changes -- so this overwrites the file's own data blocks
+/// rather than unlinking and rewriting it. That leaves every piece of
+/// filesystem metadata untouched: no allocation changes, no directory changes,
+/// and nothing for a repair pass to find. `debugfs` is used only to ask where
+/// the blocks are; it never writes.
+fn rewrite_generation_marker(
+    image: &Path,
+    marker: &[u8],
+    context: &E2fsHelperContext<'_>,
+    image_bytes: u64,
+    logs: &mut Vec<StageLog>,
+) -> Result<(), HostBuildError> {
+    let log = run_guarded_helper(
+        "adjust-locate-marker",
+        E2fsHelper::Debugfs,
+        &[
+            OsString::from("-R"),
+            OsString::from(format!("blocks {GENERATION_MARKER_PATH}")),
+            image.as_os_str().to_owned(),
+        ],
+        context,
+        image_bytes,
+    )?;
+    let listing = String::from_utf8_lossy(&log.stdout.bytes).to_string();
+    logs.push(log);
+    let blocks: Vec<u64> = listing
+        .split_whitespace()
+        .filter_map(|field| field.parse::<u64>().ok())
+        .collect();
+    let block_bytes = u64::from(EXT4_BLOCK_BYTES_U32);
+    let capacity = (blocks.len() as u64).saturating_mul(block_bytes);
+    if blocks.is_empty() || capacity < marker.len() as u64 {
+        return Err(HostBuildError::invalid(
+            "generation_marker",
+            format!(
+                "marker occupies {} blocks, too few for {} bytes",
+                blocks.len(),
+                marker.len()
+            ),
+        ));
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(image)
+        .map_err(|error| HostBuildError::io("open staged base", image, error))?;
+    let mut written = 0_usize;
+    for block in blocks {
+        if written >= marker.len() {
+            break;
+        }
+        let offset = block.checked_mul(block_bytes).ok_or_else(|| {
+            HostBuildError::invalid("generation_marker", "block offset overflows")
+        })?;
+        let end = (written + block_bytes as usize).min(marker.len());
+        file.seek(std::io::SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(&marker[written..end]))
+            .map_err(|error| HostBuildError::io("write generation marker", image, error))?;
+        written = end;
+    }
+    file.sync_all()
+        .map_err(|error| HostBuildError::io("flush generation marker", image, error))
+}
+
+const GENERATION_MARKER_PATH: &str = "/.pocket-generation.cbor";
+
+/// Copy the generation marker out of a staged filesystem.
+fn read_generation_marker(
+    image: &Path,
+    context: &E2fsHelperContext<'_>,
+    image_bytes: u64,
+    logs: &mut Vec<StageLog>,
+) -> Result<Vec<u8>, HostBuildError> {
+    let target = context.tmp.join("generation-marker.cbor");
+    let _ = fs::remove_file(&target);
+    logs.push(run_guarded_helper(
+        "adjust-read-marker",
+        E2fsHelper::Debugfs,
+        &[
+            OsString::from("-R"),
+            OsString::from(format!(
+                "dump {GENERATION_MARKER_PATH} {}",
+                target.display()
+            )),
+            image.as_os_str().to_owned(),
+        ],
+        context,
+        image_bytes,
+    )?);
+    let bytes = fs::read(&target)
+        .map_err(|error| HostBuildError::io("read generation marker", &target, error))?;
+    let _ = fs::remove_file(&target);
+    if bytes.is_empty() {
+        return Err(HostBuildError::invalid(
+            "generation_marker",
+            "image carries no generation marker",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Read-only structural check of a staged filesystem.
+fn verify_filesystem(
+    image: &Path,
+    context: &E2fsHelperContext<'_>,
+    image_bytes: u64,
+    logs: &mut Vec<StageLog>,
+) -> Result<(), HostBuildError> {
+    logs.push(run_guarded_helper(
+        "adjust-verify",
+        E2fsHelper::E2fsck,
+        &[
+            OsString::from("-f"),
+            OsString::from("-n"),
+            image.as_os_str().to_owned(),
+        ],
+        context,
+        image_bytes,
+    )?);
+    Ok(())
+}
+
+/// Check, resize and re-check one staged filesystem in place.
+///
+/// Growing past the file's end is not possible, so the order differs by
+/// direction: a grow extends the file first and lets resize2fs fill it, a
+/// shrink resizes to the target block count first and truncates the emptied
+/// tail afterwards.
+///
+/// Both checks are read-only. A preening check would be the conventional
+/// choice before a resize, but `e2fsck -p` *repairs*: on a base built by
+/// `mke2fs -d` it creates the `/lost+found` the conversion never made, which
+/// would silently give the adjusted image one more directory than the source
+/// and leave the copied content manifest describing something that no longer
+/// matches. resize2fs is content with a filesystem the superblock already
+/// marks clean, which this one is, so nothing has to be repaired to proceed.
+fn resize_in_place(
+    image: &Path,
+    source_bytes: u64,
+    target_bytes: u64,
+    context: &E2fsHelperContext<'_>,
+    logs: &mut Vec<StageLog>,
+) -> Result<(), HostBuildError> {
+    let blocks = target_bytes / u64::from(EXT4_BLOCK_BYTES_U32);
+    let budget_bytes = source_bytes.max(target_bytes);
+    logs.push(run_guarded_helper(
+        "adjust-precheck",
+        E2fsHelper::E2fsck,
+        &[
+            OsString::from("-f"),
+            OsString::from("-n"),
+            image.as_os_str().to_owned(),
+        ],
+        context,
+        budget_bytes,
+    )?);
+    if target_bytes > source_bytes {
+        set_image_length(image, target_bytes)?;
+    }
+    logs.push(run_guarded_helper(
+        "adjust-resize",
+        E2fsHelper::Resize2fs,
+        &[image.as_os_str().to_owned(), blocks.to_string().into()],
+        context,
+        budget_bytes,
+    )?);
+    if target_bytes < source_bytes {
+        set_image_length(image, target_bytes)?;
+    }
+    Ok(())
+}
+
+fn set_image_length(image: &Path, bytes: u64) -> Result<(), HostBuildError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(image)
+        .map_err(|error| HostBuildError::io("open staged base", image, error))?;
+    file.set_len(bytes)
+        .map_err(|error| HostBuildError::io("resize staged base", image, error))?;
+    file.sync_all()
+        .map_err(|error| HostBuildError::io("flush staged base", image, error))
+}
+
 pub struct HostBuilder<'builder> {
     profile: &'builder VerifiedProfile,
     store: &'builder Store,
@@ -198,6 +528,169 @@ impl<'builder> HostBuilder<'builder> {
 
     /// Build or reuse one immutable generation and atomically update the exact
     /// profile/platform-qualified alias only after full store publication.
+    /// Republish one image's filesystem at a different size.
+    ///
+    /// A generation is immutable, so this never edits the source: it copies the
+    /// base, resizes the copy, and publishes the result as its own generation.
+    /// The size is part of a generation's identity -- the build contract binds
+    /// it -- so the adjusted image has a different derivation key and can sit
+    /// beside the original rather than replacing it.
+    ///
+    /// The contents are not touched, so every sidecar the source carries still
+    /// describes the result exactly and is copied across unchanged.
+    pub fn adjust(&self, request: AdjustRequest) -> Result<BuildOutput, HostBuildError> {
+        self.profile.reverify()?;
+        let source = self.store.lease_alias(&request.source)?;
+        self.adjust_leased(&source, request)
+    }
+
+    /// Adjust an image already leased by the caller.
+    pub fn adjust_leased(
+        &self,
+        source: &Lease,
+        request: AdjustRequest,
+    ) -> Result<BuildOutput, HostBuildError> {
+        let target_bytes = validate_target_size(request.target_bytes)?;
+        let generation = source.generation();
+        let source_base = generation.base_path().to_path_buf();
+        let (inodes, source_blocks) = crate::filesystem::ext4_geometry(&source_base)
+            .map_err(|error| HostBuildError::invalid("source", error.to_string()))?;
+        let source_bytes = source_blocks
+            .checked_mul(u64::from(EXT4_BLOCK_BYTES_U32))
+            .ok_or_else(|| HostBuildError::invalid("source", "source size overflows"))?;
+
+        // The identity binds what was asked for, not what the filesystem
+        // happens to report afterwards, so it is known before any lock is
+        // taken and two identical requests converge on one generation.
+        let sizing = FilesystemSizing {
+            initial: FilesystemSize {
+                bytes: target_bytes,
+                inodes,
+            },
+            retry: None,
+        };
+        let contract = build_contract_digest(self.profile, sizing)?;
+        let previous = generation.manifest().spec();
+        let spec = GenerationSpec::new(
+            previous.selected_manifest_digest(),
+            previous.config_digest(),
+            previous.layer_digests().to_vec(),
+            previous.diff_ids().to_vec(),
+            previous.descriptor_platform().cloned(),
+            previous.config_platform().clone(),
+            previous.effective_platform().clone(),
+            previous.selector_policy_id(),
+            previous.profile_id(),
+            previous.profile_revision(),
+            previous.root_layout_contract(),
+            previous.filesystem_contract(),
+            contract,
+        )?;
+
+        let derivation_key = spec.derivation_key();
+        let alias = AliasKey::new(
+            self.profile.manifest().profile_id.as_str(),
+            Digest::from_bytes(self.profile.manifest().profile_revision.as_bytes()),
+            request.reference.as_str(),
+            previous.effective_platform().clone(),
+            previous.selector_policy_id(),
+        )?;
+        let transaction = match self.store.try_begin_generation(spec)? {
+            BeginGeneration::Existing(lease) => {
+                self.store.set_alias(&alias, lease.id())?;
+                return Ok(BuildOutput {
+                    generation_id: lease.id(),
+                    derivation_key,
+                    alias_id: alias.id(),
+                    cache_hit: true,
+                });
+            }
+            BeginGeneration::Vacant(transaction) => transaction,
+        };
+
+        let mut directory = BuildDirectory::create(&self.runtime_root)?;
+        let paths = directory.paths(self.profile)?;
+        create_private_blkid_file(&paths.blkid_file)?;
+        let context = E2fsHelperContext {
+            profile: self.profile,
+            lock: transaction.lock_file(),
+            tmp: &paths.tmp_dir,
+            blkid_file: &paths.blkid_file,
+            policy: self.policy,
+        };
+
+        let staged = transaction.base_path();
+        copy_sparse(&source_base, &staged)?;
+        let mut logs = Vec::new();
+        resize_in_place(&staged, source_bytes, target_bytes, &context, &mut logs)?;
+
+        // The guest reconciles the marker in the filesystem against the START
+        // it is sent, and this is a different generation, so the marker has to
+        // say so or the adjusted image cannot boot.
+        let marker_bytes = read_generation_marker(&staged, &context, target_bytes, &mut logs)?;
+        let mut marker: GenerationMarker =
+            pocket_protocol::decode_payload(&marker_bytes).map_err(|error| {
+                HostBuildError::invalid("generation_marker", format!("cannot decode: {error}"))
+            })?;
+        marker.derivation_key = hex::encode(derivation_key.as_bytes());
+        let updated = pocket_protocol::encode_payload(&marker).map_err(|error| {
+            HostBuildError::invalid("generation_marker", format!("cannot encode: {error}"))
+        })?;
+        // The in-place rewrite depends on this: a derivation key is
+        // fixed-width hex, so the replacement is the same length and no
+        // allocation changes.
+        if updated.len() != marker_bytes.len() {
+            return Err(HostBuildError::invalid(
+                "generation_marker",
+                format!(
+                    "replacement is {} bytes against the original {}",
+                    updated.len(),
+                    marker_bytes.len()
+                ),
+            ));
+        }
+        rewrite_generation_marker(&staged, &updated, &context, target_bytes, &mut logs)?;
+        verify_filesystem(&staged, &context, target_bytes, &mut logs)?;
+
+        // The resized filesystem must declare exactly the size it was asked
+        // for; anything else is a resize that silently did something different.
+        let (_, blocks) = crate::filesystem::ext4_geometry(&staged)
+            .map_err(|error| HostBuildError::invalid("target", error.to_string()))?;
+        let observed = blocks
+            .checked_mul(u64::from(EXT4_BLOCK_BYTES_U32))
+            .ok_or_else(|| HostBuildError::invalid("target", "resized size overflows"))?;
+        if observed != target_bytes {
+            return Err(HostBuildError::invalid(
+                "target_bytes",
+                format!("resize produced {observed} bytes, not the requested {target_bytes}"),
+            ));
+        }
+
+        let mut sidecars = Vec::with_capacity(generation.manifest().sidecars().len());
+        for sidecar in generation.manifest().sidecars() {
+            let name = sidecar.name().to_owned();
+            let from = generation.directory_path().join(&name);
+            let bytes = fs::read(&from)
+                .map_err(|error| HostBuildError::io("read source sidecar", &from, error))?;
+            let mut file = transaction.create_sidecar(name.clone())?;
+            write_synced(&mut file, &bytes, "sidecar")?;
+            drop(file);
+            let (digest, size) = hash_path(&transaction.staging_path().join(&name))?;
+            sidecars.push(ImmutableSidecar::new(name, digest, size)?);
+        }
+
+        let (base_digest, _) = hash_path(&staged)?;
+        let lease = transaction.publish_leased(base_digest, &sidecars)?;
+        directory.cleanup()?;
+        self.store.set_alias(&alias, lease.id())?;
+        Ok(BuildOutput {
+            generation_id: lease.id(),
+            derivation_key,
+            alias_id: alias.id(),
+            cache_hit: false,
+        })
+    }
+
     pub fn build(&self, request: BuildRequest) -> Result<BuildOutput, HostBuildError> {
         self.profile.reverify()?;
         let prepared = prepare_build(self.profile, &request)?;
@@ -1858,6 +2351,8 @@ fn sanitized_environment(tmp: &Path) -> BTreeMap<OsString, OsString> {
 enum E2fsHelper {
     Mke2fs,
     E2fsck,
+    Resize2fs,
+    Debugfs,
 }
 
 struct E2fsHelperContext<'a> {
@@ -1873,6 +2368,8 @@ impl E2fsHelper {
         match self {
             Self::Mke2fs => profile.mke2fs_path(),
             Self::E2fsck => profile.e2fsck_path(),
+            Self::Resize2fs => profile.resize2fs_path(),
+            Self::Debugfs => profile.debugfs_path(),
         }
     }
 }
@@ -1901,6 +2398,10 @@ fn e2fs_helper_environment(
                 profile.e2fsck_config_path().as_os_str().to_owned(),
             );
         }
+        // resize2fs reads neither policy file. It is given the same sanitized
+        // environment and frozen clock as the other two so an adjusted image
+        // is reproducible from the same inputs.
+        E2fsHelper::Resize2fs | E2fsHelper::Debugfs => {}
     }
     environment.insert(
         OsString::from("E2FSPROGS_FAKE_TIME"),
