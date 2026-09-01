@@ -18,8 +18,7 @@ Your existing images work unchanged. Point it at anything on a registry.
 make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 
-pocket image pull --reference alpine:3.22 --platform linux/amd64 \
-  docker://docker.io/library/alpine:3.22
+pocket image pull alpine:3.22
 
 pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```

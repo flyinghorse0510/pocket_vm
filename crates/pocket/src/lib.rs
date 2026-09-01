@@ -175,7 +175,10 @@ enum ImageCommand {
     Pull {
         #[command(flatten)]
         context: ImageBuildArgs,
-        /// Explicit fully-qualified docker:// source; implicit transports are rejected.
+        /// Image to pull. A bare name is expanded the way a registry client
+        /// would: `alpine:3.22` becomes `docker://docker.io/library/alpine:3.22`.
+        /// An explicit `docker://` source is still accepted; other transports
+        /// are still rejected rather than guessed at.
         source: String,
         /// Bounded Skopeo wall-clock timeout (`ms`, `s`, `m`, or `h`).
         #[arg(long, default_value = "15m")]
@@ -297,12 +300,15 @@ struct ImageBuildArgs {
     /// directories. Defaults to `runtime_root` in the config file.
     #[arg(long, value_name = "PATH")]
     runtime_root: Option<PathBuf>,
-    /// Exact profile-qualified alias reference to update after publication.
+    /// Profile-qualified alias to update after publication. Defaults to the
+    /// source's own name, so a pull names an image what you asked for.
     #[arg(long, value_name = "REFERENCE")]
-    reference: String,
-    /// Required native selector assertion: OS/ARCHITECTURE[/VARIANT].
+    reference: Option<String>,
+    /// Native selector assertion: OS/ARCHITECTURE[/VARIANT]. Defaults to the
+    /// verified profile's own platform, which is the only one it can run --
+    /// so the assertion still holds, it is just no longer typed out.
     #[arg(long, value_name = "PLATFORM")]
-    platform: String,
+    platform: Option<String>,
     /// Emit stable JSON rather than key=value output.
     #[arg(long)]
     json: bool,
@@ -777,8 +783,21 @@ fn execute_image_import(
     source: ImageImportSourceArgs,
     stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
-    validate_builder_reference(&context.reference)?;
-    validate_explicit_platform_syntax(&context.platform)?;
+    // An import has no source name to borrow, so the alias stays required.
+    let reference = context.reference.clone().ok_or_else(|| {
+        invalid(
+            "reference",
+            "an import has no name of its own; pass --reference",
+        )
+    })?;
+    let context = ImageBuildArgs {
+        reference: Some(reference.clone()),
+        ..context
+    };
+    validate_builder_reference(&reference)?;
+    if let Some(platform) = context.platform.as_deref() {
+        validate_explicit_platform_syntax(platform)?;
+    }
     validate_evidence_path(context.evidence_out.as_deref())?;
     let (source_path, source_kind) = match (
         source.oci.as_deref(),
@@ -802,7 +821,7 @@ fn execute_image_import(
         "profile-bundle",
         "profile_bundle",
     )?)?;
-    let requested = requested_platform(&profile, Some(&context.platform))?;
+    let requested = requested_platform(&profile, context.platform.as_deref())?;
     let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
     let runtime_root = managed_runtime_root(required_path(
         &context.runtime_root,
@@ -821,7 +840,7 @@ fn execute_image_import(
         let image = pocket_oci::verify_canonical_layout(source_path)?;
         let output = builder.build(BuildRequest {
             oci_layout: source_path.to_path_buf(),
-            source_reference: context.reference.clone(),
+            source_reference: reference.clone(),
             requested_variant: requested.variant().map(str::to_owned),
         })?;
         let evidence = acquisition_evidence(
@@ -831,7 +850,15 @@ fn execute_image_import(
             None,
             None,
         )?;
-        write_build_output(stdout, &context, &output, "oci-import", evidence)?;
+        write_build_output(
+            stdout,
+            &context,
+            &output,
+            "oci-import",
+            evidence,
+            &reference,
+            &platform_text(&requested),
+        )?;
         return Ok(CommandStatus::SUCCESS);
     }
 
@@ -855,7 +882,7 @@ fn execute_image_import(
     validate_normalized_platform(&requested, &normalized.image)?;
     let output = builder.build(BuildRequest {
         oci_layout: acquisition.as_path().join("layout"),
-        source_reference: context.reference.clone(),
+        source_reference: reference.clone(),
         requested_variant: requested.variant().map(str::to_owned),
     })?;
     let kind_text = match source_kind {
@@ -871,7 +898,15 @@ fn execute_image_import(
         Some((archive.sha256(), archive.size())),
     )?;
     acquisition.cleanup()?;
-    write_build_output(stdout, &context, &output, kind_text, evidence)?;
+    write_build_output(
+        stdout,
+        &context,
+        &output,
+        kind_text,
+        evidence,
+        &reference,
+        &platform_text(&requested),
+    )?;
     Ok(CommandStatus::SUCCESS)
 }
 
@@ -883,9 +918,27 @@ fn execute_image_pull(
 ) -> Result<CommandStatus, CliError> {
     // These input-only checks deliberately precede profile, store, and runtime
     // path access. Authentication flags are not part of the grammar at all.
-    let source = SkopeoSource::parse(source)?;
-    validate_builder_reference(&context.reference)?;
-    validate_explicit_platform_syntax(&context.platform)?;
+    //
+    // A shorthand is expanded before anything else looks at it, so everything
+    // downstream -- parsing, evidence, the recorded source -- sees the one
+    // fully-qualified form that was actually fetched.
+    let expanded = expand_pull_source(source)?;
+    // The alias defaults to what the caller asked for rather than to the
+    // expanded form: `pocket image pull alpine:3.22` should be runnable as
+    // `alpine:3.22`, not as `docker.io/library/alpine:3.22`.
+    let reference = context
+        .reference
+        .clone()
+        .unwrap_or_else(|| source.to_owned());
+    let context = ImageBuildArgs {
+        reference: Some(reference.clone()),
+        ..context
+    };
+    let source = SkopeoSource::parse(&expanded)?;
+    validate_builder_reference(&reference)?;
+    if let Some(platform) = context.platform.as_deref() {
+        validate_explicit_platform_syntax(platform)?;
+    }
     validate_evidence_path(context.evidence_out.as_deref())?;
     let acquisition_timeout = parse_duration(acquisition_timeout)?;
 
@@ -894,7 +947,7 @@ fn execute_image_pull(
         "profile-bundle",
         "profile_bundle",
     )?)?;
-    let requested = requested_platform(&profile, Some(&context.platform))?;
+    let requested = requested_platform(&profile, context.platform.as_deref())?;
     let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
     let runtime_root = managed_runtime_root(required_path(
         &context.runtime_root,
@@ -931,7 +984,7 @@ fn execute_image_pull(
     validate_normalized_platform(&requested, &normalized.image)?;
     let output = builder.build(BuildRequest {
         oci_layout: acquisition.as_path().join("layout"),
-        source_reference: context.reference.clone(),
+        source_reference: reference.clone(),
         requested_variant: requested.variant().map(str::to_owned),
     })?;
     let evidence = acquisition_evidence(
@@ -942,7 +995,15 @@ fn execute_image_pull(
         None,
     )?;
     acquisition.cleanup()?;
-    write_build_output(stdout, &context, &output, "docker-pull", evidence)?;
+    write_build_output(
+        stdout,
+        &context,
+        &output,
+        "docker-pull",
+        evidence,
+        &reference,
+        &platform_text(&requested),
+    )?;
     Ok(CommandStatus::SUCCESS)
 }
 
@@ -1698,6 +1759,73 @@ fn alias_key(
     )?)
 }
 
+/// Expand a registry-client shorthand into the explicit source pocket needs.
+///
+/// `alpine:3.22` becomes `docker://docker.io/library/alpine:3.22`, the same
+/// two defaults every registry client applies: Docker Hub, and its `library`
+/// namespace for a single-segment name. A bare name takes `:latest`.
+///
+/// An explicit `docker://` is returned untouched. Anything else that names a
+/// transport is still refused rather than guessed at: a source that says
+/// `oci:` or `containers-storage:` means something specific, and silently
+/// treating it as a registry name would acquire the wrong thing.
+fn expand_pull_source(source: &str) -> Result<String, CliError> {
+    if source.starts_with("docker://") {
+        return Ok(source.to_owned());
+    }
+    // A named transport is matched against the exact set, not guessed at by
+    // shape: `containers-storage:x` carries no `//`, and `alpine:3.22` would
+    // look like a scheme to any rule that only searched for a colon.
+    const OTHER_TRANSPORTS: [&str; 9] = [
+        "containers-storage",
+        "dir",
+        "docker-archive",
+        "docker-daemon",
+        "oci",
+        "oci-archive",
+        "ostree",
+        "sif",
+        "tarball",
+    ];
+    if let Some((scheme, _)) = source.split_once(':')
+        && OTHER_TRANSPORTS.contains(&scheme)
+    {
+        return Err(invalid(
+            "source",
+            format!("unsupported transport {scheme:?}; use an explicit docker:// source"),
+        ));
+    }
+    let (name, tag) = split_reference_tag(source)?;
+    // A registry is anything before the first slash that looks like a host.
+    let qualified = match name.split_once('/') {
+        Some((head, _)) if head.contains('.') || head.contains(':') || head == "localhost" => {
+            name.to_owned()
+        }
+        Some(_) => format!("docker.io/{name}"),
+        None => format!("docker.io/library/{name}"),
+    };
+    Ok(format!("docker://{qualified}{tag}"))
+}
+
+/// Split a reference into its name and its `:tag`/`@digest` suffix, defaulting
+/// a bare name to `:latest`. A digest is kept exactly as written.
+fn split_reference_tag(source: &str) -> Result<(&str, String), CliError> {
+    if let Some(index) = source.find('@') {
+        return Ok((&source[..index], source[index..].to_owned()));
+    }
+    // A colon before the last slash is a registry port, not a tag.
+    let tag_at = source
+        .rfind(':')
+        .filter(|index| source[*index..].find('/').is_none());
+    match tag_at {
+        Some(index) if index + 1 == source.len() => {
+            Err(invalid("source", "image reference has an empty tag"))
+        }
+        Some(index) => Ok((&source[..index], source[index..].to_owned())),
+        None => Ok((source, ":latest".to_owned())),
+    }
+}
+
 fn requested_platform(
     profile: &VerifiedProfile,
     requested: Option<&str>,
@@ -2088,12 +2216,25 @@ fn write_generation_output(
     Ok(())
 }
 
+/// Render a platform the way `--platform` accepts it, for reporting the value
+/// a run actually used when the caller did not type one.
+fn platform_text(platform: &Platform) -> String {
+    match platform.variant() {
+        Some(variant) => format!("{}/{}/{variant}", platform.os(), platform.architecture()),
+        None => format!("{}/{}", platform.os(), platform.architecture()),
+    }
+}
+
 fn write_build_output(
     output: &mut dyn Write,
     context: &ImageBuildArgs,
     build: &BuildOutput,
     source_kind: &'static str,
     acquisition: Value,
+    // Report what was actually used, not what was typed: either may have been
+    // defaulted, and the recorded identity is built from the resolved values.
+    reference_text: &str,
+    platform_text: &str,
 ) -> Result<(), CliError> {
     let value = json!({
         "acquisition": acquisition,
@@ -2101,9 +2242,9 @@ fn write_build_output(
         "cache_hit": build.cache_hit,
         "derivation_key": build.derivation_key.to_string(),
         "generation_id": build.generation_id.to_string(),
-        "platform": context.platform,
+        "platform": platform_text,
         "profile_bundle": context.profile_bundle,
-        "reference": context.reference,
+        "reference": reference_text,
         "source_kind": source_kind,
         "store": context.store,
     });
@@ -2124,8 +2265,8 @@ fn write_build_output(
         build.derivation_key,
         build.alias_id,
         build.cache_hit,
-        context.reference,
-        context.platform,
+        reference_text,
+        platform_text,
         source_kind,
         value_text(&value["acquisition"], "selected_manifest"),
         value_text(&value["acquisition"], "selected_config"),
@@ -3012,14 +3153,15 @@ mod tests {
             "--platform",
             "linux/amd64",
         ];
+        // A bare name is now expanded the way a registry client would, so the
+        // source that must still be refused is one naming another transport.
         let mut pull = vec!["pocket", "image", "pull"];
         pull.extend(common);
-        pull.push("ubuntu:24.04");
+        pull.push("oci:/tmp/pocket/layout:tag");
         let (status, _, stderr) = invoke(&pull, &[]);
         assert_eq!(status, OPERATIONAL_ERROR_EXIT);
         let diagnostic = text(&stderr);
-        assert!(diagnostic.contains("E_IMAGE_ACQUISITION"));
-        assert!(diagnostic.contains("explicit docker://"));
+        assert!(diagnostic.contains("unsupported transport"));
         assert!(!diagnostic.contains("No such file"));
 
         let mut import = vec!["pocket", "image", "import"];
@@ -3126,8 +3268,8 @@ mod tests {
             profile_bundle: Some(PathBuf::from("/tmp/pocket/test/profile")),
             store: Some(PathBuf::from("/tmp/pocket/test/store")),
             runtime_root: Some(PathBuf::from("/tmp/pocket/test/runtime")),
-            reference: "registry.example/team/image:tag".to_owned(),
-            platform: "linux/amd64".to_owned(),
+            reference: Some("registry.example/team/image:tag".to_owned()),
+            platform: Some("linux/amd64".to_owned()),
             json: false,
             evidence_out: None,
         };
@@ -3143,6 +3285,8 @@ mod tests {
             &output,
             "oci-import",
             evidence.clone(),
+            "registry.example/team/image:tag",
+            "linux/amd64",
         )?;
         let rendered = text(&text_output);
         assert!(rendered.starts_with("generation_id=pkvm-gen-v1-"));
@@ -3161,6 +3305,8 @@ mod tests {
             &output,
             "docker-pull",
             evidence,
+            "registry.example/team/image:tag",
+            "linux/amd64",
         )?;
         let decoded: Value = serde_json::from_slice(&json_output)
             .map_err(|source| CliError::JsonOutput { source })?;
@@ -3345,5 +3491,46 @@ mod tests {
         };
         let result = emit_run_output(output, 1, &mut Vec::new(), &mut Vec::new());
         assert!(matches!(result, Err(CliError::OutputTruncated { .. })));
+    }
+
+    /// A registry client's two defaults -- Docker Hub, and its `library`
+    /// namespace for a single-segment name -- plus `:latest` for a bare name.
+    /// Anything already qualified is left exactly as written, because a
+    /// rewritten source would acquire something other than what was asked for.
+    #[test]
+    fn pull_sources_expand_the_way_a_registry_client_would() {
+        for (input, expected) in [
+            ("alpine", "docker://docker.io/library/alpine:latest"),
+            ("alpine:3.22", "docker://docker.io/library/alpine:3.22"),
+            ("myorg/tool:v1", "docker://docker.io/myorg/tool:v1"),
+            ("ghcr.io/o/i:v2", "docker://ghcr.io/o/i:v2"),
+            ("localhost:5000/i:v1", "docker://localhost:5000/i:v1"),
+            (
+                "registry.io:5000/a/b",
+                "docker://registry.io:5000/a/b:latest",
+            ),
+            (
+                "alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "docker://docker.io/library/alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            // Already explicit: untouched, including a non-Hub registry.
+            ("docker://ghcr.io/o/i:v1", "docker://ghcr.io/o/i:v1"),
+        ] {
+            assert_eq!(expand_pull_source(input).expect(input), expected, "{input}");
+        }
+
+        // Another transport means something specific; guessing would acquire
+        // the wrong thing, so it is refused rather than treated as a name.
+        for refused in ["oci:/tmp/layout:tag", "containers-storage:x", "dir:/tmp/x"] {
+            let error = expand_pull_source(refused).expect_err(refused);
+            assert!(
+                error.to_string().contains("unsupported transport"),
+                "{error}"
+            );
+        }
+        assert!(
+            expand_pull_source("alpine:").is_err(),
+            "an empty tag is refused"
+        );
     }
 }

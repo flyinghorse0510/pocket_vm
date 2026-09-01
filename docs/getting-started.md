@@ -82,8 +82,7 @@ writes a config file, so afterwards no command needs any path flags:
 make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 
-pocket image pull --reference alpine:3.22 --platform linux/amd64 \
-  docker://docker.io/library/alpine:3.22
+pocket image pull alpine:3.22
 pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```
 
@@ -203,8 +202,7 @@ runtime_root   = "/home/you/.pocket/run"
 Then the commands get short:
 
 ```sh
-pocket image pull --reference alpine:3.22 --platform linux/amd64 \
-  docker://docker.io/library/alpine:3.22
+pocket image pull alpine:3.22
 pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```
 
@@ -259,8 +257,7 @@ binary is `target/release/pocket` and every command below also needs
 `--profile-bundle`, `--store` and `--runtime-root`.
 
 ```sh
-pocket image pull --reference alpine:3.22 --platform linux/amd64 \
-  docker://docker.io/library/alpine:3.22
+pocket image pull alpine:3.22
 ```
 
 `pull` fetches the image, authenticates every blob digest, converts it to an
@@ -481,7 +478,7 @@ Reproduce all of this with `make container-engine`.
 
 ```sh
 # an already-normalized OCI layout directory
-pocket image import --reference local:tag --platform linux/amd64 \
+pocket image import --reference local:tag \
   --oci /abs/path/to/layout
 
 # a single-image OCI or Docker archive

@@ -28,10 +28,10 @@ pocket image import \
   [--evidence-out ABSENT_PATH] [--json]
 
 pocket image pull \
-  --profile-bundle BUNDLE --store STORE --runtime-root RUNTIME_ROOT \
-  --reference REFERENCE --platform OS/ARCH[/VARIANT] \
+  [--profile-bundle BUNDLE] [--store STORE] [--runtime-root RUNTIME_ROOT] \
+  [--reference REFERENCE] [--platform OS/ARCH[/VARIANT]] \
   [--acquisition-timeout DURATION] [--evidence-out ABSENT_PATH] [--json] \
-  docker://REGISTRY/REPOSITORY[:TAG|@DIGEST]
+  IMAGE | docker://REGISTRY/REPOSITORY[:TAG|@DIGEST]
 
 pocket generation inspect --store STORE GENERATION_ID [--json]
 pocket generation list --store STORE --derivation DERIVATION_KEY [--json]
@@ -114,7 +114,23 @@ snapshots `/etc/resolv.conf`, `/etc/hosts`, and `/etc/nsswitch.conf` before and
 after Skopeo, including content hashes and file/link identity; any drift fails
 the acquisition. Local archives do not consult or claim resolver evidence.
 
-Both build commands require an explicit platform assertion and alias reference.
+`image pull` accepts a registry-client shorthand: `alpine:3.22` expands to
+`docker://docker.io/library/alpine:3.22`, a single-segment name takes Docker
+Hub's `library` namespace, and a bare name takes `:latest`. A name whose first
+segment looks like a host (`ghcr.io/o/i`, `localhost:5000/i`) keeps its
+registry. An explicit `docker://` source is used verbatim. Any *other*
+transport -- `oci:`, `dir:`, `containers-storage:` and the rest of skopeo's set
+-- is still refused by name rather than reinterpreted as a repository, because
+guessing there would acquire something other than what was asked for.
+
+`--reference` defaults to the source exactly as the caller wrote it, so
+`pocket image pull alpine:3.22` is run as `alpine:3.22` rather than as its
+expanded form. `--platform` defaults to the verified profile's own
+`oci_os`/`oci_architecture`: the assertion still holds, since that is the only
+platform the profile can run, it simply no longer has to be typed. `import`
+still requires `--reference`, because a tarball has no name to borrow.
+
+Both build commands report the reference and platform they actually used.
 They emit generation, derivation, alias, and cache-hit identities in stable text
 or JSON together with the exact source kind and selected manifest/config
 digests. JSON retains the complete bounded Skopeo stdout/stderr as hex plus
