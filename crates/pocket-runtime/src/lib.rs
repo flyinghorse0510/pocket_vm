@@ -17,6 +17,7 @@ mod operation;
 mod profile_seal;
 mod protocol;
 mod runtime;
+mod terminal;
 
 pub use builder::{BuildOutput, BuildRequest, BuilderPolicy, HostBuilder};
 pub use error::{HostBuildError, ManifestError, RuntimeError};
@@ -41,5 +42,7 @@ pub use profile_seal::{
     ProfileArtifactSources, ProfileSealRequest, SealedProfile, seal_profile_bundle,
 };
 pub use runtime::{
-    CapturedStream, RunOptions, RunOutput, RunningWorkload, Runtime, RuntimePolicy, WorkloadSpec,
+    CapturedStream, RunOptions, RunOutput, RunningWorkload, Runtime, RuntimePolicy,
+    TerminalRequest, WorkloadSpec,
 };
+pub use terminal::TerminalSession;

@@ -74,6 +74,7 @@ pub const WORKLOAD_GUEST_FEATURES: &[&str] = &[
     "slirp-network-v1",
     "terminal-pty",
     "terminal-resize",
+    "terminal-stream-v1",
 ];
 
 /// Complete feature set emitted by the current builder guest init.

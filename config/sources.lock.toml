@@ -146,7 +146,7 @@ skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b84988578
 registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
 mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
 e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-profile_template_sha256 = "e5155014f35fcfcafdefea98136b9fdd217399ba60e899fa837dc9b56ce73fb2"
+profile_template_sha256 = "41e0e20fb31905c21b915a9f6ff5bd18b59fcb739028c488c4c78973d75b8319"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

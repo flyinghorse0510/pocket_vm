@@ -273,6 +273,26 @@ pub struct Start {
     /// but it is off unless asked for, because most workloads never need it.
     #[n(26)]
     pub privileged: bool,
+    /// Stream standard input for an unknown total length instead of
+    /// forwarding exactly `stdin_bytes` and then closing it.
+    ///
+    /// An interactive terminal has no length to declare: the operator keeps
+    /// typing until the workload exits. In this mode `stdin_bytes` carries no
+    /// budget and the guest forwards input until the host end hangs up. End of
+    /// file is not lost, because the PTY line discipline turns the operator's
+    /// VEOF key into the reader's end of file inside the guest; the channel
+    /// itself never has to carry that signal.
+    #[n(27)]
+    pub stdin_streaming: bool,
+    /// Initial terminal size, in rows and columns.
+    ///
+    /// The guest sizes the PTY with this when it creates it, rather than
+    /// starting at a default and being corrected: a shell that has already
+    /// drawn its prompt at the wrong width does not redraw it.
+    #[n(28)]
+    pub terminal_rows: u16,
+    #[n(29)]
+    pub terminal_columns: u16,
 }
 
 impl ValidateMessage for Start {
@@ -380,6 +400,30 @@ impl ValidateMessage for Start {
         }
         if self.stdin_bytes > MAX_STDIN_BYTES {
             return invalid("stdin_bytes", "exceeds the synchronous input cap");
+        }
+        if self.terminal {
+            if self.terminal_rows == 0 || self.terminal_columns == 0 {
+                return invalid("terminal_size", "rows and columns must be nonzero");
+            }
+        } else if self.terminal_rows != 0 || self.terminal_columns != 0 {
+            return invalid(
+                "terminal_size",
+                "a size is meaningful only for a terminal session",
+            );
+        }
+        if self.stdin_streaming {
+            if !self.terminal {
+                return invalid(
+                    "stdin_streaming",
+                    "streamed input is defined only for a terminal session",
+                );
+            }
+            if self.stdin_bytes != 0 {
+                return invalid(
+                    "stdin_streaming",
+                    "streamed input declares no length, so stdin_bytes must be zero",
+                );
+            }
         }
         validate_signal("stop_signal", self.stop_signal)?;
         Ok(())
@@ -853,6 +897,9 @@ mod tests {
             terminal: false,
             network_mode: 0,
             privileged: false,
+            stdin_streaming: false,
+            terminal_rows: 0,
+            terminal_columns: 0,
             stop_signal: 15,
             derivation_key: digest('f'),
             account_db_sha256: digest('9'),
@@ -917,11 +964,17 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_exact_stdin_length_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        assert_eq!(&encoded[..2], &[0xb8, 27], "START must remain a 27-key map");
+        assert_eq!(&encoded[..2], &[0xb8, 30], "START must remain a 30-key map");
         // Trailing fields, innermost last: key 25 plus the 13-byte fixture
-        // length, then key 26 plus a one-byte boolean.
+        // length, then key 26 and key 27, each a two-byte key plus a one-byte
+        // boolean.
         let privileged_field_bytes = 2 + 1;
-        let appended_field_bytes = privileged_field_bytes + (2 + 1);
+        let streaming_field_bytes = 2 + 1;
+        // Keys 28 and 29 each carry a two-byte key and the fixture's
+        // one-byte sizes.
+        let size_field_bytes = (2 + 1) + (2 + 1);
+        let appended_field_bytes =
+            privileged_field_bytes + streaming_field_bytes + size_field_bytes + (2 + 1);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             &encoded[appended_offset..appended_offset + 2],
@@ -936,7 +989,7 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_account_database_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        let appended_field_bytes = (2 + 1) + (2 + 1) + (1 + 2 + 64);
+        let appended_field_bytes = (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (1 + 2 + 64);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             encoded[appended_offset], 24,
@@ -945,6 +998,28 @@ mod tests {
         encoded.truncate(appended_offset);
         encoded[1] = 24;
         assert!(decode_payload::<Start>(&encoded).is_err());
+    }
+
+    /// A streamed session declares no input length, and it is defined only
+    /// for a terminal. Both are enforced so a peer cannot ask for an unbounded
+    /// input pump on a channel whose reader still expects a budget.
+    #[test]
+    fn workload_start_constrains_streamed_input_to_a_terminal_with_no_budget() {
+        let mut streamed = start();
+        streamed.stdin_streaming = true;
+        streamed.terminal = true;
+        streamed.terminal_rows = 24;
+        streamed.terminal_columns = 80;
+        streamed.stdin_bytes = 0;
+        assert!(streamed.validate().is_ok());
+
+        let mut with_budget = streamed.clone();
+        with_budget.stdin_bytes = 1;
+        assert!(with_budget.validate().is_err());
+
+        let mut without_terminal = streamed;
+        without_terminal.terminal = false;
+        assert!(without_terminal.validate().is_err());
     }
 
     #[test]

@@ -53,7 +53,7 @@ pocket run \
   [--user USER[:GROUP]] [--workdir ABSOLUTE_PATH] [-e KEY=VALUE] \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
   [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
-  [--root-readonly] [-i] [--console-log ABSENT_PATH] \
+  [--root-readonly] [-i] [-t] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
 
@@ -181,9 +181,11 @@ On Linux the environment begins with Docker's default
 `HOSTNAME` equal to the selected `--hostname`. Image Env replaces those two
 defaults by key and appends its other entries in image order. Each repeated
 `-e KEY=VALUE` then replaces the last existing entry for `KEY` in place, or
-appends a new key; later CLI overrides win. Pocket does not synthesize `TERM`
-because TTY mode is unsupported, and current Moby does not synthesize `HOME`;
-either variable is preserved when supplied by the image or CLI. Host-value
+appends a new key; later CLI overrides win. `TERM` is synthesized only under
+`-t`, and only when neither the image nor `-e` already supplies one: it takes
+the host's `TERM`, or `xterm` when that is unset or is not a plain terminal
+name. Current Moby does not synthesize `HOME`; either variable is preserved
+when supplied by the image or CLI. Host-value
 lookup and the Docker API's key-only unset form are intentionally absent:
 `-e` requires an exact `KEY=VALUE`.
 
@@ -273,6 +275,46 @@ stops it with the run, so a SIGKILLed caller cannot orphan it.
 `-p/--publish` remains refused: the helper accepts forwards over an API socket
 that is not wired up.
 
+## Terminal sessions
+
+`-t` runs the workload on a terminal. The guest allocates a PTY, makes it the
+workload's controlling terminal, and gives it stdin, stdout and stderr; the
+host puts its own terminal into raw mode and streams both directions until the
+workload exits. That is what makes an interactive shell, `login`, `su`, and
+full-screen programs work.
+
+```sh
+pocket run -t alpine:3.22 -- /bin/sh
+pocket run -t --user builder alpine:3.22 -- /bin/sh   # as a pre-configured account
+```
+
+Because the host terminal is raw, keys are not interpreted by the host: `^C`,
+`^Z`, `^D` and the rest travel to the guest, and the guest's line discipline
+decides what they mean -- so `^C` interrupts the workload, not `pocket`. The
+terminal is restored on every exit path, including failures.
+
+`-t` requires that both stdin and stdout are terminals, and says so rather than
+silently falling back to buffered streams. It implies `-i`: input is streamed
+for as long as the session lasts instead of being read up front, so there is no
+16 MiB input cap and no need to close stdin before the run starts. End of file
+still reaches the workload, because the PTY turns the operator's `^D` into one.
+
+Window size is sent at startup and again on every `SIGWINCH`, so resizing the
+terminal resizes the guest's; the guest also receives `SIGWINCH` itself.
+
+Output in this mode goes straight to the terminal as it is produced rather than
+being captured, so a long session is never truncated by the capture cap. It is
+therefore not retained: `--console-log` still captures the guest *kernel*
+console, which is a different stream.
+
+The PTY is allocated before the workload's mount namespace exists. Every
+`devpts` mount is an independent instance in current kernels -- `newinstance`
+has been a no-op since mounts became independent -- so the namespace's own
+instance would renumber the terminal and break `ttyname`, and with it `tty`,
+`script` and `who`. A terminal session therefore binds the instance the PTY
+came from over the namespace's, which holds exactly this workload's own
+terminal. A run without `-t` keeps the private instance.
+
 ## Configuration file
 
 Every command that takes `--profile-bundle`, `--store` or `--runtime-root`
@@ -340,7 +382,7 @@ This build does not implement:
   removal. `cache roots` lists the aliases a store holds; `image list` does not
   exist;
 - installed-profile discovery, implicit profile selection, or `probe`;
-- PTYs, inbound port forwards, or host CPU affinity;
+- inbound port forwards or host CPU affinity;
 - `attach`, `exec`, and `run --detach`. Each is a named command or flag that
   refuses with `E_FEATURE_UNSUPPORTED` and the reason, rather than reading as
   a typo: a run is a foreground process with no daemon behind it, and it

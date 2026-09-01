@@ -491,6 +491,56 @@ Two practical notes:
 
 Reproduce all of this with `make container-engine`.
 
+## An interactive shell
+
+`-t` gives the workload a real terminal, the same way `docker run -it` does:
+
+```sh
+pocket run -t alpine:3.22 -- /bin/sh
+```
+
+```
+/ # whoami
+root
+/ # exit
+```
+
+The guest allocates a PTY and makes it the workload's controlling terminal, so
+`^C`, `^D`, line editing and full-screen programs like `vi` work, and `tty`
+resolves to a real `/dev/pts/N`. Resizing your window resizes the guest's.
+
+To get a session as an account the image already defines, name it:
+
+```sh
+pocket run -t --user daemon debian:13 -- /bin/bash
+```
+
+```
+daemon@pocket:/$ id
+uid=1(daemon) gid=1(daemon) groups=1(daemon)
+```
+
+`--user` takes a name or a `uid:gid`, and resolves names against the image's
+own `/etc/passwd`, captured when the image was converted.
+
+The image's own `login` also works, because the terminal is real:
+
+```sh
+pocket run -t debian:13 -- /bin/login -f root
+```
+
+That prints the image's MOTD and gives you a login shell. `-f` is what skips
+authentication; a plain `login` prompts for a password, which base images do
+not set for `root`, so use it with an account whose password you have set.
+
+Two things to know:
+
+- **`-t` needs a terminal on both sides.** Piping into it is refused rather
+  than quietly falling back to buffered streams. Drop `-t` to pipe.
+- **`^C` goes to the workload, not to `pocket`.** The host terminal is raw for
+  the session, so the guest decides what a keystroke means. Exit the workload
+  to end the run.
+
 ## Using a local image instead of a registry
 
 ```sh
@@ -617,7 +667,6 @@ Stated plainly, so you do not go looking:
 - **arm64.** `linux/amd64` on an x86_64 host only.
 - **Private registries.** Pulls are anonymous by design; credential flags are
   rejected.
-- **A TTY.** `--tty` is refused; streams are buffered and non-interactive.
 - **Host privileges.** `--privileged` grants capabilities inside the *guest*
   only. Nothing gives a workload any authority over the host.
 - **`attach`, `exec`, `--detach`.** There is no daemon, and a run executes one

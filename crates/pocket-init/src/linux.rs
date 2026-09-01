@@ -170,7 +170,20 @@ fn run_after_hello(
     let workload_result = (|| {
         verify_volume(config, &start)?;
         prepare_image_directories(config, &start)?;
-        let topology = IoTopology::new(start.terminal, start.stdin_bytes, stdin, stdout, stderr)?;
+        let topology = IoTopology::new(
+            start.terminal,
+            start.stdin_streaming,
+            Winsize {
+                ws_row: start.terminal_rows,
+                ws_col: start.terminal_columns,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            },
+            start.stdin_bytes,
+            stdin,
+            stdout,
+            stderr,
+        )?;
         let started = Instant::now();
         let (status, namespace_clean) =
             run_namespace(config, &start, control_reader, writer, session, topology)?;
@@ -918,13 +931,20 @@ struct IoTopology {
 impl IoTopology {
     fn new(
         terminal: bool,
+        stdin_streaming: bool,
+        initial_size: Winsize,
         stdin_bytes: u64,
         stdin: File,
         stdout: File,
         stderr: File,
     ) -> Result<Self, InitError> {
         if terminal {
-            Self::terminal(stdin_bytes, stdin, stdout, stderr)
+            // A streamed session announces no length: the pump runs until the
+            // host hangs the channel up. The workload still sees end of file,
+            // because the line discipline delivers it from the operator's VEOF
+            // key rather than from the channel.
+            let announced = (!stdin_streaming).then_some(stdin_bytes);
+            Self::terminal(announced, initial_size, stdin, stdout, stderr)
         } else {
             Self::nonterminal(stdin_bytes, stdin, stdout, stderr)
         }
@@ -964,17 +984,12 @@ impl IoTopology {
     }
 
     fn terminal(
-        stdin_bytes: u64,
+        stdin_bytes: Option<u64>,
+        initial_size: Winsize,
         stdin: File,
         stdout: File,
         _stderr: File,
     ) -> Result<Self, InitError> {
-        let initial_size = Winsize {
-            ws_row: 24,
-            ws_col: 80,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
         let pty = openpty(Some(&initial_size), None)
             .map_err(|error| InitError::syscall("terminal-pty", error))?;
         let master_for_input = dup(&pty.master)
@@ -987,8 +1002,15 @@ impl IoTopology {
         let pumps = PumpSet::new(
             true,
             vec![
-                StreamPump::new("terminal-input", stdin, master_for_input, false, false)?
-                    .with_input_limit(stdin_bytes),
+                match stdin_bytes {
+                    Some(announced) => {
+                        StreamPump::new("terminal-input", stdin, master_for_input, false, false)?
+                            .with_input_limit(announced)
+                    }
+                    None => {
+                        StreamPump::new("terminal-input", stdin, master_for_input, false, false)?
+                    }
+                },
                 StreamPump::new("terminal-output", master_for_output, stdout, true, true)?,
             ],
             Some(master_for_resize),
@@ -1688,6 +1710,28 @@ fn mount_workload_root(config: &GuestConfig, start: &Start) -> Result<WorkloadMo
     mount_host_volumes(newroot, start, &mut targets)?;
 
     create_curated_devices(newroot)?;
+
+    // A terminal session's PTY was allocated before this namespace existed,
+    // from the instance mounted at boot. Every devpts mount is an independent
+    // instance -- `get_tree_nodev`, with `newinstance` long since a no-op --
+    // so the fresh mount above renumbers the terminal: `/proc/self/fd/0` still
+    // reads `/dev/pts/N`, but that path now names a different device. That is
+    // what makes `ttyname` fail, and with it `tty`, `script`, `who` and some
+    // `login` paths. Binding the original instance over it restores the
+    // identity. The instance holds exactly this workload's own terminal, so it
+    // exposes nothing the workload does not already hold on its stdin.
+    if start.terminal {
+        let pts = format!("{newroot}/dev/pts");
+        mount(
+            Some("/dev/pts"),
+            pts.as_str(),
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        )
+        .map_err(|error| InitError::syscall("namespace-mounts", error))?;
+        targets.push(pts);
+    }
 
     let ptmx = format!("{newroot}/dev/ptmx");
     match fs::remove_file(&ptmx) {

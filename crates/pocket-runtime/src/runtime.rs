@@ -3,7 +3,7 @@ use std::{
     io::{Read, Write},
     marker::PhantomData,
     os::{
-        fd::OwnedFd,
+        fd::{AsFd, OwnedFd},
         unix::{
             fs::{MetadataExt, OpenOptionsExt},
             net::UnixStream,
@@ -12,18 +12,23 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Child, ExitStatus},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use nix::{
+    poll::{PollFd, PollFlags, PollTimeout, poll},
     sched::{CpuSet, sched_getaffinity},
     unistd::Pid,
 };
 use pocket_core::{ManagedUmlPath, ParsedMemory};
 use pocket_protocol::{
-    Exit, MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, Ready, ResourceLimit, Start, ValidateMessage,
-    VolumeSpec,
+    Exit, MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, Ready, Resize, ResourceLimit, Start,
+    ValidateMessage, VolumeSpec,
 };
 use pocket_store::{AliasKey, Digest, GenerationId, GenerationSpec, Lease, Store};
 use sha2::{Digest as _, Sha256};
@@ -71,6 +76,13 @@ pub struct RunOptions {
     pub memory: ParsedMemory,
     pub workload: WorkloadSpec,
     pub stdin: Vec<u8>,
+    /// Attach the run to this process's own terminal instead of buffering.
+    ///
+    /// A terminal session streams both directions for as long as it lasts, so
+    /// it has no input to declare up front and no output to accumulate. The
+    /// descriptors are this process's stdin and stdout: a run is a foreground
+    /// process, so its session is the controlling terminal by construction.
+    pub terminal: Option<TerminalRequest>,
     /// Write the guest console transcript to this new path. Setting it also
     /// asks the guest kernel for its full console rather than the `quiet`
     /// subset, because a transcript filtered to `pr_err` and above hides the
@@ -79,6 +91,16 @@ pub struct RunOptions {
     /// The runtime owns this rather than the caller so the transcript also
     /// exists when the run FAILS, which is the case it is wanted for.
     pub console_log: Option<PathBuf>,
+}
+
+/// The live output pump for a terminal session, and the byte total it keeps.
+type TerminalOutputPump = (JoinHandle<Result<(), String>>, Arc<AtomicU64>);
+
+/// Initial window size for an interactive terminal session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalRequest {
+    pub rows: u16,
+    pub columns: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -251,6 +273,15 @@ impl<'runtime> Runtime<'runtime> {
         lease: Lease,
         options: RunOptions,
     ) -> Result<RunningWorkload, RuntimeError> {
+        // A terminal session streams its input for an unknown length, so it
+        // declares no budget. Accepting a buffer here as well would leave two
+        // sources writing one channel.
+        if options.terminal.is_some() && !options.stdin.is_empty() {
+            return Err(RuntimeError::invalid(
+                "stdin",
+                "a terminal session streams input and cannot also take a buffer",
+            ));
+        }
         let stdin_bytes = u64::try_from(options.stdin.len())
             .ok()
             .filter(|count| *count <= MAX_STDIN_BYTES)
@@ -290,6 +321,7 @@ impl<'runtime> Runtime<'runtime> {
             account_db_sha256,
             &options.workload,
             stdin_bytes,
+            options.terminal,
         )?;
 
         let run_directory = RunDirectory::create(&self.runtime_root)?;
@@ -328,6 +360,7 @@ impl<'runtime> Runtime<'runtime> {
             self.policy,
             scaling_qualified,
             &options.stdin,
+            options.terminal,
         )?;
         active.console_log = options.console_log.clone();
         let startup_deadline = Instant::now() + self.policy.startup_timeout;
@@ -421,6 +454,90 @@ impl RunningWorkload {
             .as_mut()
             .ok_or_else(|| RuntimeError::invalid("control", "missing control channel"))?
             .send_signal(signal, Instant::now() + timeout, timeout)
+    }
+
+    /// Tell the guest its terminal changed size.
+    ///
+    /// Full-screen programs read the window size from the terminal driver, so
+    /// without this a resized window leaves the guest drawing to the old one.
+    pub fn send_resize(&mut self, rows: u16, columns: u16) -> Result<(), RuntimeError> {
+        let active = self
+            .active
+            .as_mut()
+            .ok_or_else(|| RuntimeError::invalid("lifecycle", "workload is already gone"))?;
+        let timeout = active.policy.protocol_write_timeout;
+        active
+            .control
+            .as_mut()
+            .ok_or_else(|| RuntimeError::invalid("control", "missing control channel"))?
+            .send_resize(Resize { rows, columns }, Instant::now() + timeout, timeout)
+    }
+
+    /// Wait for the workload while servicing the terminal it is attached to.
+    ///
+    /// `on_poll` is called between receive attempts and returns a new window
+    /// size when the operator has resized. The wait is polled rather than
+    /// blocking outright because a resize arriving mid-session has to be
+    /// forwarded while the workload is still running; a partly received frame
+    /// survives each timeout, so polling costs nothing but latency.
+    pub fn wait_interactive(
+        mut self,
+        mut on_poll: impl FnMut() -> Option<(u16, u16)>,
+    ) -> Result<RunOutput, RuntimeError> {
+        let (deadline, _) = execution_deadline(
+            self.active
+                .as_ref()
+                .and_then(|active| active.policy.execution_timeout),
+        );
+        loop {
+            if let Some((rows, columns)) = on_poll() {
+                // A resize is a courtesy to the workload, not a condition of
+                // the session: a guest that will not take one is still running.
+                let _ = self.send_resize(rows, columns);
+            }
+            let active = self
+                .active
+                .as_mut()
+                .ok_or_else(|| RuntimeError::invalid("lifecycle", "workload is already gone"))?;
+            // `read_frame` derives its wait from the deadline it is given, so
+            // the poll interval has to be expressed as a near deadline. A
+            // frame that arrives split across two of these is retained and
+            // completed by the next call rather than lost.
+            let slice = Instant::now()
+                .checked_add(STREAM_POLL_INTERVAL)
+                .unwrap_or(deadline)
+                .min(deadline);
+            let result = active
+                .control
+                .as_mut()
+                .ok_or_else(|| RuntimeError::invalid("control", "missing control channel"))?
+                .receive_terminal(slice, STREAM_POLL_INTERVAL);
+            match result {
+                Ok(exit) => {
+                    let active = self
+                        .active
+                        .take()
+                        .ok_or_else(|| RuntimeError::invalid("lifecycle", "workload is gone"))?;
+                    return active.finish(exit);
+                }
+                Err(error) if is_timeout(&error) => {
+                    if Instant::now() >= deadline {
+                        let active = self.active.take().ok_or_else(|| {
+                            RuntimeError::invalid("lifecycle", "workload is gone")
+                        })?;
+                        let grace = active.policy.execution_timeout_grace;
+                        return request_stop_and_wait(active, self.stop_signal, grace);
+                    }
+                }
+                Err(error) => {
+                    let active = self
+                        .active
+                        .take()
+                        .ok_or_else(|| RuntimeError::invalid("lifecycle", "workload is gone"))?;
+                    return Err(active.fail(error, "workload EXIT"));
+                }
+            }
+        }
     }
 
     pub fn wait(mut self) -> Result<RunOutput, RuntimeError> {
@@ -530,6 +647,12 @@ struct ActiveRun {
     stdin_stream: Option<UnixStream>,
     stdin_bytes: Option<Vec<u8>>,
     stdin_worker: Option<JoinHandle<Result<(), String>>>,
+    /// Terminal mode only: raised at teardown so the input pump stops waiting
+    /// on a terminal whose operator is not typing.
+    stdin_stop: Option<Arc<AtomicBool>>,
+    /// Terminal mode only: the live output pump and the byte total it keeps,
+    /// standing in for the capture worker that a buffered run uses.
+    terminal_stdout: Option<TerminalOutputPump>,
     stdout_worker: Option<CaptureWorker>,
     stderr_worker: Option<CaptureWorker>,
     console_worker: Option<CaptureWorker>,
@@ -560,6 +683,7 @@ impl ActiveRun {
         policy: RuntimePolicy,
         scaling_qualified: bool,
         stdin: &[u8],
+        terminal: Option<TerminalRequest>,
     ) -> Result<Self, RuntimeError> {
         let guard_stdout = match launch.child.stdout.take() {
             Some(stdout) => stdout,
@@ -579,6 +703,32 @@ impl ActiveRun {
                 ));
             }
         };
+        // A terminal session sends its output straight to the operator's
+        // terminal; a buffered run captures it. Exactly one of the two owns
+        // the output channel.
+        let (terminal_stdout, stdout_worker) = match terminal {
+            Some(_) => {
+                let total = Arc::new(AtomicU64::new(0));
+                let counted = Arc::clone(&total);
+                let stdout = launch.channels.stdout;
+                (
+                    Some((
+                        thread::spawn(move || stream_stdout(stdout, &counted)),
+                        total,
+                    )),
+                    None,
+                )
+            }
+            None => (
+                None,
+                Some(CaptureWorker::spawn(
+                    "stdout",
+                    launch.channels.stdout,
+                    policy.maximum_stdout_bytes,
+                )),
+            ),
+        };
+        let stdin_stop = terminal.map(|_| Arc::new(AtomicBool::new(false)));
         Ok(Self {
             child: Some(launch.child),
             liveness: Some(launch.liveness),
@@ -590,11 +740,9 @@ impl ActiveRun {
             stdin_stream: Some(launch.channels.stdin),
             stdin_bytes: Some(stdin.to_vec()),
             stdin_worker: None,
-            stdout_worker: Some(CaptureWorker::spawn(
-                "stdout",
-                launch.channels.stdout,
-                policy.maximum_stdout_bytes,
-            )),
+            stdin_stop,
+            terminal_stdout,
+            stdout_worker,
             stderr_worker: Some(CaptureWorker::spawn(
                 "stderr",
                 launch.channels.stderr,
@@ -666,12 +814,55 @@ impl ActiveRun {
             .map_err(|error| {
                 RuntimeError::io("duplicate stdin channel", Path::new("<stdin>"), error)
             })?;
+        if let Some(stop) = self.stdin_stop.as_ref() {
+            // Terminal mode: the operator's terminal is the source, and it has
+            // no length to run to.
+            let stop = Arc::clone(stop);
+            self.stdin_bytes.take();
+            self.stdin_worker = Some(thread::spawn(move || stream_stdin(stream, &stop)));
+            return Ok(());
+        }
         let bytes = self
             .stdin_bytes
             .take()
             .ok_or_else(|| RuntimeError::invalid("stdin", "stdin bytes are unavailable"))?;
         self.stdin_worker = Some(thread::spawn(move || write_stdin(stream, &bytes)));
         Ok(())
+    }
+
+    /// Stop the terminal input pump and collect the streamed output total.
+    ///
+    /// The input pump owns this process's terminal, so it must be stopped
+    /// before the run returns; otherwise it would keep consuming keystrokes
+    /// that belong to the shell that called `pocket`.
+    fn finish_terminal_streams(&mut self, deadline: Instant) -> Result<CapturedStream, String> {
+        if let Some(stop) = self.stdin_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        // Hanging up the guest side lets the output pump see end of file.
+        self.stdin_stream.take();
+        let Some((handle, total)) = self.terminal_stdout.take() else {
+            return Ok(CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+                total_bytes: 0,
+            });
+        };
+        while !handle.is_finished() && Instant::now() < deadline {
+            thread::sleep(STREAM_POLL_INTERVAL);
+        }
+        if !handle.is_finished() {
+            return Err("terminal output pump did not finish".to_owned());
+        }
+        match handle.join() {
+            Ok(Ok(())) => Ok(CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+                total_bytes: total.load(Ordering::Relaxed),
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err("terminal output pump panicked".to_owned()),
+        }
     }
 
     fn finish(mut self, guest_exit: Exit) -> Result<RunOutput, RuntimeError> {
@@ -752,6 +943,12 @@ impl ActiveRun {
         let mut failures = Vec::new();
         self.control.take();
         self.liveness.take();
+        // Release the operator's terminal first: a run being torn down must
+        // not leave a pump holding the keyboard.
+        if let Some(stop) = self.stdin_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        self.terminal_stdout.take();
         self.stdin_stream.take();
         self.stdin_bytes.take();
         if let Some(child) = self.child.as_mut() {
@@ -828,9 +1025,15 @@ impl ActiveRun {
 
     fn join_workers(&mut self) -> Result<JoinedCaptures, RuntimeError> {
         let deadline = Instant::now() + self.policy.guard_exit_timeout;
+        let terminal_stdout = self.finish_terminal_streams(deadline).map_err(|error| {
+            RuntimeError::invalid("terminal", format!("terminal session ended badly: {error}"))
+        })?;
         join_stdin(&mut self.stdin_worker, deadline)?;
         Ok(JoinedCaptures {
-            stdout: join_capture(&mut self.stdout_worker, deadline)?,
+            stdout: match self.stdout_worker {
+                Some(_) => join_capture(&mut self.stdout_worker, deadline)?,
+                None => terminal_stdout,
+            },
             stderr: join_capture(&mut self.stderr_worker, deadline)?,
             console: join_capture(&mut self.console_worker, deadline)?,
             guard_stdout: join_capture(&mut self.guard_stdout_worker, deadline)?,
@@ -840,6 +1043,9 @@ impl ActiveRun {
 
     fn join_workers_for_failure(&mut self) -> Result<String, RuntimeError> {
         let deadline = Instant::now() + self.policy.guard_exit_timeout;
+        // A failing terminal session still has to give the operator's terminal
+        // back, so this runs before anything that can return early.
+        let _ = self.finish_terminal_streams(deadline);
         join_stdin(&mut self.stdin_worker, deadline)?;
         let captures = [
             (
@@ -1319,6 +1525,7 @@ fn build_start(
     account_db_sha256: String,
     workload: &WorkloadSpec,
     stdin_bytes: u64,
+    terminal: Option<TerminalRequest>,
 ) -> Result<Start, RuntimeError> {
     let descriptor_platform = generation.descriptor_platform().map(protocol_platform);
     let config_platform = protocol_platform(generation.config_platform());
@@ -1344,7 +1551,10 @@ fn build_start(
         hostname: workload.hostname.clone(),
         root_read_only: workload.root_read_only,
         volumes: workload.volumes.clone(),
-        terminal: false,
+        terminal: terminal.is_some(),
+        stdin_streaming: terminal.is_some(),
+        terminal_rows: terminal.map_or(0, |request| request.rows),
+        terminal_columns: terminal.map_or(0, |request| request.columns),
         network_mode: u8::from(workload.network),
         privileged: workload.privileged,
         stop_signal: workload.stop_signal,
@@ -1607,6 +1817,85 @@ fn status_text(status: ExitStatus) -> String {
 /// yet. The guest instead ends the workload's standard input after exactly
 /// `Start::stdin_bytes` bytes, so the host only has to keep the descriptor
 /// alive until the run is torn down.
+/// How long a streaming pump waits in `poll` before re-checking its stop flag.
+///
+/// The pumps block on the descriptor rather than spinning, so this only bounds
+/// how long teardown waits for a pump that is idle mid-session.
+const STREAM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+const STREAM_BUFFER_BYTES: usize = 8192;
+
+/// Copy this process's standard input into the guest input channel until the
+/// session ends.
+///
+/// An interactive session has no declared length, so the pump cannot simply
+/// run to a byte budget: it stops when the operator's terminal reaches end of
+/// file, when the channel is gone, or when `stop` is raised at teardown. It
+/// polls rather than blocking in `read` so that a session ending while the
+/// operator is not typing still tears the pump down promptly.
+fn stream_stdin(mut stream: UnixStream, stop: &Arc<AtomicBool>) -> Result<(), String> {
+    let stdin = std::io::stdin();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    while !stop.load(Ordering::Relaxed) {
+        let mut fds = [PollFd::new(stdin.as_fd(), PollFlags::POLLIN)];
+        let timeout = PollTimeout::try_from(STREAM_POLL_INTERVAL)
+            .map_err(|_| "terminal poll interval is out of range".to_owned())?;
+        match poll(&mut fds, timeout) {
+            Ok(0) => continue,
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+        match nix::unistd::read(stdin.as_fd(), &mut buffer) {
+            // The operator closed the terminal's input side.
+            Ok(0) => return Ok(()),
+            Ok(count) => {
+                if let Err(error) = stream.write_all(&buffer[..count]) {
+                    // The guest is gone; that is the session ending, not a
+                    // failure of the pump.
+                    return match error.kind() {
+                        std::io::ErrorKind::BrokenPipe => Ok(()),
+                        _ => Err(error.to_string()),
+                    };
+                }
+            }
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
+/// Copy one guest output channel straight to this process's standard output.
+///
+/// Nothing is retained: a terminal session's output belongs on the terminal as
+/// it is produced, and a long session would otherwise be truncated by the
+/// capture cap. The total is counted so the outcome can still report size.
+fn stream_stdout<R: Read>(mut reader: R, total: &Arc<AtomicU64>) -> Result<(), String> {
+    let stdout = std::io::stdout();
+    let mut buffer = [0_u8; STREAM_BUFFER_BYTES];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            // A UML serial line reports EIO where a pipe reports end of file.
+            Err(error) if error.raw_os_error() == Some(nix::libc::EIO) => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut written = 0;
+        while written < count {
+            match nix::unistd::write(stdout.as_fd(), &buffer[written..count]) {
+                Ok(0) => return Err("terminal output accepted no bytes".to_owned()),
+                Ok(bytes) => written += bytes,
+                Err(nix::errno::Errno::EINTR) => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        total.fetch_add(count as u64, Ordering::Relaxed);
+    }
+}
+
 fn write_stdin(mut stream: UnixStream, bytes: &[u8]) -> Result<(), String> {
     match stream.write_all(bytes) {
         Ok(()) => Ok(()),

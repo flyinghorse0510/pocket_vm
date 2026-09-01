@@ -9,7 +9,7 @@
 use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::ExitCode,
@@ -29,7 +29,8 @@ use pocket_runtime::{
     BuildOutput, BuildRequest, BuilderPolicy, BuilderToolContract, HostBuildError, HostBuilder,
     ImageArgv, ImageProcessOverrides, ManifestError, ProfileArtifactSources, ProfileMaturity,
     ProfileSealRequest, RunOptions, RunOutput, Runtime, RuntimeError, RuntimePolicy,
-    VerifiedProfile, WorkloadSpec, resolve_image_process, seal_profile_bundle,
+    TerminalRequest, TerminalSession, VerifiedProfile, WorkloadSpec, resolve_image_process,
+    seal_profile_bundle,
 };
 use pocket_store::{
     AliasId, AliasKey, AliasRoot, DerivationKey, Digest, GarbageCollectionReport, Generation,
@@ -371,9 +372,12 @@ struct RunArgs {
     #[arg(long)]
     timeout: Option<String>,
     /// Read at most 16 MiB from this CLI's stdin and send it to the workload.
+    /// Implied by `--tty`, which streams input instead of buffering it.
     #[arg(short = 'i', long)]
     interactive: bool,
-    /// Unsupported terminal mode; accepted only to return E_FEATURE_UNSUPPORTED.
+    /// Run the workload on a terminal: allocate a PTY in the guest, put this
+    /// terminal in raw mode, and stream both directions until it exits.
+    /// Requires that this process's stdin and stdout are both terminals.
     #[arg(short = 't', long)]
     tty: bool,
     /// Guest networking. `slirp` gives the guest NAT'd access through an
@@ -1220,7 +1224,9 @@ fn execute_run(
         .transpose()?;
     let console_log = arguments.console_log.clone();
 
-    let input = if arguments.interactive {
+    // A terminal session streams input for as long as it lasts, so there is
+    // nothing to read up front; `-i` is implied rather than separately obeyed.
+    let input = if arguments.interactive && !arguments.tty {
         read_bounded_stdin(stdin)?
     } else {
         Vec::new()
@@ -1272,7 +1278,7 @@ fn execute_run(
             vec![entrypoint]
         }
     });
-    let process = resolve_image_process(
+    let mut process = resolve_image_process(
         &lease,
         &ImageProcessOverrides {
             argv,
@@ -1284,6 +1290,22 @@ fn execute_run(
             stop_signal: arguments.stop_signal,
         },
     )?;
+    // A terminal session needs a terminal type or curses programs cannot draw.
+    // The host's own is the accurate answer, but it is attacker-influencable
+    // environment, so anything but a plain terminal name falls back rather
+    // than being passed into the guest.
+    if arguments.tty && !process.env.iter().any(|entry| entry.starts_with("TERM=")) {
+        let host_term = std::env::var("TERM").ok().filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        });
+        process
+            .env
+            .push(format!("TERM={}", host_term.as_deref().unwrap_or("xterm")));
+    }
     validate_guest_path("workdir", &process.working_dir)?;
     // Held until the run ends: dropping these releases each shared directory
     // for the next run.
@@ -1298,6 +1320,9 @@ fn execute_run(
         ..RuntimePolicy::default()
     };
     let runtime = Runtime::new(&profile, &store, runtime_root, policy)?;
+    // Taken as late as possible: everything that can be refused has been, so
+    // the operator's terminal is only disturbed by a run that will start.
+    let terminal = hold_terminal(arguments.tty)?;
     let options = RunOptions {
         cpus,
         memory,
@@ -1318,11 +1343,49 @@ fn execute_run(
             stop_signal: process.stop_signal,
         },
         stdin: input,
+        terminal: terminal.as_ref().map(|session| session.request),
         console_log,
     };
 
-    let output = runtime.run_leased(lease, options)?;
+    let output = match terminal {
+        // The operator's terminal is held in raw mode for exactly as long as
+        // the session runs, and is put back before anything is printed to it:
+        // a diagnostic written while the terminal is still raw comes out
+        // stepped across the screen.
+        Some(mut session) => {
+            let running = runtime.start_leased(lease, options)?;
+            let result = running.wait_interactive(|| session.handle.take_resize());
+            session.handle.restore();
+            result?
+        }
+        None => runtime.run_leased(lease, options)?,
+    };
     emit_run_output(output, cpus, stdout, stderr)
+}
+
+/// The operator's terminal, together with the size the guest was started with.
+struct HeldTerminal {
+    handle: TerminalSession,
+    request: TerminalRequest,
+}
+
+/// Take the operator's terminal for a session, if one was asked for.
+fn hold_terminal(enabled: bool) -> Result<Option<HeldTerminal>, CliError> {
+    if !enabled {
+        return Ok(None);
+    }
+    let handle = TerminalSession::acquire().map_err(|error| {
+        // Being told "stdin is not a terminal" is more useful than a raw-mode
+        // failure, so the runtime's reason is carried through verbatim.
+        invalid("tty", error.to_string())
+    })?;
+    let (rows, columns) = handle
+        .size()
+        .map_err(|error| invalid("tty", error.to_string()))?;
+    Ok(Some(HeldTerminal {
+        handle,
+        request: TerminalRequest { rows, columns },
+    }))
 }
 
 /// Wall-clock budget for normalizing one staged archive of `archive_bytes`.
@@ -1606,11 +1669,23 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
              status is the point, and nothing would be left to report it",
         ));
     }
+    // Checked here, with the other refusals, so piping into an interactive
+    // run is refused before any path is opened. Raw mode itself is taken much
+    // later, once the run is certain to start.
     if arguments.tty {
-        return Err(unsupported(
-            "tty",
-            "pocket-runtime currently implements only nonterminal buffered streams",
-        ));
+        for (role, is_terminal) in [
+            ("stdin", io::stdin().is_terminal()),
+            ("stdout", io::stdout().is_terminal()),
+        ] {
+            if !is_terminal {
+                return Err(invalid(
+                    "tty",
+                    format!(
+                        "--tty needs a terminal on both sides, but {role} is not a terminal;                          drop --tty to run with buffered streams"
+                    ),
+                ));
+            }
+        }
     }
     if !arguments.publish.is_empty() {
         return Err(unsupported(
@@ -2920,7 +2995,6 @@ mod tests {
     #[test]
     fn unsupported_run_features_fail_before_paths_are_opened() {
         for (extra, feature) in [
-            (vec!["--tty"], "tty"),
             // Networking exists now, but nothing forwards a host port into
             // the guest yet, so --publish is still refused.
             (vec!["--publish", "8080:80"], "port-forwarding"),
@@ -2946,6 +3020,25 @@ mod tests {
         assert_eq!(status, OPERATIONAL_ERROR_EXIT);
         assert!(text(&stderr).contains("E_CLI_INVALID_INPUT"));
         assert!(text(&stderr).contains("cannot be combined"));
+    }
+
+    /// `--tty` is accepted now, but it needs a terminal on both sides. The
+    /// test harness has pipes, so this also pins the refusal a caller gets
+    /// when they pipe into an interactive run instead of silently degrading
+    /// to a buffered one.
+    #[test]
+    fn tty_without_a_terminal_is_named_as_an_input_error() {
+        let arguments = minimum_run(&["--tty"]);
+        let borrowed: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (status, _, stderr) = invoke(&borrowed, &[]);
+        assert_eq!(status, OPERATIONAL_ERROR_EXIT);
+        let diagnostic = text(&stderr);
+        assert!(diagnostic.contains("E_CLI_INVALID_INPUT"), "{diagnostic}");
+        assert!(diagnostic.contains("not a terminal"), "{diagnostic}");
+        assert!(
+            !diagnostic.contains("E_FEATURE_UNSUPPORTED"),
+            "{diagnostic}"
+        );
     }
 
     #[test]

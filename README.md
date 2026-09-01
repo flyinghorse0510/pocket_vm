@@ -54,6 +54,17 @@ started as an ordinary user. Giving it those privileges costs the host
 nothing, because the guest's kernel is its own. `make container-engine`
 reproduces it.
 
+`-t` gives you an interactive shell, the same way `docker run -it` does:
+
+```sh
+pocket run -t alpine:3.22 -- /bin/sh
+```
+
+The guest allocates a real PTY and makes it the workload's controlling
+terminal, so `^C`, line editing and full-screen programs like `vi` work, and
+resizing your window resizes the guest's. Add `--user` to get a session as an
+account the image already defines; the image's own `login` works too.
+
 Share a folder with the host, and ask for more of the machine:
 
 ```sh
@@ -113,11 +124,12 @@ than trust it:
 | `make lifecycle-soak` | 100 fresh lifecycles at one vCPU count; run per count for the full matrix |
 | `make distro-matrix` | six unrelated image families |
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
+| `make terminal-session` | one interactive `-t` session driven through a real PTY |
 | `make container-engine` | dockerd inside the guest, running containers of its own |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** inbound port forwarding, arm64, private registries, and
-interactive TTYs. Docker's `attach`, `exec` and `-d` are refused by name:
+**Not supported:** inbound port forwarding, arm64, and private registries.
+Docker's `attach`, `exec` and `-d` are refused by name:
 there is no daemon, so a run is a foreground process you own, and `pocket ps`
 lists what is running.
 

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 hex.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["ioctl"] }
 pocket-core = { path = "../pocket-core" }
 pocket-oci = { path = "../pocket-oci" }
 pocket-protocol = { path = "../pocket-protocol" }

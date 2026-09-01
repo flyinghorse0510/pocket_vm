@@ -86,6 +86,20 @@ impl ControlChannel {
         }
     }
 
+    pub fn send_resize(
+        &mut self,
+        resize: pocket_protocol::Resize,
+        deadline: Instant,
+        timeout: Duration,
+    ) -> Result<(), RuntimeError> {
+        self.send(
+            WorkloadMessage::Resize(resize),
+            deadline,
+            timeout,
+            "guest RESIZE",
+        )
+    }
+
     pub fn send_signal(
         &mut self,
         signal: u16,
@@ -685,6 +699,9 @@ mod tests {
             terminal: false,
             network_mode: 0,
             privileged: false,
+            stdin_streaming: false,
+            terminal_rows: 0,
+            terminal_columns: 0,
             stop_signal: 15,
             derivation_key: "66".repeat(32),
             account_db_sha256: "77".repeat(32),

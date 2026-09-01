@@ -52,7 +52,8 @@
       "signal-forwarding",
       "slirp-network-v1",
       "terminal-pty",
-      "terminal-resize"
+      "terminal-resize",
+      "terminal-stream-v1"
     ]
   },
   "builder": {
