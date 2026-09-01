@@ -56,6 +56,8 @@ pub struct WorkloadSpec {
     /// canonicalized by the caller, and held under an exclusive lock for the
     /// life of the run.
     pub volumes: Vec<VolumeSpec>,
+    /// Give the guest a network interface backed by the profile's helper.
+    pub network: bool,
     pub stop_signal: u16,
 }
 
@@ -302,6 +304,7 @@ impl<'runtime> Runtime<'runtime> {
             memory,
             guard_term_timeout: self.policy.guard_term_timeout,
             verbose_console: options.console_log.is_some(),
+            network: options.workload.network,
         })?;
         let launch = spawn_guard(&plan, lease.lock_file())?;
         // The guard's dup of this open file description is now the sole lock
@@ -1024,6 +1027,11 @@ impl RunDirectory {
         let uml = managed.join_component("uml")?.into_path_buf();
         let tmp = managed.join_component("tmp")?.into_path_buf();
         let cow = managed.join_component("root.cow")?.into_path_buf();
+        // Named to match `uml` and `tmp`, and no longer than either: this
+        // becomes an AF_UNIX path, and a longer leaf than the existing
+        // longest one would silently shorten the runtime root every caller
+        // is allowed to use.
+        let network_socket = managed.join_component("net")?.into_path_buf();
         let umid = self
             .path
             .file_name()
@@ -1040,6 +1048,7 @@ impl RunDirectory {
             uml_dir: uml,
             tmp_dir: tmp,
             cow,
+            network_socket,
             umid,
         })
     }
@@ -1304,7 +1313,7 @@ fn build_start(
         root_read_only: workload.root_read_only,
         volumes: workload.volumes.clone(),
         terminal: false,
-        network_mode: 0,
+        network_mode: u8::from(workload.network),
         stop_signal: workload.stop_signal,
         derivation_key: hex::encode(generation.derivation_key().as_bytes()),
         account_db_sha256,

@@ -1,12 +1,15 @@
 SHELL := /bin/bash
 
-.PHONY: package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
+.PHONY: static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
 
 host-tools:
 	cargo build --release -p pocket-guard
 
 static-e2fsprogs:
 	./scripts/build-static-e2fsprogs.sh
+
+static-slirp4netns:
+	./scripts/build-static-slirp4netns.sh
 
 static-skopeo:
 	./scripts/build-static-skopeo.sh
@@ -20,7 +23,7 @@ release-rust-artifacts:
 release-initramfs: kernel release-rust-artifacts
 	./scripts/build-release-initramfs.sh
 
-release-artifacts: static-e2fsprogs static-skopeo release-initramfs
+release-artifacts: static-e2fsprogs static-skopeo static-slirp4netns release-initramfs
 
 release-profile: release-artifacts
 	./scripts/build-release-profile.sh

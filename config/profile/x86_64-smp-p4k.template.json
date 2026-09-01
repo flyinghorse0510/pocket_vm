@@ -49,6 +49,7 @@
       "pre-hello-error-v1",
       "separate-stdio",
       "signal-forwarding",
+      "slirp-network-v1",
       "terminal-pty",
       "terminal-resize"
     ]
@@ -101,7 +102,7 @@
     "rootfstype": "ramfs",
     "ubd": "cow-v3",
     "serial": "ssl-fd-v1",
-    "network": "none",
+    "network": "slirp-bess-v1",
     "max_ubd_path_bytes": 4095,
     "max_umid_bytes": 63,
     "max_unix_path_bytes": 107
@@ -119,6 +120,11 @@
     },
     "skopeo": {
       "path": "host/skopeo",
+      "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0
+    },
+    "network_helper": {
+      "path": "host/slirp4netns",
       "sha256": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "size": 0
     },

@@ -16,6 +16,20 @@ pub const MAX_SUPPLEMENTARY_GIDS: usize = 64;
 pub const MAX_RLIMIT_COUNT: usize = 32;
 pub const MAX_VOLUME_COUNT: usize = 32;
 
+/// The `slirp-bess-v1` addressing contract.
+///
+/// One source of truth for both sides: the host passes these to the network
+/// helper on its command line, and the guest configures its interface from the
+/// same constants. They are not sent in `START` because they are part of the
+/// profile's sealed network contract, not a per-run choice -- a profile that
+/// changes them changes its revision.
+pub const SLIRP_GUEST_ADDRESS: [u8; 4] = [10, 0, 2, 100];
+pub const SLIRP_GATEWAY_ADDRESS: [u8; 4] = [10, 0, 2, 2];
+pub const SLIRP_DNS_ADDRESS: [u8; 4] = [10, 0, 2, 3];
+pub const SLIRP_PREFIX_LENGTH: u8 = 24;
+/// The guest-visible name of the vector device UML creates for `vec0`.
+pub const SLIRP_INTERFACE: &str = "vec0";
+
 /// Guest paths the runtime mounts or writes itself.
 ///
 /// A shared host directory may not collide with one of these. Placed under a

@@ -607,6 +607,43 @@ assert_host_volumes_are_shared_persistent_and_exclusive() {
     rm -rf -- "$shared"
 }
 
+# Networking is on by default, so the interesting cases are that it actually
+# carries traffic, that opting out really removes it, and that the helper the
+# guard starts does not outlive the run.
+assert_default_network_reaches_the_internet() {
+    local version=$1
+    local generation=$2
+
+    # Read the routing table out of /proc rather than running `ip`: a minimal
+    # Ubuntu image ships no iproute2, and an absent tool would make these
+    # assertions pass or fail for the wrong reason. In /proc/net/route the
+    # gateway is the little-endian hex of the network-order address, so
+    # 10.0.2.2 is 0202000A and a default route has destination 00000000.
+    local default_route='awk '"'"'$2=="00000000" && $3=="0202000A" {found++} END {print found+0}'"'"' /proc/net/route'
+
+    run_guest "$version" "$generation" net-config 0 -- /bin/sh -c \
+        "$default_route; cat /etc/resolv.conf"
+    assert_exact_output "$LOG_ROOT/$version-net-config.stdout" $'1\nnameserver 10.0.2.3\n'
+
+    # DNS and TCP together, against a host outside this machine, using only
+    # bash's own /dev/tcp so the image needs no curl or wget.
+    run_guest "$version" "$generation" net-fetch 0 --timeout 120s -- /bin/bash -c \
+        'exec 3<>/dev/tcp/example.com/80 && printf "HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n" >&3 && head -1 <&3 | grep -c HTTP'
+    assert_exact_output "$LOG_ROOT/$version-net-fetch.stdout" $'1\n'
+
+    # --network none removes the route and leaves the resolver empty, rather
+    # than absent, so a workload reading it sees "no nameservers".
+    run_guest "$version" "$generation" net-none 0 --network none -- /bin/sh -c \
+        "$default_route; wc -c < /etc/resolv.conf"
+    assert_exact_output "$LOG_ROOT/$version-net-none.stdout" $'0\n0\n'
+
+    # The guard owns the helper: nothing may still be running afterwards.
+    if pgrep -u "$(id -u)" -x slirp4netns >/dev/null 2>&1; then
+        pgrep -u "$(id -u)" -a -x slirp4netns >&2
+        die "a network helper outlived its run"
+    fi
+}
+
 # An alias is the only thing that roots a generation, it outlives the profile
 # that created it, and reconstructing its key needs that bundle. Without a way
 # to see and drop one by its own ID, a resealed profile's aliases root their
@@ -913,6 +950,7 @@ assert_archive_normalization 24.04 "${GENERATIONS[24.04]}"
 assert_concurrent_cow_isolation "${GENERATIONS[24.04]}"
 assert_conversion_metadata_is_deterministic 24.04 "${GENERATIONS[24.04]}"
 assert_host_volumes_are_shared_persistent_and_exclusive 24.04 "${GENERATIONS[24.04]}"
+assert_default_network_reaches_the_internet 24.04 "${GENERATIONS[24.04]}"
 assert_signal_killed_runs_are_reclaimed "${GENERATIONS[24.04]}"
 # The Docker-save archive built its own generation under its own alias, so it is
 # the one input this suite can release without losing anything it still checks.

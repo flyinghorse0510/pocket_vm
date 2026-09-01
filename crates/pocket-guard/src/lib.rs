@@ -32,6 +32,13 @@ pub struct GuardOptions {
     /// is required when a dynamic UML is invoked through a bundled loader,
     /// because UML must not re-exec `/proc/self/exe` (the loader in that form).
     pub uml_personality: bool,
+    /// Optional helper process started before the command child and killed
+    /// when it exits. Empty means none.
+    ///
+    /// The guard owns it rather than the caller because the caller can be
+    /// SIGKILLed, and a network helper outliving its run would hold the run's
+    /// socket open and leak a process per invocation.
+    pub network_helper: Vec<OsString>,
     pub command: Vec<OsString>,
 }
 
@@ -149,6 +156,59 @@ pub unsafe fn run_guard(options: GuardOptions) -> Result<ChildOutcome, GuardErro
     child_fds.extend(inputs.inherited.iter().map(AsRawFd::as_raw_fd));
     let uml_personality = options.uml_personality;
 
+    // Started before the command child, because the helper owns the socket
+    // the child connects to. Its own output is discarded: it is chatty on
+    // startup and its diagnostics are not the run's.
+    //
+    // The helper is given the read end of a pipe this guard holds open, and
+    // exits by itself when that end reaches EOF. A parent-death signal is not
+    // enough on its own: the helper forks internally once the guest connects,
+    // and PR_SET_PDEATHSIG is cleared across fork(2), so the surviving child
+    // had no parent-death signal and reparented to init when this guard was
+    // killed. The pipe does not care which process ends up holding it, or
+    // whether this guard gets to run any cleanup code at all.
+    let mut network_exit_writer = None;
+    let network_pid = if options.network_helper.is_empty() {
+        None
+    } else {
+        let (exit_read, exit_write) = linux::create_pipe().map_err(|error| {
+            GuardError::system("could not create network helper exit pipe", error)
+        })?;
+        let exit_read_fd = exit_read.as_raw_fd();
+        let helper_program = options.network_helper[0].clone();
+        let mut helper = Command::new(&helper_program);
+        helper
+            .args(&options.network_helper[1..])
+            .arg("--exit-fd")
+            .arg(exit_read_fd.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let helper_fds = vec![
+            libc::STDIN_FILENO,
+            libc::STDOUT_FILENO,
+            libc::STDERR_FILENO,
+            exit_read_fd,
+        ];
+        // SAFETY: as for the command child below, this calls only
+        // `prepare_command_child`, whose contract covers post-fork safety.
+        unsafe {
+            helper.pre_exec(move || {
+                linux::prepare_command_child(guard_pid, &helper_fds, fallback_fd_limit, false)
+            });
+        }
+        let spawned = helper.spawn().map_err(|source| GuardError::Spawn {
+            program: helper_program,
+            source,
+        })?;
+        let pid = spawned.id() as libc::pid_t;
+        // The engine's waitpid owns all reaping; Child must not race it.
+        std::mem::forget(spawned);
+        drop(exit_read);
+        network_exit_writer = Some(exit_write);
+        Some(pid)
+    };
+
     let program = options.command[0].clone();
     let mut command = Command::new(&program);
     command.args(&options.command[1..]);
@@ -187,6 +247,8 @@ pub unsafe fn run_guard(options: GuardOptions) -> Result<ChildOutcome, GuardErro
     };
 
     let mut engine = Engine {
+        network_pid,
+        network_exit_writer,
         child_pid,
         direct_outcome: None,
         pidfd,
@@ -207,6 +269,10 @@ pub unsafe fn run_guard(options: GuardOptions) -> Result<ChildOutcome, GuardErro
             ))),
         },
     };
+    // The helper has no reason to outlive the run, and on the ordinary path
+    // nothing else would stop it: the failure path's emergency sweep does not
+    // run, and the guard is about to exit and reparent it away.
+    engine.terminate_network_helper();
     // `waitpid` in the engine owns all reaping. Child::try_wait/wait must not
     // race it; dropping Child performs no kill or reap on Unix.
     drop(child);
@@ -336,6 +402,12 @@ struct Shutdown {
 }
 
 struct Engine {
+    /// The network helper, if one was started. Killed when the run ends,
+    /// however it ends.
+    network_pid: Option<libc::pid_t>,
+    /// Write end of the helper's exit pipe. Closing it -- or dying and having
+    /// the kernel close it -- is what actually stops the helper.
+    network_exit_writer: Option<OwnedFd>,
     child_pid: libc::pid_t,
     direct_outcome: Option<ChildOutcome>,
     pidfd: Option<OwnedFd>,
@@ -597,6 +669,44 @@ impl Engine {
         }
     }
 
+    /// Stop the network helper and reap it. Best effort by construction: the
+    /// run's own outcome has already been decided and must not be replaced by
+    /// a failure to clean up after it.
+    fn terminate_network_helper(&mut self) {
+        let Some(pid) = self.network_pid.take() else {
+            return;
+        };
+        drop(self.network_exit_writer.take());
+        // The group, not the process: the helper forks, and a forked child
+        // does not inherit its parent's PR_SET_PDEATHSIG. `prepare_command_child`
+        // made the helper a group leader precisely so the whole tree is one
+        // kill target.
+        if let Err(error) = linux::send_signal_to_group(pid, libc::SIGTERM) {
+            eprintln!("pocket-guard: could not SIGTERM network helper group {pid}: {error}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match linux::reap_specific_nonblocking(pid) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("pocket-guard: could not reap network helper {pid}: {error}");
+                    return;
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Err(error) = linux::send_signal_to_group(pid, libc::SIGKILL) {
+            eprintln!("pocket-guard: could not SIGKILL network helper group {pid}: {error}");
+        }
+        if let Err(error) = linux::reap_specific_blocking(pid) {
+            eprintln!("pocket-guard: could not reap killed network helper {pid}: {error}");
+        }
+    }
+
     fn kill_and_reap_after_failure(&mut self) -> Result<(), String> {
         let mut failures = Vec::new();
         if let Err(error) = linux::send_signal_to_group(self.child_pid, libc::SIGKILL) {
@@ -675,6 +785,7 @@ mod tests {
     #[test]
     fn rejects_empty_command() {
         let error = validate_options(&GuardOptions {
+            network_helper: Vec::new(),
             supervisor_pid: linux::current_parent_pid(),
             liveness_fd: None,
             lease_fd: None,
@@ -690,6 +801,7 @@ mod tests {
     #[test]
     fn rejects_duplicate_descriptor_roles() {
         let error = validate_options(&GuardOptions {
+            network_helper: Vec::new(),
             supervisor_pid: linux::current_parent_pid(),
             liveness_fd: Some(libc::STDERR_FILENO),
             lease_fd: Some(libc::STDERR_FILENO),

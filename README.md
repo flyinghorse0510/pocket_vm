@@ -31,6 +31,13 @@ pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 That is a Linux kernel booting, mounting the converted image, and running your
 command as an unprivileged user.
 
+The guest has outbound network access by default, with no setup and no host
+privilege — no TUN device, no `CAP_NET_ADMIN`, nothing to configure:
+
+```sh
+pocket run alpine:3.22 -- /bin/sh -c 'apk add --no-cache curl && curl -sI https://example.com | head -1'
+```
+
 Share a folder with the host, and ask for more of the machine:
 
 ```sh
@@ -47,8 +54,10 @@ Full walkthrough, prerequisites and gotchas: **[Getting started](docs/getting-st
 ## Why
 
 - **No privilege.** No root, no setuid, no capabilities, no KVM, no
-  `/dev/fuse`, no user namespaces, no writable cgroups. Works where you cannot
-  install or configure anything.
+  `/dev/fuse`, no user namespaces, no writable cgroups — and networking still
+  works, because the guest reaches a userspace TCP/IP stack over an ordinary
+  Unix socket rather than a TUN device. Works where you cannot install or
+  configure anything.
 - **A real kernel per container.** Own scheduler, own page cache, own
   filesystem. Not a shared host kernel behind namespaces.
 - **Your images, unmodified.** Verified against Debian, Alpine, Arch, Fedora,
@@ -91,8 +100,8 @@ than trust it:
 | `make diagnostic-lifecycle` | the same lifecycles under lockdep, `PROVE_RCU` and `DEBUG_ATOMIC_SLEEP` |
 | `make reproduce-release` | byte-identical rebuild in an independent build root |
 
-**Not supported:** networking, arm64, private registries, and interactive
-TTYs. This is a runtime for workloads you already trust — it is
+**Not supported:** inbound port forwarding, arm64, private registries, and
+interactive TTYs. This is a runtime for workloads you already trust — it is
 deliberately **not** a security boundary against hostile code.
 
 ## Upstream kernel fix

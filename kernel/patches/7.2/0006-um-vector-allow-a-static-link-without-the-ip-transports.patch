@@ -1,0 +1,56 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: vector: allow a static link without the IP transports
+
+UML_NET_VECTOR selects MAY_HAVE_RUNTIME_DEPS unconditionally, and
+STATIC_LINK depends on !MAY_HAVE_RUNTIME_DEPS, so enabling any vector
+networking forces a dynamically linked UML.
+
+The dependency is real but it belongs to two of the eight transports.
+Only gre and l2tpv3 address their peer by name, and only they call
+getaddrinfo(3), which a statically linked binary cannot resolve through
+NSS.  raw and tap name an interface, fd inherits a descriptor, and bess
+and vde connect to a filesystem path; none of them resolve anything.
+
+Move the select onto a new option covering just those two transports.
+The default is y, so an existing configuration is unchanged; turning it
+off keeps the remaining six transports and permits STATIC_LINK.
+---
+ arch/um/drivers/Kconfig | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/arch/um/drivers/Kconfig b/arch/um/drivers/Kconfig
+index 6a0354c..be7fb7f 100644
+--- a/arch/um/drivers/Kconfig
++++ b/arch/um/drivers/Kconfig
+@@ -126,7 +126,6 @@ menu "UML Network Devices"
+ 
+ config UML_NET_VECTOR
+ 	bool "Vector I/O high performance network devices"
+-	select MAY_HAVE_RUNTIME_DEPS
+ 	help
+ 	  This User-Mode Linux network driver uses multi-message send
+ 	  and receive functions. The host running the UML guest must have
+@@ -137,6 +136,23 @@ config UML_NET_VECTOR
+ 	  and sample configurations, see
+ 	  <file:Documentation/virt/uml/user_mode_linux_howto_v2.rst>.
+ 
++config UML_NET_VECTOR_IP_TRANSPORTS
++	bool "GRE and L2TPv3 transports"
++	depends on UML_NET_VECTOR
++	default y
++	select MAY_HAVE_RUNTIME_DEPS
++	help
++	  The gre and l2tpv3 transports address their peer by name and
++	  resolve it with getaddrinfo(3), which needs NSS.  A statically
++	  linked UML cannot load NSS modules, so selecting these transports
++	  forces a dynamically linked binary.
++
++	  Say N to keep the raw, tap, bess, fd and vde transports while
++	  allowing STATIC_LINK.  Each of those names its peer by interface,
++	  file descriptor or filesystem path and resolves nothing.
++
++	  If unsure, say Y.
++
+ endmenu
+ 
+ config VIRTIO_UML

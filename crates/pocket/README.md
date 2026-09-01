@@ -191,6 +191,26 @@ real lock-aware collection operation. Omitting `--apply` returns
 `E_FEATURE_UNSUPPORTED` because the store has no classify-only preview API; it
 does not approximate a dry run or delete anything.
 
+## Networking
+
+`--network` selects `slirp` (the default) or `none`. Under `slirp` the guest
+gets `10.0.2.100/24` on `vec0`, a default route via `10.0.2.2`, and
+`nameserver 10.0.2.3` in a generated `/etc/resolv.conf`; under `none` it has
+loopback only and that file is empty rather than absent.
+
+The addressing is the profile's sealed `slirp-bess-v1` contract, not a per-run
+choice, so it is not carried in `START`: the host configures the helper and the
+guest configures its interface from the same constants, and a profile that
+changes them changes its revision.
+
+The transport is UML's `vector` driver over `bess`, which is an `AF_UNIX`
+socket -- no TUN device, no `CAP_NET_ADMIN`, no host configuration. The
+profile's `slirp4netns` artifact serves that socket. The guard starts it and
+stops it with the run, so a SIGKILLed caller cannot orphan it.
+
+`-p/--publish` remains refused: the helper accepts forwards over an API socket
+that is not wired up.
+
 ## Configuration file
 
 Every command that takes `--profile-bundle`, `--store` or `--runtime-root`
@@ -260,7 +280,7 @@ This build does not implement:
   Docker daemon imports, archive selectors or multi-image archives, image
   removal, or global alias/image listing;
 - installed-profile discovery, implicit profile selection, or `probe`;
-- PTYs, slirp networking, port forwards, or host CPU affinity;
+- PTYs, inbound port forwards, or host CPU affinity;
 - `pocket run` pull policies other than `never`, retained root COWs, or dynamic UML
   profile bundles.
 

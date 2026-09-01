@@ -74,6 +74,7 @@ fn profile_fixture() -> ProfileFixture {
         "host/pocket-guard",
         "host/linux-uml",
         "host/skopeo",
+        "host/slirp4netns",
         "host/mke2fs",
         "host/e2fsck",
     ] {
@@ -107,6 +108,7 @@ fn profile_fixture() -> ProfileFixture {
         guard: artifact(&root, "host/pocket-guard"),
         uml: artifact(&root, "host/linux-uml"),
         skopeo: artifact(&root, "host/skopeo"),
+        network_helper: artifact(&root, "host/slirp4netns"),
         registry_ca_bundle: artifact(&root, "host/registry-ca.pem"),
         workload_initramfs: artifact(&root, "guest/workload.cpio"),
         builder_initramfs: artifact(&root, "guest/builder.cpio"),
@@ -198,7 +200,7 @@ fn profile_fixture() -> ProfileFixture {
             rootfstype: "ramfs".to_owned(),
             ubd: "cow-v3".to_owned(),
             serial: "ssl-fd-v1".to_owned(),
-            network: "none".to_owned(),
+            network: "slirp-bess-v1".to_owned(),
             max_ubd_path_bytes: 4095,
             max_umid_bytes: 63,
             max_unix_path_bytes: 107,
@@ -287,6 +289,7 @@ fn kernel_config() -> String {
         "CONFIG_DEBUG_INFO_NONE",
         "CONFIG_SMP",
         "CONFIG_HOSTFS",
+        "CONFIG_UML_NET_VECTOR",
     ];
     let no = [
         "CONFIG_BLK_DEV_UBD_SYNC",
@@ -294,7 +297,7 @@ fn kernel_config() -> String {
         "CONFIG_BLK_DEV_NBD",
         "CONFIG_MCONSOLE",
         "CONFIG_MODULES",
-        "CONFIG_UML_NET_VECTOR",
+        "CONFIG_UML_NET_VECTOR_IP_TRANSPORTS",
         "CONFIG_IPV6",
         "CONFIG_USER_NS",
         "CONFIG_NETDEVICES",

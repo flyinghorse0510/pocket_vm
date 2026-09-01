@@ -40,9 +40,10 @@ pub use message::{
     ErrorMessage, Exit, Hello, MAX_ARG_COUNT, MAX_ARG_LENGTH, MAX_DIAGNOSTIC_LENGTH, MAX_ENV_COUNT,
     MAX_ENV_LENGTH, MAX_FEATURE_COUNT, MAX_ID_LENGTH, MAX_PATH_LENGTH, MAX_RLIMIT_COUNT,
     MAX_SHUTDOWN_GRACE_MS, MAX_STDIN_BYTES, MAX_SUPPLEMENTARY_GIDS, MAX_VOLUME_COUNT, Platform,
-    RESERVED_GUEST_PATHS, Ready, Resize, ResourceLimit, Shutdown, Signal, Start, ValidateMessage,
-    VolumeSpec, WorkloadMessage, decode_payload, decode_workload_message, encode_payload,
-    reserved_guest_path_conflict,
+    RESERVED_GUEST_PATHS, Ready, Resize, ResourceLimit, SLIRP_DNS_ADDRESS, SLIRP_GATEWAY_ADDRESS,
+    SLIRP_GUEST_ADDRESS, SLIRP_INTERFACE, SLIRP_PREFIX_LENGTH, Shutdown, Signal, Start,
+    ValidateMessage, VolumeSpec, WorkloadMessage, decode_payload, decode_workload_message,
+    encode_payload, reserved_guest_path_conflict,
 };
 pub use state::{Direction, WorkloadSession, WorkloadState};
 pub use validator::{
@@ -69,6 +70,7 @@ pub const WORKLOAD_GUEST_FEATURES: &[&str] = &[
     "pre-hello-error-v1",
     "separate-stdio",
     "signal-forwarding",
+    "slirp-network-v1",
     "terminal-pty",
     "terminal-resize",
 ];

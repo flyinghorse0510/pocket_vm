@@ -106,10 +106,10 @@ pub fn verify_start(
             ),
         ));
     }
-    if start.network_mode != 0 {
+    if start.network_mode > 1 {
         return Err(InitError::unsupported(
             "start-contract",
-            "network mode slirp requires the separately qualified guest network setup",
+            "unknown network mode",
         ));
     }
     Ok(())

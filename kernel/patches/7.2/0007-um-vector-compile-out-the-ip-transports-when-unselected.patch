@@ -1,0 +1,49 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: vector: compile out the IP transports when unselected
+
+With UML_NET_VECTOR_IP_TRANSPORTS off, user_init_socket_fds() is the
+only remaining caller of getaddrinfo(3) in the driver, and it serves
+only gre and l2tpv3.  Leaving it compiled in would keep the NSS
+dependency the previous change exists to remove, so a statically linked
+UML would still carry a resolver path it cannot use.
+
+Guard the function and its two dispatch entries.  An unselected
+transport name now falls through to the existing NULL return, which the
+caller already reports as an unknown transport.
+---
+ arch/um/drivers/vector_user.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/arch/um/drivers/vector_user.c b/arch/um/drivers/vector_user.c
+index 2ea67e6..9152bac 100644
+--- a/arch/um/drivers/vector_user.c
++++ b/arch/um/drivers/vector_user.c
+@@ -598,6 +598,7 @@ bool uml_tap_enable_vnet_headers(int fd)
+ 	return true;
+ }
+ 
++#ifdef CONFIG_UML_NET_VECTOR_IP_TRANSPORTS
+ static struct vector_fds *user_init_socket_fds(struct arglist *ifspec, int id)
+ {
+ 	int err = -ENOMEM;
+@@ -723,6 +724,7 @@ cleanup:
+ 	}
+ 	return NULL;
+ }
++#endif /* CONFIG_UML_NET_VECTOR_IP_TRANSPORTS */
+ 
+ struct vector_fds *uml_vector_user_open(
+ 	int unit,
+@@ -746,10 +748,12 @@ struct vector_fds *uml_vector_user_open(
+ 		return user_init_hybrid_fds(parsed);
+ 	if (strncmp(transport, TRANS_TAP, TRANS_TAP_LEN) == 0)
+ 		return user_init_tap_fds(parsed);
++#ifdef CONFIG_UML_NET_VECTOR_IP_TRANSPORTS
+ 	if (strncmp(transport, TRANS_GRE, TRANS_GRE_LEN) == 0)
+ 		return user_init_socket_fds(parsed, ID_GRE);
+ 	if (strncmp(transport, TRANS_L2TPV3, TRANS_L2TPV3_LEN) == 0)
+ 		return user_init_socket_fds(parsed, ID_L2TPV3);
++#endif
+ 	if (strncmp(transport, TRANS_BESS, TRANS_BESS_LEN) == 0)
+ 		return user_init_unix_fds(parsed, ID_BESS);
+ 	if (strncmp(transport, TRANS_FD, TRANS_FD_LEN) == 0)

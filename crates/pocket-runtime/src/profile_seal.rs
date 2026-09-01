@@ -27,6 +27,7 @@ const CONTRACT_DOMAIN: &[u8] = b"pocket-guest-contract\0v1\0";
 const GUARD_PATH: &str = "host/pocket-guard";
 const UML_PATH: &str = "host/linux";
 const SKOPEO_PATH: &str = "host/skopeo";
+const NETWORK_HELPER_PATH: &str = "host/slirp4netns";
 const REGISTRY_CA_PATH: &str = "host/registry-ca.pem";
 const WORKLOAD_INITRAMFS_PATH: &str = "guest/workload.cpio";
 const BUILDER_INITRAMFS_PATH: &str = "guest/builder.cpio";
@@ -43,6 +44,8 @@ pub struct ProfileArtifactSources {
     pub guard: PathBuf,
     pub uml: PathBuf,
     pub skopeo: PathBuf,
+    /// Unprivileged userspace network stack for the guest's vector device.
+    pub network_helper: PathBuf,
     pub registry_ca_bundle: PathBuf,
     pub workload_initramfs: PathBuf,
     pub builder_initramfs: PathBuf,
@@ -121,6 +124,12 @@ pub fn seal_profile_bundle(request: &ProfileSealRequest) -> Result<SealedProfile
         guard: copy_artifact(&request.artifacts.guard, stage.path(), GUARD_PATH, 0o555)?,
         uml: copy_artifact(&request.artifacts.uml, stage.path(), UML_PATH, 0o555)?,
         skopeo: copy_artifact(&request.artifacts.skopeo, stage.path(), SKOPEO_PATH, 0o555)?,
+        network_helper: copy_artifact(
+            &request.artifacts.network_helper,
+            stage.path(),
+            NETWORK_HELPER_PATH,
+            0o555,
+        )?,
         registry_ca_bundle: copy_artifact(
             &request.artifacts.registry_ca_bundle,
             stage.path(),
@@ -313,6 +322,11 @@ fn validate_template_placeholders(manifest: &ProfileManifest) -> Result<(), Mani
         ("artifacts.guard", &artifacts.guard, GUARD_PATH),
         ("artifacts.uml", &artifacts.uml, UML_PATH),
         ("artifacts.skopeo", &artifacts.skopeo, SKOPEO_PATH),
+        (
+            "artifacts.network_helper",
+            &artifacts.network_helper,
+            NETWORK_HELPER_PATH,
+        ),
         (
             "artifacts.registry_ca_bundle",
             &artifacts.registry_ca_bundle,
@@ -768,9 +782,9 @@ mod tests {
 
     use super::{
         BUILDER_INITRAMFS_PATH, E2FSCK_CONFIG_PATH, E2FSCK_PATH, GUARD_PATH, KERNEL_CONFIG_PATH,
-        MKE2FS_CONFIG_PATH, MKE2FS_PATH, ProfileArtifactSources, ProfileSealRequest,
-        REGISTRY_CA_PATH, SKOPEO_PATH, UML_PATH, VALIDATOR_INITRAMFS_PATH, WORKLOAD_INITRAMFS_PATH,
-        seal_profile_bundle,
+        MKE2FS_CONFIG_PATH, MKE2FS_PATH, NETWORK_HELPER_PATH, ProfileArtifactSources,
+        ProfileSealRequest, REGISTRY_CA_PATH, SKOPEO_PATH, UML_PATH, VALIDATOR_INITRAMFS_PATH,
+        WORKLOAD_INITRAMFS_PATH, seal_profile_bundle,
     };
     use crate::{
         ArtifactDigest, BuilderToolContract, ProfileRevision, manifest::synthetic_profile,
@@ -906,7 +920,7 @@ mod tests {
         fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).expect("output mode");
 
         let source = |name: &str| sources.join(name);
-        for name in ["guard", "uml", "skopeo", "mke2fs", "e2fsck"] {
+        for name in ["guard", "uml", "skopeo", "slirp4netns", "mke2fs", "e2fsck"] {
             fs::write(source(name), minimal_static_elf()).expect("static ELF source");
         }
         fs::write(source("registry-ca.pem"), certificate_fixture()).expect("CA source");
@@ -948,6 +962,7 @@ mod tests {
             (&mut manifest.artifacts.guard, GUARD_PATH),
             (&mut manifest.artifacts.uml, UML_PATH),
             (&mut manifest.artifacts.skopeo, SKOPEO_PATH),
+            (&mut manifest.artifacts.network_helper, NETWORK_HELPER_PATH),
             (&mut manifest.artifacts.registry_ca_bundle, REGISTRY_CA_PATH),
             (
                 &mut manifest.artifacts.workload_initramfs,
@@ -987,6 +1002,7 @@ mod tests {
                 guard: source("guard"),
                 uml: source("uml"),
                 skopeo: source("skopeo"),
+                network_helper: source("slirp4netns"),
                 registry_ca_bundle: source("registry-ca.pem"),
                 workload_initramfs: source("workload.cpio"),
                 builder_initramfs: source("builder.cpio"),
@@ -1067,14 +1083,15 @@ mod tests {
             "CONFIG_DEBUG_INFO_NONE",
             "CONFIG_SMP",
             "CONFIG_HOSTFS",
+            "CONFIG_UML_NET_VECTOR",
         ];
         let no = [
             "CONFIG_BLK_DEV_UBD_SYNC",
             "CONFIG_BLK_DEV_LOOP",
             "CONFIG_BLK_DEV_NBD",
             "CONFIG_MCONSOLE",
+            "CONFIG_UML_NET_VECTOR_IP_TRANSPORTS",
             "CONFIG_MODULES",
-            "CONFIG_UML_NET_VECTOR",
             "CONFIG_IPV6",
             "CONFIG_USER_NS",
             "CONFIG_NETDEVICES",

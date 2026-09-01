@@ -12,6 +12,7 @@ KERNEL_DIR="$BUILD_ROOT/kernel/x86_64-smp-p4k"
 RELEASE_DIR="$BUILD_ROOT/release/x86_64-smp-p4k"
 E2FS_DIR="$BUILD_ROOT/tools/e2fsprogs-1.47.2"
 SKOPEO_DIR="$BUILD_ROOT/tools/skopeo-1.23.0"
+SLIRP4NETNS_DIR="$BUILD_ROOT/tools/slirp4netns-1.3.5"
 OUTPUT_PARENT="$BUILD_ROOT/profiles"
 SEALER_TARGET_DIR="$BUILD_ROOT/profile-sealer-target"
 UMOCI=${POCKET_UMOCI:-/usr/bin/umoci}
@@ -160,6 +161,7 @@ SEAL_JSON=$("$POCKET" profile seal \
     --guard "$RELEASE_DIR/host/pocket-guard" \
     --uml "$KERNEL_DIR/linux" \
     --skopeo "$SKOPEO_DIR/skopeo" \
+    --slirp4netns "$SLIRP4NETNS_DIR/slirp4netns" \
     --registry-ca-bundle "$SKOPEO_DIR/registry-ca.pem" \
     --workload-initramfs "$RELEASE_DIR/guest/workload.cpio" \
     --builder-initramfs "$RELEASE_DIR/guest/builder.cpio" \

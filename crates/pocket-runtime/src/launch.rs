@@ -29,6 +29,9 @@ pub(crate) struct RunPaths {
     pub uml_dir: PathBuf,
     pub tmp_dir: PathBuf,
     pub cow: PathBuf,
+    /// Where the network helper listens and the guest's vector device
+    /// connects. Inside the run directory, so it is removed with it.
+    pub network_socket: PathBuf,
     pub umid: String,
 }
 
@@ -45,6 +48,9 @@ pub(crate) struct LaunchInputs<'a> {
     /// console filtered to `pr_err` and above hides exactly the lockdep and
     /// RCU reports such a caller is looking for.
     pub verbose_console: bool,
+    /// Start the profile's network helper and give the guest a vector device
+    /// bound to it. `false` leaves the guest with loopback only.
+    pub network: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +112,13 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
             "runtime UML directory exceeds the profile Unix-path limit",
         ));
     }
+    let network_socket = path_text("network_socket", &inputs.paths.network_socket)?;
+    if inputs.network && network_socket.len() > usize::from(launch.max_unix_path_bytes) {
+        return Err(RuntimeError::invalid(
+            "network_socket",
+            "network socket path exceeds the profile Unix-path limit",
+        ));
+    }
 
     let mut uml_command = vec![inputs.profile.uml_path().as_os_str().to_owned()];
     uml_command.push(format!("mem={}", inputs.memory.uml_value()).into());
@@ -161,6 +174,13 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
         OsString::from("noreboot"),
         OsString::from("panic=1"),
     ]);
+    if inputs.network {
+        // bess is the one vector transport that needs no host privilege: it is
+        // an AF_UNIX socket to the helper below, not a TUN device or a raw
+        // packet socket.
+        uml_command
+            .push(format!("vec0:transport=bess,dst={network_socket},depth=128,gro=1").into());
+    }
 
     let timeout_ms = u64::try_from(inputs.guard_term_timeout.as_millis())
         .map_err(|_| RuntimeError::invalid("guard_term_timeout", "milliseconds do not fit u64"))?;
@@ -176,6 +196,18 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
     for fd in [CONTROL_FD, STDOUT_FD, STDERR_FD, STDIN_FD, CONSOLE_FD] {
         guard_arguments.push(OsString::from("--inherit-fd"));
         guard_arguments.push(fd.to_string().into());
+    }
+    if inputs.network {
+        // The guard starts and stops it, so a SIGKILLed caller cannot leave a
+        // helper holding the run's socket open.
+        for argument in [
+            inputs.profile.network_helper_path().as_os_str().to_owned(),
+            OsString::from("--target-type=bess"),
+            OsString::from(&network_socket),
+        ] {
+            guard_arguments.push(OsString::from("--network-helper-arg"));
+            guard_arguments.push(argument);
+        }
     }
     guard_arguments.extend([
         OsString::from("--term-timeout-ms"),
@@ -388,6 +420,7 @@ mod tests {
             uml_dir: run.join("uml"),
             tmp_dir: run.join("tmp"),
             cow: run.join("root.cow"),
+            network_socket: run.join("net"),
             umid: "run-00112233445566778899aabbccddeeff".to_owned(),
         };
         let cpus = profile
@@ -407,6 +440,7 @@ mod tests {
             memory,
             guard_term_timeout: Duration::from_secs(5),
             verbose_console: false,
+            network: false,
         })
         .expect("launch plan");
         let arguments: Vec<&str> = plan
@@ -442,6 +476,7 @@ mod tests {
             memory,
             guard_term_timeout: Duration::from_secs(5),
             verbose_console: true,
+            network: false,
         })
         .expect("verbose launch plan");
         let verbose_arguments: Vec<&str> = verbose
@@ -507,6 +542,7 @@ mod tests {
             uml_dir: run.join("uml"),
             tmp_dir: run.join("tmp"),
             cow: run.join("root.cow"),
+            network_socket: run.join("net"),
             umid: "run-aabbccddeeff00112233445566778899".to_owned(),
         };
         let plan = build_launch_plan(&LaunchInputs {
@@ -523,6 +559,7 @@ mod tests {
                 .expect("memory request"),
             guard_term_timeout: Duration::from_secs(5),
             verbose_console: false,
+            network: false,
         })
         .expect("launch plan");
         let arguments: Vec<&str> = plan

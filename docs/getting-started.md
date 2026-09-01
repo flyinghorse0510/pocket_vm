@@ -374,41 +374,54 @@ there that you could. That is what the feature is for.
 
 ## Networking
 
-There is none. `--network` accepts only `none`, and that is the default:
-
-```
-pocket: [E_FEATURE_UNSUPPORTED] feature "network-slirp" is unavailable:
-        the selected runtime exposes network-none only
-```
-
-The guest has a working loopback interface and nothing else — no host network,
-no port forwarding, no DNS. A workload that needs the network cannot run here
-yet.
-
-This is a real limitation rather than a missing flag, though not for the reason
-you might expect. Linux 7.2's UML has one network driver, `vector`, and while
-`tap` and `raw` do need privileges this runtime will not take, its **BESS**
-transport needs none — the
-[UML HOWTO](https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html)
-says so outright, and it carries Ethernet frames over an ordinary `AF_UNIX`
-socket. `l2tpv3` over UDP is unprivileged too.
-
-What is missing is the other end. Those transports give the guest an L2 pipe to
-*something*; for the guest to reach the host's network, that something has to
-be a userspace TCP/IP stack doing NAT. Supplying one means adding an
-authenticated, digest-pinned third-party dependency to the sealed profile,
-which has not been done. The transport is not the obstacle; the stack is.
-
-Until then, move data in and out over the streams or a shared folder:
+**On by default.** A run gets NAT'd outbound access — DNS, TCP, UDP — with no
+setup and no host privilege:
 
 ```sh
-# in over stdin
-tar -cf - -C ./payload . | pocket run -i IMAGE -- \
-  /bin/sh -c 'mkdir -p /w && tar -xf - -C /w && ...'
-
-# in and out over a shared folder
-pocket run --volume "$PWD/artifacts:/out" IMAGE -- /build.sh
+pocket run alpine:3.22 -- /bin/sh -c 'apk add --no-cache curl && curl -sI https://example.com | head -1'
 ```
+
+The guest lands on a private `10.0.2.0/24`:
+
+| | |
+|---|---|
+| guest address | `10.0.2.100/24` on `vec0` |
+| default gateway | `10.0.2.2` |
+| resolver | `10.0.2.3`, written into `/etc/resolv.conf` |
+
+Turn it off per run, and `/etc/resolv.conf` becomes empty rather than absent:
+
+```sh
+pocket run --network none alpine:3.22 -- /bin/sh -c 'wget -T 5 -O - http://example.com/'
+```
+
+Put `network = "none"` in your config file to make that the default.
+
+### How it works, and why it needs no privileges
+
+UML's `vector` driver has one transport that is simply an `AF_UNIX` socket:
+**bess**. It needs no TUN device, no `CAP_NET_ADMIN`, and no host
+configuration — unlike `tap` (which needs `TUNSETIFF` on `/dev/net/tun`) and
+`raw` (which needs `CAP_NET_RAW`). The other end is `slirp4netns`, a userspace
+TCP/IP stack that does the NAT, sealed into the profile like every other
+artifact. Both sides implement the same documented protocol, so there is no
+translation layer between them.
+
+The guard starts the helper and stops it when the run ends, so a `SIGKILL`ed
+`pocket` cannot leave one behind holding your socket open.
+
+### What you do not get
+
+- **Inbound connections.** `-p/--publish` is still refused. The helper accepts
+  port forwards over an API socket, but nothing is wired to it yet.
+- **Your LAN.** This is NAT, not bridging. The guest cannot be reached from
+  another machine, and it is not on your network's subnet.
+- **Throughput.** `slirp4netns` is a single-threaded userspace stack that
+  copies every packet. Fine for `apk add`, `pip install` and API calls; poor
+  for bulk transfer.
+- **IPv6.** Not enabled.
+
+Upstream marks bess mode experimental, and this build inherits that.
 
 ## Using a local image instead of a registry
 
@@ -495,8 +508,8 @@ workload itself.
 
 Stated plainly, so you do not go looking:
 
-- **Networking.** `--network none` only; there is no port forwarding. See
-  [Networking](#networking) for why.
+- **Inbound networking.** Outbound works by default; `-p/--publish` does not.
+  See [Networking](#networking).
 - **arm64.** `linux/amd64` on an x86_64 host only.
 - **Private registries.** Pulls are anonymous by design; credential flags are
   rejected.

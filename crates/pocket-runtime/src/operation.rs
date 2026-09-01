@@ -110,7 +110,10 @@ pub(crate) fn reclaim_orphans(root: &Path, prefix: &str) -> io::Result<usize> {
         if owner.try_lock().is_err() {
             continue;
         }
-        // The lock is ours, so no live process owns this directory.
+        // The lock is ours, so no live process owns this directory. Anything
+        // still running that names it is debris from the owner's death, not a
+        // participant in a live run.
+        kill_processes_naming(&path);
         match fs::remove_dir_all(&path) {
             Ok(()) => reclaimed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -118,6 +121,51 @@ pub(crate) fn reclaim_orphans(root: &Path, prefix: &str) -> io::Result<usize> {
         }
     }
     Ok(reclaimed)
+}
+
+/// SIGKILL anything whose command line names `path`.
+///
+/// The owner's own children die with it: the guard carries a parent-death
+/// signal, and so does everything it starts. A *grandchild* does not --
+/// `PR_SET_PDEATHSIG` is cleared across `fork(2)` -- so a helper that forks
+/// internally leaves its fork behind when the guard is killed outright. That
+/// was reproducible with the network helper.
+///
+/// Matching on the command line is safe because the directory name carries a
+/// 128-bit random operation id: no unrelated process can name it, and the id
+/// is never reused, so this cannot be confused by PID recycling. Best effort
+/// throughout -- a process that exits first, or that we may not signal, is not
+/// a reason to refuse to reclaim the directory.
+fn kill_processes_naming(path: &Path) {
+    let Some(needle) = path.to_str() else { return };
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    let own = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        if pid == own {
+            continue;
+        }
+        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        // Arguments are NUL-separated; compare against the whole blob so a
+        // path that appears in any single argument matches.
+        if !cmdline.split(|byte| *byte == 0).any(|argument| {
+            argument
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes())
+        }) {
+            continue;
+        }
+        // SAFETY: kill takes two scalars and has no memory preconditions.
+        unsafe { nix::libc::kill(pid as nix::libc::pid_t, nix::libc::SIGKILL) };
+    }
 }
 
 #[cfg(test)]

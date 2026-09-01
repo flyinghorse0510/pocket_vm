@@ -211,6 +211,8 @@ pub struct ArtifactManifest {
     pub guard: ArtifactSpec,
     pub uml: ArtifactSpec,
     pub skopeo: ArtifactSpec,
+    /// Unprivileged userspace network stack for the guest's vector device.
+    pub network_helper: ArtifactSpec,
     pub registry_ca_bundle: ArtifactSpec,
     pub workload_initramfs: ArtifactSpec,
     pub builder_initramfs: ArtifactSpec,
@@ -332,6 +334,7 @@ pub struct VerifiedProfile {
     guard: VerifiedArtifact,
     uml: VerifiedArtifact,
     skopeo: VerifiedArtifact,
+    network_helper: VerifiedArtifact,
     registry_ca_bundle: VerifiedArtifact,
     initramfs: VerifiedArtifact,
     builder_initramfs: VerifiedArtifact,
@@ -377,6 +380,11 @@ impl VerifiedProfile {
         let skopeo = verified_artifact(
             &bundle_root,
             &manifest.artifacts.skopeo,
+            ArtifactRole::HostExecutable,
+        )?;
+        let network_helper = verified_artifact(
+            &bundle_root,
+            &manifest.artifacts.network_helper,
             ArtifactRole::HostExecutable,
         )?;
         let registry_ca_bundle = verified_artifact(
@@ -434,6 +442,7 @@ impl VerifiedProfile {
             guard.path.as_path(),
             uml.path.as_path(),
             skopeo.path.as_path(),
+            network_helper.path.as_path(),
             registry_ca_bundle.path.as_path(),
             initramfs.path.as_path(),
             builder_initramfs.path.as_path(),
@@ -462,6 +471,7 @@ impl VerifiedProfile {
             guard,
             uml,
             skopeo,
+            network_helper,
             registry_ca_bundle,
             initramfs,
             builder_initramfs,
@@ -482,6 +492,7 @@ impl VerifiedProfile {
             &self.guard,
             &self.uml,
             &self.skopeo,
+            &self.network_helper,
             &self.registry_ca_bundle,
             &self.initramfs,
             &self.builder_initramfs,
@@ -527,6 +538,13 @@ impl VerifiedProfile {
     #[must_use]
     pub fn skopeo_path(&self) -> &Path {
         &self.skopeo.path
+    }
+
+    /// Exact network helper bound into this profile revision. The guard
+    /// starts it for a run that asked for networking and stops it afterwards.
+    #[must_use]
+    pub fn network_helper_path(&self) -> &Path {
+        &self.network_helper.path
     }
 
     /// Exact registry trust roots used by the profile-bound acquisition helper.
@@ -806,7 +824,7 @@ pub(crate) fn validate_manifest(
     require_value("launch.rootfstype", &manifest.launch.rootfstype, "ramfs")?;
     require_value("launch.ubd", &manifest.launch.ubd, "cow-v3")?;
     require_value("launch.serial", &manifest.launch.serial, "ssl-fd-v1")?;
-    require_value("launch.network", &manifest.launch.network, "none")?;
+    require_value("launch.network", &manifest.launch.network, "slirp-bess-v1")?;
     if manifest.launch.max_ubd_path_bytes != 4095 {
         return Err(ManifestError::invalid(
             "launch.max_ubd_path_bytes",
@@ -1396,7 +1414,12 @@ fn validate_kernel_config(path: &Path, cpu: &CpuManifest) -> Result<(), Manifest
         ("CONFIG_HOSTFS", "y"),
         ("CONFIG_MCONSOLE", "n"),
         ("CONFIG_MODULES", "n"),
-        ("CONFIG_UML_NET_VECTOR", "n"),
+        // Required by the default slirp network: the vector driver's bess
+        // transport is an AF_UNIX socket to an unprivileged userspace stack.
+        ("CONFIG_UML_NET_VECTOR", "y"),
+        // Left off so the kernel stays statically linked: gre and l2tpv3
+        // resolve their peer through NSS, which a static binary cannot load.
+        ("CONFIG_UML_NET_VECTOR_IP_TRANSPORTS", "n"),
         ("CONFIG_DEBUG_INFO_NONE", "y"),
         ("CONFIG_IPV6", "n"),
         ("CONFIG_USER_NS", "n"),
@@ -1618,7 +1641,7 @@ pub(crate) fn synthetic_profile(root: ManagedUmlPath, smp: bool) -> VerifiedProf
             rootfstype: "ramfs".to_owned(),
             ubd: "cow-v3".to_owned(),
             serial: "ssl-fd-v1".to_owned(),
-            network: "none".to_owned(),
+            network: "slirp-bess-v1".to_owned(),
             max_ubd_path_bytes: 4095,
             max_umid_bytes: 63,
             max_unix_path_bytes: 107,
@@ -1627,6 +1650,7 @@ pub(crate) fn synthetic_profile(root: ManagedUmlPath, smp: bool) -> VerifiedProf
             guard: empty_artifact("host/pocket-guard"),
             uml: empty_artifact("host/linux-uml"),
             skopeo: empty_artifact("host/skopeo"),
+            network_helper: empty_artifact("host/slirp4netns"),
             registry_ca_bundle: empty_artifact("host/registry-ca.pem"),
             workload_initramfs: empty_artifact("guest/workload.cpio"),
             builder_initramfs: empty_artifact("guest/builder.cpio"),
@@ -1656,6 +1680,11 @@ pub(crate) fn synthetic_profile(root: ManagedUmlPath, smp: bool) -> VerifiedProf
         uml: VerifiedArtifact {
             path: root.as_path().join("host/linux-uml"),
             spec: manifest.artifacts.uml.clone(),
+            role: ArtifactRole::HostExecutable,
+        },
+        network_helper: VerifiedArtifact {
+            path: root.as_path().join("host/slirp4netns"),
+            spec: manifest.artifacts.network_helper.clone(),
             role: ArtifactRole::HostExecutable,
         },
         skopeo: VerifiedArtifact {
@@ -1923,6 +1952,7 @@ mod tests {
             "host/pocket-guard",
             "host/linux-uml",
             "host/skopeo",
+            "host/slirp4netns",
             "host/mke2fs",
             "host/e2fsck",
         ] {
@@ -1985,6 +2015,7 @@ mod tests {
             guard: artifact(root, "host/pocket-guard"),
             uml: artifact(root, "host/linux-uml"),
             skopeo: artifact(root, "host/skopeo"),
+            network_helper: artifact(root, "host/slirp4netns"),
             registry_ca_bundle: artifact(root, "host/registry-ca.pem"),
             workload_initramfs: artifact(root, "guest/workload.cpio"),
             builder_initramfs: artifact(root, "guest/builder.cpio"),
@@ -2083,14 +2114,15 @@ mod tests {
             "CONFIG_DEBUG_INFO_NONE",
             "CONFIG_SMP",
             "CONFIG_HOSTFS",
+            "CONFIG_UML_NET_VECTOR",
         ];
         let no = [
             "CONFIG_BLK_DEV_UBD_SYNC",
             "CONFIG_BLK_DEV_LOOP",
             "CONFIG_BLK_DEV_NBD",
             "CONFIG_MCONSOLE",
+            "CONFIG_UML_NET_VECTOR_IP_TRANSPORTS",
             "CONFIG_MODULES",
-            "CONFIG_UML_NET_VECTOR",
             "CONFIG_IPV6",
             "CONFIG_USER_NS",
             "CONFIG_NETDEVICES",

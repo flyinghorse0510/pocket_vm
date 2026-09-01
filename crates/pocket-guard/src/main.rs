@@ -39,6 +39,17 @@ struct Cli {
     #[arg(long)]
     uml_personality: bool,
 
+    /// One argument of an optional helper started before the command child
+    /// and terminated when it exits. Repeat once per argument, program first.
+    /// Passed this way rather than as a single string because the guard must
+    /// never split an argument vector itself.
+    #[arg(
+        long = "network-helper-arg",
+        value_name = "ARG",
+        allow_hyphen_values = true
+    )]
+    network_helper: Vec<OsString>,
+
     /// Program and arguments. A literal `--` must precede the program.
     #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
     command: Vec<OsString>,
@@ -59,6 +70,7 @@ fn main() {
         inherited_fds: cli.inherited_fds,
         term_timeout: Duration::from_millis(cli.term_timeout_ms),
         uml_personality: cli.uml_personality,
+        network_helper: cli.network_helper,
         command: cli.command,
     };
 

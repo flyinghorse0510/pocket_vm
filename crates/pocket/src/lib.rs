@@ -127,6 +127,8 @@ struct ProfileSealArgs {
     #[arg(long, value_name = "PATH")]
     skopeo: PathBuf,
     #[arg(long, value_name = "PATH")]
+    slirp4netns: PathBuf,
+    #[arg(long, value_name = "PATH")]
     registry_ca_bundle: PathBuf,
     #[arg(long, value_name = "PATH")]
     workload_initramfs: PathBuf,
@@ -355,8 +357,9 @@ struct RunArgs {
     /// Unsupported terminal mode; accepted only to return E_FEATURE_UNSUPPORTED.
     #[arg(short = 't', long)]
     tty: bool,
-    /// Only `none` is implemented.
-    #[arg(long, value_enum, default_value = "none")]
+    /// Guest networking. `slirp` gives the guest NAT'd access through an
+    /// unprivileged userspace stack; `none` leaves it with loopback only.
+    #[arg(long, value_enum, default_value = "slirp")]
     network: NetworkMode,
     /// Share a host directory into the guest: HOST_PATH:GUEST_PATH[:ro|:rw].
     /// Both paths must be absolute; the host path must already exist and may
@@ -696,6 +699,7 @@ fn execute_profile_seal(
             guard: arguments.guard,
             uml: arguments.uml,
             skopeo: arguments.skopeo,
+            network_helper: arguments.slirp4netns,
             registry_ca_bundle: arguments.registry_ca_bundle,
             workload_initramfs: arguments.workload_initramfs,
             builder_initramfs: arguments.builder_initramfs,
@@ -1146,6 +1150,7 @@ fn execute_run(
             hostname: arguments.hostname,
             root_read_only: arguments.root_readonly,
             volumes: volumes.iter().map(|held| held.spec.clone()).collect(),
+            network: arguments.network == NetworkMode::Slirp,
             stop_signal: process.stop_signal,
         },
         stdin: input,
@@ -1436,16 +1441,10 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
             "pocket-runtime currently implements only nonterminal buffered streams",
         ));
     }
-    if arguments.network != NetworkMode::None {
-        return Err(unsupported(
-            "network-slirp",
-            "the selected runtime exposes network-none only",
-        ));
-    }
     if !arguments.publish.is_empty() {
         return Err(unsupported(
             "port-forwarding",
-            "port forwarding requires the unavailable slirp network path",
+            "the network helper accepts forwards over its API socket, which is not wired up",
         ));
     }
     if arguments.cpuset.is_some() {
@@ -2648,7 +2647,8 @@ mod tests {
     fn unsupported_run_features_fail_before_paths_are_opened() {
         for (extra, feature) in [
             (vec!["--tty"], "tty"),
-            (vec!["--network", "slirp"], "network-slirp"),
+            // Networking exists now, but nothing forwards a host port into
+            // the guest yet, so --publish is still refused.
             (vec!["--publish", "8080:80"], "port-forwarding"),
             (vec!["--cpuset", "0-1"], "cpuset"),
             (vec!["--pull", "missing"], "pull-policy"),

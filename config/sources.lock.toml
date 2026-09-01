@@ -15,9 +15,9 @@ signer_email = "gregkh@kernel.org"
 signer_fingerprint = "647F28654894E3BD457199BE38DBBDC86092693E"
 upstream_tree_sha1 = "a25d6a94ad99aa059aa6dc728c45052fb2968352"
 upstream_manifest_sha256 = "904af608b9cfcfad86faab7a69acf8128d1ea838d2bb1201e4a31b92c7d68223"
-patch_series_sha256 = "edf2c2b07963102061074b5e889f93e84c542c1d08c79a93966f50acb642b255"
-patched_tree_sha1 = "72a9bfeef8f112701291b141b37d16a4d55648b3"
-patched_manifest_sha256 = "06f554fae053473ad4953f148a149cbbeb75623a2c215fbcbaaba3eccfdb8b61"
+patch_series_sha256 = "a051905ea206276b4ffd21731373870873534946a81293a1db8be722bf93c3bb"
+patched_tree_sha1 = "d758ff484430f0bb2f6c65fa4afbc0ebfa49f0d5"
+patched_manifest_sha256 = "865fd27e7623b17262d7854bab24488dc1e448c100f1f191c4c02991fd089654"
 source_date_epoch = 1786940622
 
 [e2fsprogs]
@@ -48,6 +48,43 @@ release = "1.25.6"
 archive_url = "https://go.dev/dl/go1.25.6.linux-amd64.tar.gz"
 archive_sha256 = "f022b6aad78e362bcba9b0b94d09ad58c5a70c6ba3b7582905fababf5fe0181a"
 archive_size = 59768880
+
+# Unprivileged guest networking. UML's vector driver reaches an AF_UNIX socket
+# through its bess transport; slirp4netns serves that socket and does the NAT
+# in userspace, so a guest reaches the network with no TUN device, no
+# CAP_NET_ADMIN and no host configuration. It is built statically from source
+# because a sealed profile artifact may not depend on the host's libraries;
+# glib is libslirp's own mandatory dependency and drags pcre2, libffi and zlib.
+[zlib]
+version = "1.3.1"
+tarball_url = "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+tarball_sha256 = "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23"
+
+[libffi]
+version = "3.5.2"
+tarball_url = "https://github.com/libffi/libffi/releases/download/v3.5.2/libffi-3.5.2.tar.gz"
+tarball_sha256 = "f3a3082a23b37c293a4fcd1053147b371f2ff91fa7ea1b2a52e335676bac82dc"
+
+[pcre2]
+version = "10.47"
+tarball_url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.bz2"
+tarball_sha256 = "47fe8c99461250d42f89e6e8fdaeba9da057855d06eb7fc08d9ca03fd08d7bc7"
+
+[glib]
+version = "2.88.1"
+tarball_url = "https://download.gnome.org/sources/glib/2.88/glib-2.88.1.tar.xz"
+tarball_sha256 = "51ab804c56f6eab3e5045c774d1290ac5e4c923d4f9a3d8e33123bee45c1840e"
+
+[libslirp]
+version = "4.9.4"
+tarball_url = "https://gitlab.freedesktop.org/slirp/libslirp/-/archive/v4.9.4/libslirp-v4.9.4.tar.gz"
+tarball_sha256 = "3998863b020aeda34bddc567097c6efba55a78cdf6eeee6bcd42c11ef23967da"
+
+[slirp4netns]
+version = "1.3.5"
+commit = "7132ff3ba66cf0eebd8c9a83b9f23838bc84c518"
+tarball_url = "https://github.com/rootless-containers/slirp4netns/archive/refs/tags/v1.3.5.tar.gz"
+tarball_sha256 = "a27ed4c7311616516b56015cc74fa06c6431f5c8ebadaf331c0e08150d1a84ce"
 
 [registry_ca]
 revision = "2026-08-13"
@@ -96,8 +133,8 @@ umoci = "0.4.7"
 e2fsprogs = "1.47.2"
 
 [development_artifacts]
-linux_uml_sha256 = "4a5a95df43ba73e7b9e13808bffd6d3af86dc6abbe117bc46a7a644482d37e7f"
-linux_uml_config_sha256 = "1e1adad52e1f9694181a3d9a007049b60457edb0a1b94746604a07db6d0e9200"
+linux_uml_sha256 = "e212fc0c767b7ab62d87902b46d6f5d134ee55cffb467fbb9ae1683645143655"
+linux_uml_config_sha256 = "07d6a1ec96810b9054bbebd475c44227f07928603f3c0798853d2d74006b1dd9"
 probe_initramfs_sha256 = "4a53447c3834daee54381860931a37ea582c3072fb633c94e550073c606d451e"
 busybox_sha256 = "df12634c17fcdca839ae5dc47d7627b7558511f7645de7c99ccf097a0f28ed5b"
 umoci_sha256 = "4796f71e1dc93959b5d5c33066ee5a51542a16879df92a21fc0d6227a62d89d6"
@@ -109,7 +146,7 @@ skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b84988578
 registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
 mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
 e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-profile_template_sha256 = "a4c809ee9cbe22d4004fc1eb33ca7b63d1dfba659d74cbb63fa52236c57d7c34"
+profile_template_sha256 = "14142e81266faaae3ed7ad31300054ba30b3b3f11d01b032a9929a3625cd2e51"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

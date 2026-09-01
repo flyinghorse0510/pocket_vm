@@ -398,6 +398,53 @@ pub(crate) fn reap_one() -> io::Result<ReapedChild> {
     }
 }
 
+/// Create a close-on-exec pipe, returned as (read, write).
+pub(crate) fn create_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: pipe2 writes exactly two descriptors into the provided array.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and are uniquely owned here.
+    unsafe { Ok((OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))) }
+}
+
+/// Reap `pid` if it has already exited. `Ok(false)` means still running.
+pub(crate) fn reap_specific_nonblocking(pid: libc::pid_t) -> io::Result<bool> {
+    let mut status: libc::c_int = 0;
+    // SAFETY: waitpid writes only through the provided status pointer.
+    let observed = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    if observed == -1 {
+        let error = io::Error::last_os_error();
+        // Already reaped, or never ours: either way there is nothing to wait for.
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            return Ok(true);
+        }
+        return Err(error);
+    }
+    Ok(observed == pid)
+}
+
+/// Block until `pid` is reaped. Treats an absent child as already reaped.
+pub(crate) fn reap_specific_blocking(pid: libc::pid_t) -> io::Result<()> {
+    let mut status: libc::c_int = 0;
+    loop {
+        // SAFETY: waitpid writes only through the provided status pointer.
+        let observed = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if observed == -1 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        return Ok(());
+    }
+}
+
 pub(crate) fn reap_one_blocking() -> io::Result<Option<ReapedChild>> {
     loop {
         let mut status = 0;

@@ -160,6 +160,12 @@ fn run_after_hello(
     }
     verify_start(config, &second_observation, &start)?;
 
+    // Before the workload's namespaces are built: the workload does not get
+    // its own network namespace, so this configures the one it will use.
+    if start.network_mode == 1 {
+        configure_slirp_network()?;
+    }
+
     let mut volume = MountedVolume::mount(config, start.root_read_only)?;
     let workload_result = (|| {
         verify_volume(config, &start)?;
@@ -456,6 +462,122 @@ fn bring_loopback_up() -> Result<(), InitError> {
 
 const fn loopback_flags_with_up(flags: libc::c_short) -> libc::c_short {
     flags | libc::IFF_UP as libc::c_short
+}
+
+/// Give the vector device its address, netmask and default route.
+///
+/// The addressing is the profile's sealed `slirp-bess-v1` contract rather than
+/// anything discovered at run time: the host configured the helper from the
+/// same constants. Done with ioctls for the same reason the loopback setup is
+/// -- the guest carries no netlink library, and every step is verified against
+/// what the kernel reports rather than a successful return code.
+fn configure_slirp_network() -> Result<(), InitError> {
+    use pocket_protocol::{
+        SLIRP_GATEWAY_ADDRESS, SLIRP_GUEST_ADDRESS, SLIRP_INTERFACE, SLIRP_PREFIX_LENGTH,
+    };
+
+    // SAFETY: socket receives scalar Linux ABI values and returns a new owned
+    // descriptor on success.
+    let raw_socket =
+        unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if raw_socket < 0 {
+        return Err(InitError::io("network", io::Error::last_os_error()));
+    }
+    // SAFETY: raw_socket was just returned as a unique successful socket.
+    let socket = unsafe { OwnedFd::from_raw_fd(raw_socket) };
+
+    let name_bytes = SLIRP_INTERFACE.as_bytes();
+    if name_bytes.len() >= libc::IFNAMSIZ {
+        return Err(InitError::contract("network", "interface name is too long"));
+    }
+    let set_name = |request: &mut libc::ifreq| {
+        for (slot, byte) in request.ifr_name.iter_mut().zip(name_bytes) {
+            *slot = *byte as libc::c_char;
+        }
+    };
+    let sockaddr_for = |octets: [u8; 4]| -> libc::sockaddr {
+        let address = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: 0,
+            sin_addr: libc::in_addr {
+                s_addr: u32::from_ne_bytes(octets),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: sockaddr_in and sockaddr have the same size and alignment
+        // for this ABI, and every byte of the source is initialized.
+        unsafe { std::mem::transmute::<libc::sockaddr_in, libc::sockaddr>(address) }
+    };
+
+    let netmask = {
+        let bits = u32::MAX
+            .checked_shl(u32::from(32 - SLIRP_PREFIX_LENGTH))
+            .unwrap_or(0);
+        bits.to_be_bytes()
+    };
+
+    for (request_code, octets, stage) in [
+        (libc::SIOCSIFADDR, SLIRP_GUEST_ADDRESS, "address"),
+        (libc::SIOCSIFNETMASK, netmask, "netmask"),
+    ] {
+        // SAFETY: all-zero is a valid initial ifreq representation.
+        let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+        set_name(&mut request);
+        request.ifr_ifru.ifru_addr = sockaddr_for(octets);
+        // SAFETY: the ioctl reads the initialized name and address fields only.
+        let result = unsafe { libc::ioctl(socket.as_raw_fd(), request_code, &request) };
+        if result != 0 {
+            return Err(InitError::io(
+                match stage {
+                    "address" => "network-address",
+                    _ => "network-netmask",
+                },
+                io::Error::last_os_error(),
+            ));
+        }
+    }
+
+    // Bring it up, then confirm the kernel agrees it is up.
+    // SAFETY: all-zero is a valid initial ifreq representation.
+    let mut flags_request: libc::ifreq = unsafe { std::mem::zeroed() };
+    set_name(&mut flags_request);
+    // SAFETY: SIOCGIFFLAGS writes into the valid mutable ifreq.
+    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCGIFFLAGS, &mut flags_request) } != 0 {
+        return Err(InitError::io("network-flags", io::Error::last_os_error()));
+    }
+    // SAFETY: SIOCGIFFLAGS initialized the flags union member.
+    let current = unsafe { flags_request.ifr_ifru.ifru_flags };
+    flags_request.ifr_ifru.ifru_flags =
+        current | (libc::IFF_UP as libc::c_short) | (libc::IFF_RUNNING as libc::c_short);
+    // SAFETY: SIOCSIFFLAGS reads the initialized name and flags fields only.
+    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCSIFFLAGS, &flags_request) } != 0 {
+        return Err(InitError::io("network-up", io::Error::last_os_error()));
+    }
+    // SAFETY: same valid mutable ifreq contract as the first query.
+    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCGIFFLAGS, &mut flags_request) } != 0 {
+        return Err(InitError::io("network-flags", io::Error::last_os_error()));
+    }
+    // SAFETY: the successful query initialized the flags union member.
+    let observed = unsafe { flags_request.ifr_ifru.ifru_flags };
+    if observed & (libc::IFF_UP as libc::c_short) == 0 {
+        return Err(InitError::contract(
+            "network-up",
+            "vector interface did not remain administratively up",
+        ));
+    }
+
+    // Default route through the helper's gateway address.
+    // SAFETY: all-zero is a valid initial rtentry representation.
+    let mut route: libc::rtentry = unsafe { std::mem::zeroed() };
+    route.rt_dst = sockaddr_for([0, 0, 0, 0]);
+    route.rt_genmask = sockaddr_for([0, 0, 0, 0]);
+    route.rt_gateway = sockaddr_for(SLIRP_GATEWAY_ADDRESS);
+    route.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
+    // SAFETY: SIOCADDRT reads the initialized rtentry and retains no pointer.
+    if unsafe { libc::ioctl(socket.as_raw_fd(), libc::SIOCADDRT, &route) } != 0 {
+        return Err(InitError::io("network-route", io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 fn mount_allow_busy(
@@ -1634,15 +1756,14 @@ fn mount_generated_etc_files(
     )
     .map_err(|error| InitError::io("generated-files", error))?;
 
-    let hostname = format!("{}\n", start.hostname);
-    let hosts = format!("127.0.0.1 localhost\n127.0.1.1 {}\n", start.hostname);
-    // Network-none deliberately installs no usable nameserver. The optional
-    // slirp profile has a separate, versioned resolver contract and is
-    // rejected before this point by the current START validator.
+    // A resolver only where there is something to resolve with. Under
+    // network-none the file is deliberately empty rather than absent, so a
+    // workload reading it sees "no nameservers" instead of a missing file.
+    let generated = generated_etc_contents(start);
     let files = [
-        ("hostname", "etc/hostname", hostname.as_bytes()),
-        ("hosts", "etc/hosts", hosts.as_bytes()),
-        ("resolv.conf", "etc/resolv.conf", &[][..]),
+        ("hostname", "etc/hostname", generated[0].1.as_bytes()),
+        ("hosts", "etc/hosts", generated[1].1.as_bytes()),
+        ("resolv.conf", "etc/resolv.conf", generated[2].1.as_bytes()),
     ];
 
     for (source_name, target_name, contents) in files {
@@ -2078,16 +2199,35 @@ fn verify_chroot_transition() -> Result<(), InitError> {
     Ok(())
 }
 
+/// The exact bytes of the three files the runtime generates.
+///
+/// Shared by the code that writes them and the code that confirms they reached
+/// the workload's root. That check is about the mounts arriving, not about
+/// re-deriving the content independently, so a second copy of these rules
+/// would only be somewhere for the two to drift apart -- which is what
+/// happened when the resolver stopped always being empty.
+fn generated_etc_contents(start: &Start) -> [(&'static str, String); 3] {
+    let resolv = if start.network_mode == 1 {
+        let [a, b, c, d] = pocket_protocol::SLIRP_DNS_ADDRESS;
+        format!("nameserver {a}.{b}.{c}.{d}\n")
+    } else {
+        String::new()
+    };
+    [
+        ("hostname", format!("{}\n", start.hostname)),
+        (
+            "hosts",
+            format!("127.0.0.1 localhost\n127.0.1.1 {}\n", start.hostname),
+        ),
+        ("resolv.conf", resolv),
+    ]
+}
+
 fn verify_generated_etc_files(start: &Start) -> Result<(), InitError> {
-    let expected_hostname = format!("{}\n", start.hostname);
-    let expected_hosts = format!("127.0.0.1 localhost\n127.0.1.1 {}\n", start.hostname);
-    for (path, expected) in [
-        ("/etc/hostname", expected_hostname.as_str()),
-        ("/etc/hosts", expected_hosts.as_str()),
-        ("/etc/resolv.conf", ""),
-    ] {
-        let observed = read_bounded_text(path, 4096, "generated-files")?;
-        if observed != expected {
+    for (name, expected) in &generated_etc_contents(start) {
+        let path = format!("/etc/{name}");
+        let observed = read_bounded_text(&path, 4096, "generated-files")?;
+        if observed != *expected {
             return Err(InitError::contract(
                 "generated-files",
                 format!("generated {path} content does not match START"),

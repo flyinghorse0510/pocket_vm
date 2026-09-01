@@ -60,7 +60,15 @@ CONFIG_UNIX=y
 CONFIG_INET=y
 # CONFIG_IPV6 is not set
 # CONFIG_NETDEVICES is not set
-# CONFIG_UML_NET_VECTOR is not set
+# Host networking. The vector driver's bess transport is an AF_UNIX socket
+# to an unprivileged userspace stack, which is what lets a guest reach the
+# network without TUN, CAP_NET_ADMIN or any host configuration. The gre and
+# l2tpv3 transports are left off: they resolve their peer by name through
+# NSS, which a statically linked UML cannot load, and STATIC_LINK is not
+# negotiable here -- a dynamically linked kernel would bind the sealed
+# profile to the host's libc.
+CONFIG_UML_NET_VECTOR=y
+# CONFIG_UML_NET_VECTOR_IP_TRANSPORTS is not set
 
 # Explicit inherited-FD console and serial channels.
 CONFIG_SSL=y
