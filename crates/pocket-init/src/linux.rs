@@ -46,8 +46,8 @@ use pocket_protocol::{
 use crate::{
     CapabilitySets, ControlFrameDecoder, GuestConfig, GuestObservation, InitError, InternalEvent,
     InternalEventDecoder, PumpBuffer, RootReadOnlyGuards, capability_is_allowed,
-    decode_generation_marker, fixed_root_capability_sets, uid_zero_read_only_guards_hold,
-    verify_generation_marker, verify_start,
+    decode_generation_marker, fixed_root_capability_sets, full_root_capability_sets,
+    uid_zero_read_only_guards_hold, verify_generation_marker, verify_start,
 };
 
 nix::ioctl_none_bad!(set_controlling_tty, libc::TIOCSCTTY);
@@ -1655,6 +1655,15 @@ fn mount_workload_root(config: &GuestConfig, start: &Start) -> Result<WorkloadMo
             MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
             Some("mode=1777,size=64m"),
         ),
+        // A container engine refuses to start without a cgroup hierarchy it can
+        // write to. This is the guest's own kernel's cgroup tree, so it grants
+        // nothing over the host's.
+        MountSpec::new(
+            "cgroup2",
+            "sys/fs/cgroup",
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+            None,
+        ),
         MountSpec::new(
             "tmpfs",
             "run",
@@ -2052,8 +2061,52 @@ impl MountSpec {
     }
 }
 
+/// Unmount whatever the workload mounted for itself, deepest first.
+///
+/// The runtime unmounts what it created, in reverse order. That is not enough
+/// once a workload mounts anything of its own: a container engine inside the
+/// guest leaves overlay and cgroup mounts under the image root, and the root's
+/// own unmount then fails with EBUSY -- which the host reports as an unclean
+/// filesystem, because it cannot tell that failure apart from a real one.
+///
+/// The mount table is the only source that knows about mounts nobody here
+/// created. Deepest-first ordering is what makes this terminate: a mount can
+/// only be busy because of something below it, and there is nothing below the
+/// deepest one.
+fn unmount_foreign_mounts_beneath(root: &str) -> Result<(), InitError> {
+    let table = read_bounded_text("/proc/self/mountinfo", 1024 * 1024, "namespace-unmount")?;
+    let prefix = format!("{root}/");
+    let mut found: Vec<&str> = table
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .filter(|point| point.starts_with(&prefix))
+        .collect();
+    // Longest first, so a parent is never attempted before its children.
+    found.sort_unstable_by_key(|point| std::cmp::Reverse(point.len()));
+    for point in found {
+        match umount2(point, MntFlags::MNT_DETACH) {
+            Ok(()) | Err(Errno::EINVAL | Errno::ENOENT) => {}
+            Err(error) => {
+                return Err(InitError::child(
+                    "namespace-unmount",
+                    Some(error as i32),
+                    format!("could not unmount {point}: {error}"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cleanup_workload_mounts(mounts: &WorkloadMounts) -> Result<(), InitError> {
     let mut first_error = None;
+    // Anything the workload mounted must go before the mounts it was given,
+    // or the image root cannot be released.
+    if let Some(root) = mounts.targets.first()
+        && let Err(error) = unmount_foreign_mounts_beneath(root)
+    {
+        first_error = Some(error);
+    }
     for target in mounts.targets.iter().rev() {
         match umount2(target.as_str(), MntFlags::empty()) {
             Ok(()) | Err(Errno::EINVAL | Errno::ENOENT) => {}
@@ -2088,7 +2141,7 @@ fn workload_exec(
     // setup. Bounding-set removal does not revoke the current setup process's
     // permitted/effective CAP_SYS_ADMIN or CAP_SYS_CHROOT; those are removed
     // by the final capset immediately after the root transition.
-    prepare_capability_bounding_set()?;
+    prepare_capability_bounding_set(start.privileged)?;
     let proc_target = format!("{}/proc", config.newroot_mount);
     mount(
         Some("proc"),
@@ -2109,7 +2162,7 @@ fn workload_exec(
     verify_generated_etc_files(start)?;
     let _previous = umask(Mode::from_bits_truncate(u32::from(start.umask)));
     apply_rlimits(start)?;
-    let capabilities = apply_capability_policy(start.root_read_only)?;
+    let capabilities = apply_capability_policy(start.root_read_only, start.privileged)?;
     let groups: Vec<Gid> = start
         .supplementary_gids
         .iter()
@@ -2256,14 +2309,21 @@ struct AppliedCapabilityPolicy {
     no_new_privs: bool,
 }
 
-fn apply_capability_policy(root_read_only: bool) -> Result<AppliedCapabilityPolicy, InitError> {
+fn apply_capability_policy(
+    root_read_only: bool,
+    privileged: bool,
+) -> Result<AppliedCapabilityPolicy, InitError> {
     const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
     let header = LinuxCapabilityHeader {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,
     };
     let mut data = get_capability_data()?;
-    let exact = fixed_root_capability_sets();
+    let exact = if privileged {
+        full_root_capability_sets(last_kernel_capability()?)
+    } else {
+        fixed_root_capability_sets()
+    };
     for (index, word) in data.iter_mut().enumerate() {
         *word = LinuxCapabilityData {
             effective: exact.effective[index],
@@ -2325,7 +2385,12 @@ fn apply_capability_policy(root_read_only: bool) -> Result<AppliedCapabilityPoli
     })
 }
 
-fn prepare_capability_bounding_set() -> Result<(), InitError> {
+fn prepare_capability_bounding_set(privileged: bool) -> Result<(), InitError> {
+    if privileged {
+        // Nothing is dropped: a container engine needs the bounding set intact
+        // to grant capabilities to what it starts.
+        return Ok(());
+    }
     for capability in 0..=last_kernel_capability()? {
         if capability_is_allowed(capability) {
             continue;

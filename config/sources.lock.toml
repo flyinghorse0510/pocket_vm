@@ -15,9 +15,9 @@ signer_email = "gregkh@kernel.org"
 signer_fingerprint = "647F28654894E3BD457199BE38DBBDC86092693E"
 upstream_tree_sha1 = "a25d6a94ad99aa059aa6dc728c45052fb2968352"
 upstream_manifest_sha256 = "904af608b9cfcfad86faab7a69acf8128d1ea838d2bb1201e4a31b92c7d68223"
-patch_series_sha256 = "a051905ea206276b4ffd21731373870873534946a81293a1db8be722bf93c3bb"
-patched_tree_sha1 = "d758ff484430f0bb2f6c65fa4afbc0ebfa49f0d5"
-patched_manifest_sha256 = "865fd27e7623b17262d7854bab24488dc1e448c100f1f191c4c02991fd089654"
+patch_series_sha256 = "e8210ef5de71ff10617d2b0792f4dac747d730283ec7466df5d434fc39d7b479"
+patched_tree_sha1 = "8afe7ef519c031ab21fbbd78ccf6b53fcef038ba"
+patched_manifest_sha256 = "b2f0ee2e18201e2f45f72058edf009c2fcb724721d62408dafe240e746f2ce40"
 source_date_epoch = 1786940622
 
 [e2fsprogs]
@@ -133,8 +133,8 @@ umoci = "0.4.7"
 e2fsprogs = "1.47.2"
 
 [development_artifacts]
-linux_uml_sha256 = "e212fc0c767b7ab62d87902b46d6f5d134ee55cffb467fbb9ae1683645143655"
-linux_uml_config_sha256 = "07d6a1ec96810b9054bbebd475c44227f07928603f3c0798853d2d74006b1dd9"
+linux_uml_sha256 = "f773d279ec37ea812489961fd18c73bd57b4757eab8557a7083f9e352ed48874"
+linux_uml_config_sha256 = "d553b9b22ed7272d23ee01c078ae54e5e46fb15d991b8ef2f9eca4eb95a48aad"
 probe_initramfs_sha256 = "4a53447c3834daee54381860931a37ea582c3072fb633c94e550073c606d451e"
 busybox_sha256 = "df12634c17fcdca839ae5dc47d7627b7558511f7645de7c99ccf097a0f28ed5b"
 umoci_sha256 = "4796f71e1dc93959b5d5c33066ee5a51542a16879df92a21fc0d6227a62d89d6"
@@ -146,7 +146,7 @@ skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b84988578
 registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
 mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
 e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-profile_template_sha256 = "14142e81266faaae3ed7ad31300054ba30b3b3f11d01b032a9929a3625cd2e51"
+profile_template_sha256 = "e5155014f35fcfcafdefea98136b9fdd217399ba60e899fa837dc9b56ce73fb2"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

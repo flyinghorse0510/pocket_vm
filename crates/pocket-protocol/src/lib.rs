@@ -68,6 +68,7 @@ pub const WORKLOAD_GUEST_FEATURES: &[&str] = &[
     "namespace-mounts",
     "nested-pidns",
     "pre-hello-error-v1",
+    "privileged-capabilities-v1",
     "separate-stdio",
     "signal-forwarding",
     "slirp-network-v1",

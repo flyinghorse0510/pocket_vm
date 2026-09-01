@@ -235,6 +235,7 @@ mod tests {
             volumes: Vec::new(),
             terminal: false,
             network_mode: 0,
+            privileged: false,
             stop_signal: 15,
             derivation_key: C.to_owned(),
             account_db_sha256: A.to_owned(),

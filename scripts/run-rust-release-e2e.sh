@@ -644,6 +644,37 @@ assert_default_network_reaches_the_internet() {
     fi
 }
 
+# What a container engine inside the guest needs, asserted without one:
+# capabilities it can grant, a cgroup hierarchy it can write, and a teardown
+# that survives the mounts it leaves behind.
+assert_container_engine_prerequisites() {
+    local version=$1
+    local generation=$2
+
+    # Assert what the capability set lets a workload *do*, not the bitmask:
+    # a mask is a number that has to be kept in step with the kernel's
+    # capability count, and mounting is the thing an engine actually needs.
+    run_guest "$version" "$generation" caps-default 0 -- /bin/sh -c \
+        'grep -c "^CapEff:.*00000000a00025fb" /proc/self/status; mkdir -p /tmp/m; if mount -t tmpfs t /tmp/m 2>/dev/null; then echo mounted; else echo refused; fi'
+    assert_exact_output "$LOG_ROOT/$version-caps-default.stdout" $'1\nrefused\n'
+
+    run_guest "$version" "$generation" caps-privileged 0 --privileged -- /bin/sh -c \
+        'grep -c "^CapEff:.*00000000a00025fb" /proc/self/status; mkdir -p /tmp/m; if mount -t tmpfs t /tmp/m 2>/dev/null; then echo mounted; else echo refused; fi'
+    assert_exact_output "$LOG_ROOT/$version-caps-privileged.stdout" $'0\nmounted\n'
+
+    # cgroup2, mounted and writable, is what an engine checks for first.
+    run_guest "$version" "$generation" cgroup2 0 --privileged -- /bin/sh -c \
+        'grep -c " /sys/fs/cgroup cgroup2 " /proc/self/mounts; mkdir /sys/fs/cgroup/pocket-probe && rmdir /sys/fs/cgroup/pocket-probe && echo writable'
+    assert_exact_output "$LOG_ROOT/$version-cgroup2.stdout" $'1\nwritable\n'
+
+    # A workload that mounts something of its own must still tear down: the
+    # runtime unmounts what it created, and anything left under the image root
+    # made the root itself EBUSY and was reported as an unclean filesystem.
+    run_guest "$version" "$generation" foreign-mounts 0 --privileged -- /bin/sh -c \
+        'mkdir -p /mnt/a/b && mount -t tmpfs t /mnt/a && mkdir -p /mnt/a/c && mount -t tmpfs t2 /mnt/a/c && echo mounted-and-left'
+    assert_exact_output "$LOG_ROOT/$version-foreign-mounts.stdout" $'mounted-and-left\n'
+}
+
 # An alias is the only thing that roots a generation, it outlives the profile
 # that created it, and reconstructing its key needs that bundle. Without a way
 # to see and drop one by its own ID, a resealed profile's aliases root their
@@ -951,6 +982,7 @@ assert_concurrent_cow_isolation "${GENERATIONS[24.04]}"
 assert_conversion_metadata_is_deterministic 24.04 "${GENERATIONS[24.04]}"
 assert_host_volumes_are_shared_persistent_and_exclusive 24.04 "${GENERATIONS[24.04]}"
 assert_default_network_reaches_the_internet 24.04 "${GENERATIONS[24.04]}"
+assert_container_engine_prerequisites 24.04 "${GENERATIONS[24.04]}"
 assert_signal_killed_runs_are_reclaimed "${GENERATIONS[24.04]}"
 # The Docker-save archive built its own generation under its own alias, so it is
 # the one input this suite can release without losing anything it still checks.

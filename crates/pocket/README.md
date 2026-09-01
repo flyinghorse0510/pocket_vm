@@ -49,7 +49,7 @@ pocket run \
   [--entrypoint EXECUTABLE | --entrypoint=] [--exact-argv] \
   [--user USER[:GROUP]] [--workdir ABSOLUTE_PATH] [-e KEY=VALUE] \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
-  [--volume HOST_DIR:GUEST_DIR[:ro]]... \
+  [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
   [--root-readonly] [-i] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
@@ -190,6 +190,36 @@ Garbage collection is intentionally asymmetric. `--apply` invokes the store's
 real lock-aware collection operation. Omitting `--apply` returns
 `E_FEATURE_UNSUPPORTED` because the store has no classify-only preview API; it
 does not approximate a dry run or delete anything.
+
+## Capabilities
+
+A workload runs as uid 0 with a fixed 12-capability allowlist
+(`fixed-capabilities-v1`): the conventional Docker default set less
+`CAP_MKNOD` and `CAP_SYS_CHROOT`. The bounding set is reduced to match, so a
+workload cannot regain what it was not given.
+
+`--privileged` replaces that with every capability the guest kernel
+implements, and leaves the bounding set intact so the workload can grant
+capabilities to processes it starts. This is what a container engine inside
+the guest requires, and it is carried per run in `START` rather than being a
+property of the profile.
+
+It grants nothing over the host. The guest kernel is the isolation, and the
+host boundary is an unprivileged process that this flag does not affect --
+unlike Docker's flag of the same name, which hands a container authority over
+the host's own kernel.
+
+## Mounts the runtime provides
+
+A workload's namespace receives, in order: the image root, `procfs`, `sysfs`
+(read-only), a `tmpfs` `/dev` with a curated device set, `devpts`, `mqueue`,
+`/dev/shm` (64 MiB), a writable `cgroup2` at `/sys/fs/cgroup`, and a `tmpfs`
+`/run` (16 MiB). The cgroup hierarchy is the guest kernel's own; a container
+engine will not start without one it can write.
+
+Anything the workload mounts for itself is unmounted at teardown, deepest
+first, before the runtime unmounts what it provided -- otherwise the image
+root stays busy and the run is reported as an unclean filesystem.
 
 ## Networking
 

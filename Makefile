@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
+.PHONY: container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
 
 host-tools:
 	cargo build --release -p pocket-guard
@@ -55,6 +55,12 @@ diagnostic-lifecycle:
 # waves. Set POCKET_PROFILE_BUNDLE, POCKET_SOAK_STORE and POCKET_SOAK_GENERATION.
 lifecycle-soak:
 	./scripts/run-lifecycle-soak.sh
+
+# Run a real container engine inside the guest, and a container inside that.
+# Separate from the end-to-end suite because the image is large and the run is
+# slow, not because the evidence is optional.
+container-engine:
+	./scripts/run-container-engine.sh
 
 # Pull and run a set of unrelated base images. Requires network access.
 distro-matrix:

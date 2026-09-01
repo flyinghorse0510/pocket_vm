@@ -1383,7 +1383,21 @@ fn validate_kernel_config(path: &Path, cpu: &CpuManifest) -> Result<(), Manifest
         ("CONFIG_BLK_DEV_INITRD", "y"),
         ("CONFIG_BLK_DEV_UBD", "y"),
         ("CONFIG_BLK_DEV_UBD_SYNC", "n"),
-        ("CONFIG_BLK_DEV_LOOP", "n"),
+        // A container engine running inside the guest needs these. The
+        // host boundary is unaffected: the guest has its own kernel.
+        ("CONFIG_BLK_DEV_LOOP", "y"),
+        ("CONFIG_USER_NS", "y"),
+        ("CONFIG_OVERLAY_FS", "y"),
+        ("CONFIG_NETDEVICES", "y"),
+        ("CONFIG_VETH", "y"),
+        ("CONFIG_BRIDGE", "y"),
+        ("CONFIG_NETFILTER", "y"),
+        ("CONFIG_NF_NAT", "y"),
+        ("CONFIG_MEMCG", "y"),
+        ("CONFIG_CGROUP_PIDS", "y"),
+        ("CONFIG_SECCOMP_FILTER", "y"),
+        ("CONFIG_BPF_SYSCALL", "y"),
+        ("CONFIG_CGROUP_BPF", "y"),
         ("CONFIG_BLK_DEV_NBD", "n"),
         ("CONFIG_EXT4_FS", "y"),
         ("CONFIG_EXT4_FS_POSIX_ACL", "y"),
@@ -1422,8 +1436,6 @@ fn validate_kernel_config(path: &Path, cpu: &CpuManifest) -> Result<(), Manifest
         ("CONFIG_UML_NET_VECTOR_IP_TRANSPORTS", "n"),
         ("CONFIG_DEBUG_INFO_NONE", "y"),
         ("CONFIG_IPV6", "n"),
-        ("CONFIG_USER_NS", "n"),
-        ("CONFIG_NETDEVICES", "n"),
     ];
     required.push(("CONFIG_SMP", if cpu.smp_enabled { "y" } else { "n" }));
     for (setting, expected) in required {
@@ -2115,17 +2127,26 @@ mod tests {
             "CONFIG_SMP",
             "CONFIG_HOSTFS",
             "CONFIG_UML_NET_VECTOR",
+            "CONFIG_BLK_DEV_LOOP",
+            "CONFIG_USER_NS",
+            "CONFIG_NETDEVICES",
+            "CONFIG_OVERLAY_FS",
+            "CONFIG_VETH",
+            "CONFIG_BRIDGE",
+            "CONFIG_NETFILTER",
+            "CONFIG_NF_NAT",
+            "CONFIG_MEMCG",
+            "CONFIG_CGROUP_PIDS",
+            "CONFIG_BPF_SYSCALL",
+            "CONFIG_CGROUP_BPF",
         ];
         let no = [
             "CONFIG_BLK_DEV_UBD_SYNC",
-            "CONFIG_BLK_DEV_LOOP",
             "CONFIG_BLK_DEV_NBD",
             "CONFIG_MCONSOLE",
             "CONFIG_UML_NET_VECTOR_IP_TRANSPORTS",
             "CONFIG_MODULES",
             "CONFIG_IPV6",
-            "CONFIG_USER_NS",
-            "CONFIG_NETDEVICES",
         ];
         let mut config = String::new();
         for setting in yes {

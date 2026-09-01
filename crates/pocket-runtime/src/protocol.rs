@@ -684,6 +684,7 @@ mod tests {
             volumes: Vec::new(),
             terminal: false,
             network_mode: 0,
+            privileged: false,
             stop_signal: 15,
             derivation_key: "66".repeat(32),
             account_db_sha256: "77".repeat(32),

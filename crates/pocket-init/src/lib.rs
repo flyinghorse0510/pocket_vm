@@ -20,7 +20,7 @@ mod pump;
 pub use capability::{
     ALLOWED_CAPABILITIES, BLOCKED_CAPABILITIES, CapabilitySets, RootReadOnlyGuards,
     apply_fixed_capability_mask, capability_is_allowed, fixed_root_capability_sets,
-    uid_zero_read_only_guards_hold,
+    full_root_capability_sets, uid_zero_read_only_guards_hold,
 };
 pub use config::{GuestConfig, TtyPaths};
 pub use contract::{

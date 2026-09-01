@@ -361,6 +361,12 @@ struct RunArgs {
     /// unprivileged userspace stack; `none` leaves it with loopback only.
     #[arg(long, value_enum, default_value = "slirp")]
     network: NetworkMode,
+    /// Give the workload every capability the guest kernel implements,
+    /// instead of the fixed allowlist. Needed to run a container engine
+    /// inside the guest. This grants nothing over the host: the guest has its
+    /// own kernel, and the host boundary is an unprivileged process.
+    #[arg(long)]
+    privileged: bool,
     /// Share a host directory into the guest: HOST_PATH:GUEST_PATH[:ro|:rw].
     /// Both paths must be absolute; the host path must already exist and may
     /// not contain a colon. Writes are visible on the host immediately and
@@ -1151,6 +1157,7 @@ fn execute_run(
             root_read_only: arguments.root_readonly,
             volumes: volumes.iter().map(|held| held.spec.clone()).collect(),
             network: arguments.network == NetworkMode::Slirp,
+            privileged: arguments.privileged,
             stop_signal: process.stop_signal,
         },
         stdin: input,

@@ -13,8 +13,9 @@ pub const PROTOCOL_MAJOR: u16 = 1;
 /// directories mounted through hostfs, and refuses a destination that
 /// collides with a path the runtime mounts or generates; minor 7 gave
 /// `Start::network_mode` a second accepted value, so a guest now configures an
-/// interface and a resolver it previously refused.
-pub const PROTOCOL_MINOR: u16 = 7;
+/// interface and a resolver it previously refused; minor 8 added
+/// `Start::privileged`, which selects the guest's capability policy per run.
+pub const PROTOCOL_MINOR: u16 = 8;
 pub const MAX_CONTROL_PAYLOAD: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

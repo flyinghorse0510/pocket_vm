@@ -152,6 +152,40 @@ does not satisfy any UML execution gate.
   follows symlinks in its target and would otherwise resolve it against the
   initramfs. Long-lived and multi-gigabyte hostfs workloads are not yet
   exercised.
+- [x] Verify that the guest reaches the network by default without any host
+  privilege, and that opting out removes it. `make rust-release-e2e` asserts
+  the address, default route and resolver come from the profile's sealed
+  `slirp-bess-v1` contract, fetches a page over real DNS and TCP, checks
+  `--network none` leaves neither, and requires no helper process to outlive
+  its run. The transport is UML's vector driver over bess, an `AF_UNIX` socket
+  rather than a device, so no TUN, `CAP_NET_ADMIN` or host configuration is
+  involved. Inbound port forwarding is not implemented and `--publish` is
+  refused; throughput is bounded by a single-threaded userspace stack and is
+  not characterised.
+- [x] Verify that a container engine runs inside the guest.
+  `make container-engine` starts `dockerd` in a guest and requires it to
+  report itself, use overlay2 and cgroup v2, pull an image over the guest's
+  own network, and run two containers to completion. `make rust-release-e2e`
+  asserts the prerequisites separately and without a daemon: the default
+  capability allowlist, that `--privileged` exceeds it, a writable `cgroup2`
+  at `/sys/fs/cgroup`, and that a workload leaving its own mounts behind still
+  tears down cleanly. That last case was a real defect -- the runtime unmounted
+  only what it created, so an engine's overlay and cgroup mounts left the image
+  root busy and the run was reported as an unclean filesystem. Rootless
+  engines, `--userns-remap`, and long-running daemon workloads are not
+  exercised.
+
+  Enabling the vector driver exposed a second upstream UML defect, which the
+  diagnostic lane caught on the first run and which patch `0008` fixes.
+  `vector_poll()` takes a queue's `head_lock` from NAPI, which runs in softirq
+  context, while `vector_reset_stats()` (reached through `ndo_open`) and
+  `vector_get_ethtool_stats()` took the same locks in process context with
+  softirqs enabled. lockdep called it: `inconsistent {SOFTIRQ-ON-W} ->
+  {IN-SOFTIRQ-W} usage ... *** DEADLOCK ***`, on every boot with a network
+  device, 34 failures across the lane. Those two callers now use the `_bh`
+  variants; `vector_poll()` is unchanged because softirqs are already off
+  there, and `vector_send()` uses `spin_trylock()`, which is safe either way.
+  The same lane reports zero after the fix.
 - [ ] Verify builder byte and inode capacity retry policy at both boundaries,
   no partial generation publication, deterministic derivation identity, and
   independent ext4 clean-state/UUID/size/manifest/account validation. The
@@ -185,7 +219,7 @@ does not satisfy any UML execution gate.
   cache, no kernel object tree and no intermediate output, then requires the
   profile revision, the whole sealed bundle tree, the host CLI, and the release
   archive to match. The two roots produced profile revision
-  `6bfd5f936509de52e9c2c451eca6e3e05653f8572e3306b549a889e366401872`, a
+  `d104d2f5e3672603489fa16364be38d1463c5ec8728f940774442cf5e8d43936`, a
   byte-identical bundle tree, an identical host CLI, and an identical release
   archive.
 

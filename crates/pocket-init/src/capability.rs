@@ -74,6 +74,21 @@ pub fn apply_fixed_capability_mask(mut sets: CapabilitySets) -> CapabilitySets {
 /// ambient state are deliberately empty; only effective/permitted carry the
 /// versioned allowlist.
 #[must_use]
+/// Every capability the running kernel implements, for a privileged run.
+pub fn full_root_capability_sets(last: u32) -> CapabilitySets {
+    let mut words = [0u32; 2];
+    let mut capability = 0;
+    while capability <= last && capability < 64 {
+        words[(capability / 32) as usize] |= 1 << (capability % 32);
+        capability += 1;
+    }
+    CapabilitySets {
+        effective: words,
+        permitted: words,
+        inheritable: [0; 2],
+    }
+}
+
 pub const fn fixed_root_capability_sets() -> CapabilitySets {
     let allowed = allowed_capability_words();
     CapabilitySets {

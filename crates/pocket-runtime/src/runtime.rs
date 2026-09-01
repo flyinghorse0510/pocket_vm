@@ -58,6 +58,8 @@ pub struct WorkloadSpec {
     pub volumes: Vec<VolumeSpec>,
     /// Give the guest a network interface backed by the profile's helper.
     pub network: bool,
+    /// Run with the full capability set rather than the fixed allowlist.
+    pub privileged: bool,
     pub stop_signal: u16,
 }
 
@@ -1314,6 +1316,7 @@ fn build_start(
         volumes: workload.volumes.clone(),
         terminal: false,
         network_mode: u8::from(workload.network),
+        privileged: workload.privileged,
         stop_signal: workload.stop_signal,
         derivation_key: hex::encode(generation.derivation_key().as_bytes()),
         account_db_sha256,

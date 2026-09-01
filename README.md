@@ -38,6 +38,20 @@ privilege — no TUN device, no `CAP_NET_ADMIN`, nothing to configure:
 pocket run alpine:3.22 -- /bin/sh -c 'apk add --no-cache curl && curl -sI https://example.com | head -1'
 ```
 
+Because the guest has its own kernel, it can run things a container cannot.
+Docker included:
+
+```sh
+pocket run --privileged docker:27-dind -- /bin/sh -c \
+  'dockerd & sleep 10; docker run --rm hello-world'
+```
+
+That is a Docker daemon, with overlay2 and cgroup v2, inside a guest you
+started as an ordinary user. The usual reason to be wary of that — the inner
+engine having privileges over the *host's* kernel — does not apply here: the
+guest's kernel is its own, and the host boundary is an unprivileged process
+either way.
+
 Share a folder with the host, and ask for more of the machine:
 
 ```sh
@@ -53,11 +67,11 @@ Full walkthrough, prerequisites and gotchas: **[Getting started](docs/getting-st
 
 ## Why
 
-- **No privilege.** No root, no setuid, no capabilities, no KVM, no
-  `/dev/fuse`, no user namespaces, no writable cgroups — and networking still
-  works, because the guest reaches a userspace TCP/IP stack over an ordinary
-  Unix socket rather than a TUN device. Works where you cannot install or
-  configure anything.
+- **No privilege on the host.** No root, no setuid, no capabilities, no KVM,
+  no `/dev/fuse`, no host user namespaces, no writable host cgroups — and
+  networking still works, because the guest reaches a userspace TCP/IP stack
+  over an ordinary Unix socket rather than a TUN device. Works where you
+  cannot install or configure anything.
 - **A real kernel per container.** Own scheduler, own page cache, own
   filesystem. Not a shared host kernel behind namespaces.
 - **Your images, unmodified.** Verified against Debian, Alpine, Arch, Fedora,
@@ -106,8 +120,8 @@ deliberately **not** a security boundary against hostile code.
 
 ## Upstream kernel fix
 
-pocket_vm carries five UML patches against Linux 7.2. Three of them fix a real
-upstream defect that made multi-CPU UML unusable:
+pocket_vm carries eight UML patches against Linux 7.2. Four of them fix real
+upstream defects. Three made multi-CPU UML unusable:
 
 `arch/um/drivers/chan_kern.c` drained its deferred channel-IRQ list from
 `_sigio_handler()` — the SIGIO *signal handler*. `free_irq()` may sleep, and
@@ -119,9 +133,17 @@ empty stub and Tiny RCU never waits — which is why `SMP=n` looked fine while
 `SMP=y ncpus=1` failed. The vCPU count was never the variable. The fix drains
 the list from a work item in process context.
 
-The other two arm the stub's parent-death signal before `exec`, and expose the
-kernel's accepted physical memory size so the host can verify its request was
-honoured.
+The fourth is in the network driver, and lockdep found it the first time this
+project enabled one. `vector_poll()` takes a queue lock from NAPI — softirq
+context — while `vector_reset_stats()` and `vector_get_ethtool_stats()` took
+the same lock in process context with softirqs enabled: a self-deadlock, on
+every boot with a network device. Those two now take it with softirqs off.
+
+The remaining four arm the stub's parent-death signal before `exec`, expose
+the kernel's accepted physical memory size so the host can verify its request
+was honoured, and let the vector driver be built into a statically linked
+kernel by confining the NSS dependency to the two transports that actually
+resolve a name.
 
 ## Documentation
 

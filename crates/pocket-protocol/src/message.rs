@@ -265,6 +265,14 @@ pub struct Start {
     /// when the host end disappears.
     #[n(25)]
     pub stdin_bytes: u64,
+    /// Run with the full capability set instead of the fixed allowlist.
+    ///
+    /// A container engine inside the guest needs CAP_SYS_ADMIN to create its
+    /// own mount namespaces. Granting it costs the *host* nothing -- the guest
+    /// has its own kernel, and the host boundary is an unprivileged process --
+    /// but it is off unless asked for, because most workloads never need it.
+    #[n(26)]
+    pub privileged: bool,
 }
 
 impl ValidateMessage for Start {
@@ -844,6 +852,7 @@ mod tests {
             }],
             terminal: false,
             network_mode: 0,
+            privileged: false,
             stop_signal: 15,
             derivation_key: digest('f'),
             account_db_sha256: digest('9'),
@@ -908,14 +917,16 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_exact_stdin_length_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        assert_eq!(&encoded[..2], &[0xb8, 26], "START must remain a 26-key map");
-        // Key 25 needs two bytes and the 13-byte fixture length needs one.
-        let appended_field_bytes = 2 + 1;
+        assert_eq!(&encoded[..2], &[0xb8, 27], "START must remain a 27-key map");
+        // Trailing fields, innermost last: key 25 plus the 13-byte fixture
+        // length, then key 26 plus a one-byte boolean.
+        let privileged_field_bytes = 2 + 1;
+        let appended_field_bytes = privileged_field_bytes + (2 + 1);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             &encoded[appended_offset..appended_offset + 2],
             &[24, 25],
-            "stdin length must be last"
+            "stdin length must precede the privileged flag"
         );
         encoded.truncate(appended_offset);
         encoded[1] = 25;
@@ -925,7 +936,7 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_account_database_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        let appended_field_bytes = (2 + 1) + (1 + 2 + 64);
+        let appended_field_bytes = (2 + 1) + (2 + 1) + (1 + 2 + 64);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             encoded[appended_offset], 24,

@@ -434,6 +434,49 @@ The guard starts the helper and stops it when the run ends, so a `SIGKILL`ed
 
 Upstream marks bess mode experimental, and this build inherits that.
 
+## Running containers inside the guest
+
+The guest has its own kernel, so it can run a container engine — Docker,
+Podman, `buildah` — with the engine's own overlay filesystem, cgroups and
+networking. Pass `--privileged`:
+
+```sh
+pocket run --privileged --cpus 4 --memory 2G \
+  -e DOCKER_HOST=unix:///var/run/docker.sock docker:27-dind -- /bin/sh -c '
+    dockerd --host=unix:///var/run/docker.sock >/tmp/d.log 2>&1 &
+    until docker info >/dev/null 2>&1; do sleep 1; done
+    docker run --rm hello-world'
+```
+
+```
+Hello from Docker!
+This message shows that your installation appears to be working correctly.
+```
+
+`docker info` inside reports `overlay2`, `cgroup v2`, and kernel
+`7.2.0-pocket.1` — its own, not yours.
+
+**Why `--privileged` is safe here, and is not the same thing Docker means by
+it.** In Docker, `--privileged` hands a container capabilities over the
+*host's* kernel, which is why it is a serious decision. Here the guest kernel
+*is* the isolation, and the host boundary is an unprivileged process that this
+flag does not touch. Granting the guest every capability changes what the
+workload can do to its own kernel and nothing about what it can do to yours.
+
+It is still opt-in rather than the default, because most workloads never need
+`CAP_SYS_ADMIN` and a smaller set is a better default.
+
+Two practical notes:
+
+- **`/var/lib/docker` does not survive the run.** The root filesystem is a
+  copy-on-write overlay that is discarded. Put it on a shared folder to keep
+  images between runs: `--volume "$HOME/docker-data:/var/lib/docker"`.
+- **The `docker:dind` image presets `DOCKER_HOST` to a TCP endpoint** for its
+  own daemon-in-a-sibling-container arrangement. Override it as above, or the
+  client will look for a daemon that is not there.
+
+Reproduce all of this with `make container-engine`.
+
 ## Using a local image instead of a registry
 
 ```sh
@@ -525,6 +568,8 @@ Stated plainly, so you do not go looking:
 - **Private registries.** Pulls are anonymous by design; credential flags are
   rejected.
 - **A TTY.** `--tty` is refused; streams are buffered and non-interactive.
+- **Host privileges.** `--privileged` grants capabilities inside the *guest*
+  only. Nothing gives a workload any authority over the host.
 
 The full gate list, including what is and is not yet verified, is in
 [the release support matrix](release-support-matrix.md). The CLI's complete
