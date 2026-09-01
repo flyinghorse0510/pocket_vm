@@ -6,8 +6,9 @@ Everything below was run verbatim on Ubuntu with a 12-core x86_64 host. Two
 things to know before you start:
 
 - The first build fetches and *verifies* a Linux 7.2 tarball, e2fsprogs,
-  Skopeo and a Go toolchain, then compiles a kernel. Budget **40-60 minutes**
-  and roughly **40 GB** of disk. Later builds reuse all of it.
+  Skopeo, slirp4netns and a Go toolchain, then compiles a kernel. Budget
+  **40-60 minutes** and roughly **10 GB** of disk. Later builds reuse all of
+  it.
 - This is `linux/amd64` on an x86_64 host only, and it is deliberately **not**
   a security boundary against hostile code. It is a runtime for workloads you
   already trust.
@@ -19,18 +20,19 @@ needs packages; installing them is the only step that uses `sudo`.
 
 ```sh
 sudo apt install -y \
-  bc bison build-essential cpio curl file flex git gnupg jq make \
-  musl-tools python3 shellcheck xz-utils
+  autoconf automake bc bison bubblewrap build-essential cpio curl file flex \
+  git gnupg jq libtool make meson ninja-build openssl pkg-config python3 \
+  rsync shellcheck xz-utils
 ```
 
-You do **not** need `skopeo`, `mke2fs` or `e2fsck` on the host — the build
-produces its own static copies and uses only those. They appear in the
-prerequisites of the optional probe lanes, not of `make release-profile`.
+You do **not** need `skopeo`, `mke2fs`, `e2fsck` or `slirp4netns` on the host —
+the build produces its own static copies and uses only those.
 
-`busybox-static` is needed only for the optional probe lanes:
+The optional probe lanes need two more packages; `make release-profile` does
+not:
 
 ```sh
-sudo apt install -y busybox-static
+sudo apt install -y busybox-static musl-tools
 ```
 
 Rust must be **exactly 1.93.1** — the release build refuses any other version,
@@ -44,9 +46,11 @@ rustc --version    # rustc 1.93.1
 You do **not** need Go installed. The Skopeo build downloads a pinned Go
 toolchain, checks its SHA-256, and uses it in an isolated cache.
 
-The first build needs HTTPS access to `cdn.kernel.org`, `go.dev`,
-`proxy.golang.org`, `sum.golang.org`, `github.com` and `curl.se`. Pulling an
-image later needs access to whichever registry you name.
+The first build needs HTTPS access to `cdn.kernel.org`, `github.com`,
+`gitlab.freedesktop.org`, `download.gnome.org`, `curl.se`, `go.dev`,
+`proxy.golang.org` and `sum.golang.org`, plus `hkps://keyserver.ubuntu.com`
+to fetch the e2fsprogs signing key. Pulling an image later needs access to
+whichever registry you name.
 
 ## Build
 
@@ -60,12 +64,13 @@ That single target does everything, in order:
 
 1. **`make kernel`** — downloads `linux-7.2.tar.xz`, checks its SHA-256 and
    the signature's, GPG-verifies it, and asserts the signer fingerprint is
-   Greg Kroah-Hartman's. It then extracts a fresh tree, applies the five
+   Greg Kroah-Hartman's. It then extracts a fresh tree, applies the eight
    patches in `kernel/patches/7.2/`, checks the patched tree against the
    identity recorded in `config/sources.lock.toml`, builds `ARCH=um`, and
    audits the source again afterwards.
-2. **Host tools** — builds static e2fsprogs and Skopeo from authenticated
-   sources, each twice, requiring identical bytes.
+2. **Host tools** — builds static e2fsprogs, Skopeo and slirp4netns from
+   authenticated sources, each twice, requiring identical bytes. slirp4netns
+   brings its own chain: zlib, libffi, PCRE2, GLib and libslirp.
 3. **Rust artifacts** — builds the host CLI, the guard, and the three guest
    init programs as static PIEs.
 4. **Initramfses** — packs the workload, builder and validator images
@@ -146,12 +151,10 @@ tar -xf pocket-vm-....tar --strip-components=2 --wildcards \
 That is the same digest-checked install as `make install`, and it writes the
 same config file.
 
-Do not unpack the whole archive by hand instead. Its directories are `0555`,
-mirroring the read-only tree the installer publishes, so a plain `tar -xf`
-fails part-way with `Cannot open: Permission denied` — it creates each
-directory read-only before writing what goes in it. (`tar -xf ...
---delay-directory-restore` unpacks it, but you get an unverified tree with no
-launcher and no config.) Let the installer do it.
+Let the installer unpack it. The archive's directories are `0555`, mirroring
+the read-only tree it publishes, so a plain `tar -xf` fails part-way with
+`Cannot open: Permission denied`, and forcing it through gives you an
+unverified tree with no launcher and no config.
 
 From a checkout you can use the Makefile instead:
 
@@ -183,8 +186,9 @@ Check the build with `make test` (Rust suite, Clippy, rustfmt, ShellCheck) and
 
 ## The three paths
 
-Every command needs three directories. They are separate because they have
-different lifetimes and different trust:
+`pull` and `run` need three directories. They are separate because they have
+different lifetimes and different trust. Other commands need only what they
+touch — `ps` just the runtime root, `cache gc` just the store:
 
 | Flag | What it is | Lifetime |
 |---|---|---|
@@ -256,8 +260,9 @@ preparation: this is `docker.io/library/alpine:3.22` exactly as published.
 
 The rest of this guide uses the installed `pocket` and the config file that
 `make install` wrote. If you are working from the build tree instead, the
-binary is `target/release/pocket` and every command below also needs
-`--profile-bundle`, `--store` and `--runtime-root`.
+binary is `build/release/<profile>/host/pocket` — for the default profile,
+`build/release/x86_64-smp-p4k/host/pocket` — and each command needs the paths
+above, either as flags or from a config file.
 
 ```sh
 pocket image pull alpine:3.22
@@ -279,8 +284,9 @@ pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 ```
 
 That is a real Linux kernel booting, mounting the converted image, and running
-your command — with no root, no KVM, no user namespaces, and no privileged
-mounts.
+your command. On the host it is an ordinary unprivileged process: no root, no
+KVM, no host user namespace, no privileged mount. (Inside the guest,
+namespaces do exist — that is how it runs Docker.)
 
 Ask for more vCPUs:
 
@@ -406,7 +412,8 @@ Turn it off per run, and `/etc/resolv.conf` becomes empty rather than absent:
 pocket run --network none alpine:3.22 -- /bin/sh -c 'wget -T 5 -O - http://example.com/'
 ```
 
-Put `network = "none"` in your config file to make that the default.
+There is no config-file setting for this; the config file carries the three
+paths only.
 
 ### How it works, and why it needs no privileges
 
@@ -432,13 +439,14 @@ The guard starts the helper and stops it when the run ends, so a `SIGKILL`ed
   for bulk transfer.
 - **IPv6.** Not enabled.
 
-Upstream marks bess mode experimental, and this build inherits that.
+slirp4netns marks its bess mode experimental, and this build inherits that.
 
 ## Running containers inside the guest
 
-The guest has its own kernel, so it can run a container engine — Docker,
-Podman, `buildah` — with the engine's own overlay filesystem, cgroups and
-networking. Pass `--privileged`:
+The guest has its own kernel, so it can run a container engine with its own
+overlay filesystem, cgroups and networking. Docker is what `make
+container-engine` exercises; other engines are untested here. Pass
+`--privileged`:
 
 ```sh
 pocket run --privileged --cpus 4 --memory 2G \
@@ -469,8 +477,10 @@ It is still opt-in rather than the default, because most workloads never need
 Two practical notes:
 
 - **`/var/lib/docker` does not survive the run.** The root filesystem is a
-  copy-on-write overlay that is discarded. Put it on a shared folder to keep
-  images between runs: `--volume "$HOME/docker-data:/var/lib/docker"`.
+  copy-on-write overlay that is discarded, so images are pulled again each
+  time. A `--volume` will *not* fix this: `hostfs` has no extended attributes
+  and overlay2 requires them. Keeping an engine's storage across runs is not
+  solved here.
 - **The `docker:dind` image presets `DOCKER_HOST` to a TCP endpoint** for its
   own daemon-in-a-sibling-container arrangement. Override it as above, or the
   client will look for a daemon that is not there.
