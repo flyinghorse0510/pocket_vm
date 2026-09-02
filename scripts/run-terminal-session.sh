@@ -107,7 +107,11 @@ grep -qx 'path_present=1' "$WORK_ROOT/consoles.out" || \
 grep -qx 'nodes_present=1' "$WORK_ROOT/consoles.out" || \
     die "the guest has no device nodes for its extra serial lines"
 grep -qx 'second_shell=1' "$WORK_ROOT/consoles.out" || \
-    die "a shell on an extra line did not answer an attached operator"
+    die "no shell was waiting on an extra line for an attached operator"
+grep -qx 'shell_is_root=1' "$WORK_ROOT/consoles.out" || \
+    die "the shell on the extra line does not have the workload's identity"
+grep -qx 'second_line=1' "$WORK_ROOT/consoles.out" || \
+    die "the second extra line is not independently usable"
 grep -qx 'guest_hostname=1' "$WORK_ROOT/consoles.out" || \
     die "the shell on the extra line is not inside the guest"
 grep -qx 'main_workload=1' "$WORK_ROOT/consoles.out" || \

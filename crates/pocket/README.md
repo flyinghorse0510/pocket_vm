@@ -317,18 +317,21 @@ without going back through its output:
 id=run-af990f6c... generation=pkvm-gen-v1-... pid=3538462 ... consoles=/dev/pts/10,/dev/pts/11
 ```
 
+Each line comes with a login shell already on it, so attaching gives a prompt
+without the workload doing anything. The shell is the workload's own: the same
+root, the same identity, the same capabilities and the same mounts, reached
+through exactly the same transition the workload goes through, because a second
+implementation of that is a second one to get wrong. It gets `TERM=vt100` when
+the image supplies no terminal type, since a serial line reports none.
+
 Inside the guest the lines are `/dev/ttyS4` upwards, `0600` and owned by root.
-Nothing runs on one unless the workload puts something there -- a run executes
-one process, and there is no init spawning gettys. A workload that wants a
-second session on a line starts one:
+A workload is still free to use one itself; the shell is a convenience on a
+line the operator asked for, and a line whose shell cannot start is reported
+and left as a plain serial device rather than failing the run.
 
-```sh
-setsid sh -c 'exec /bin/sh -i </dev/ttyS4 >/dev/ttyS4 2>&1' &
-```
-
-That gives a full independent session -- its own prompt, its own commands --
-running concurrently with the workload, which is the usual reason for wanting
-the line at all.
+The shells are siblings of the workload in its PID namespace, forked after it
+so the workload stays PID 1 and its exit remains the run's result. When it
+exits they go with it.
 
 At most 8 lines, refused before anything is opened if more are asked for. UML
 compiles in 64 and four are reserved, so the limit is policy rather than the

@@ -601,9 +601,7 @@ uid=1000(alice) gid=1000(alice)
 pseudo-terminal you can attach to, the way `-serial pty` works on qemu:
 
 ```sh
-pocket run --consoles 1 alpine:3.22 -- /bin/sh -c '
-    setsid sh -c "exec /bin/sh -i </dev/ttyS4 >/dev/ttyS4 2>&1" &
-    sleep 300'
+pocket run --consoles 1 alpine:3.22 -- /bin/sh -c 'sleep 300'
 ```
 
 ```
@@ -623,13 +621,17 @@ If you backgrounded the run and lost the path, `pocket ps` reports it:
 id=run-af990f6c... pid=3538462 ... consoles=/dev/pts/10,/dev/pts/11
 ```
 
-You get a second, independent shell inside the same guest while the workload
-keeps running.
+You get a prompt straight away -- a second, independent shell inside the same
+guest, running while the workload carries on:
 
-The runtime provides the line; it does not decide what listens on it. A run
-executes one process and there is no init spawning login prompts, so the
-`setsid` line above is what puts a shell there. Inside the guest the lines are
-`/dev/ttyS4` upwards, and at most 8 can be asked for.
+```
+pocket:/# id
+uid=0(root) gid=0(root) groups=1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel)
+```
+
+The shell is the workload's own root and identity, so it sees exactly what the
+workload sees. Inside the guest the lines are `/dev/ttyS4` upwards, and at most
+8 can be asked for.
 
 ## Disk space inside the guest
 

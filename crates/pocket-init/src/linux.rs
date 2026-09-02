@@ -1470,13 +1470,46 @@ fn namespace_supervisor(
         return Ok(());
     }
 
+    // Console shells are forked after the workload, so it stays PID 1 of the
+    // nested namespace and its exit remains the run's result. They are
+    // ordinary siblings: killing PID 1 tears the namespace down, which is what
+    // the shutdown path already relies on.
+    //
+    // A console that will not start is reported and skipped. It is a
+    // convenience on a line the operator asked for, not the run's purpose.
+    let mut consoles = Vec::new();
+    for index in 0..start.extra_consoles {
+        match spawn_console_shell(config, start, index, &mounted) {
+            Ok((console, None)) => consoles.push(console),
+            Ok((console, Some(report))) => {
+                write_internal_event(event_writer, &report)?;
+                let _ = kill(console.pid, UnixSignal::SIGKILL);
+                let _ = wait_for_exact_child(console.pid);
+            }
+            Err(error) => write_internal_event(
+                event_writer,
+                &InternalEvent::Error {
+                    errno: error.errno(),
+                    diagnostic: bounded_internal_diagnostic(&format!(
+                        "console line {}: {error}",
+                        u32::from(index) + RESERVED_SERIAL_LINES_U32
+                    )),
+                },
+            )?,
+        }
+    }
+
     write_internal_event(
         event_writer,
         &InternalEvent::Ready {
             outer_pid: workload_pid.as_raw(),
         },
     )?;
-    let status = wait_for_exact_child(workload_pid)?;
+    let status = wait_for_workload(workload_pid, !consoles.is_empty())?;
+    // Ordinarily nothing is left: the wait above reaps each console as the
+    // kernel kills it. This is the safety net for one that outlived that,
+    // bounded so a console which will not die cannot hold the run open.
+    reap_console_shells(consoles);
     drop(supervisor_liveness_writer);
     cleanup_workload_mounts(&mounted)?;
     write_internal_event(
@@ -1487,6 +1520,36 @@ fn namespace_supervisor(
             namespace_clean: true,
         },
     )
+}
+
+/// Kill and reap every console shell, without being able to block forever.
+///
+/// The kernel has already killed them if PID 1 has exited, so this is
+/// ordinarily one `waitpid` each. The signal and the deadline are for the case
+/// where it has not: a console shell that refuses to die is a leaked process,
+/// but a supervisor that waits for it forever is a run that never reports its
+/// own result, which is worse.
+fn reap_console_shells(consoles: Vec<ConsoleShell>) {
+    const REAP_TIMEOUT: Duration = Duration::from_secs(5);
+    for console in consoles {
+        let _ = kill(console.pid, UnixSignal::SIGKILL);
+        let deadline = Instant::now() + REAP_TIMEOUT;
+        loop {
+            let mut status = 0;
+            // SAFETY: `status` is a live writable integer and the PID names an
+            // exact child of this process. WNOHANG keeps this from blocking,
+            // which is the whole point of reaping this way.
+            let waited = unsafe { libc::waitpid(console.pid.as_raw(), &mut status, libc::WNOHANG) };
+            if waited != 0 {
+                // Reaped, or gone already; either way it is not ours any more.
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 const WORKLOAD_RELEASE_BYTE: u8 = 0xa5;
@@ -2075,6 +2138,7 @@ fn join_components(root: &Path, components: &[OsString]) -> PathBuf {
 const SERIAL_MAJOR: u64 = 4;
 const SERIAL_MINOR_BASE: u64 = 64;
 const RESERVED_SERIAL_LINES: u64 = 4;
+const RESERVED_SERIAL_LINES_U32: u32 = 4;
 
 fn create_curated_devices(newroot: &str) -> Result<(), InitError> {
     let devices = [
@@ -2193,31 +2257,23 @@ fn cleanup_workload_mounts(mounts: &WorkloadMounts) -> Result<(), InitError> {
     }
 }
 
-fn workload_exec(
+/// Enter the workload's root with the workload's credentials.
+///
+/// Everything a process needs to become the workload, short of the exec
+/// itself: its stdio, its root, its limits, its capabilities and its identity,
+/// in that order. Console shells go through exactly this, because a second
+/// implementation of a security transition is a second one to get wrong.
+fn enter_workload_context(
     config: &GuestConfig,
     start: &Start,
     child_io: ChildIo,
-    supervisor_liveness: File,
-    preserve_fd: i32,
+    preserve_fd: Option<i32>,
+    // Held by the workload so it can re-check its supervisor across the
+    // credential transition. A console shell passes `None`: it is not the
+    // process whose death ends the run.
+    supervisor_liveness: Option<File>,
     filesystem_guards: WorkloadFilesystemGuards,
-) -> Result<Infallible, InitError> {
-    prctl::set_pdeathsig(UnixSignal::SIGKILL)
-        .map_err(|error| InitError::syscall("workload-setup", error))?;
-    verify_namespace_supervisor_liveness(&supervisor_liveness, "during workload fork")?;
-    // Restrict what any later exec can acquire before the remaining privileged
-    // setup. Bounding-set removal does not revoke the current setup process's
-    // permitted/effective CAP_SYS_ADMIN or CAP_SYS_CHROOT; those are removed
-    // by the final capset immediately after the root transition.
-    prepare_capability_bounding_set(start.privileged)?;
-    let proc_target = format!("{}/proc", config.newroot_mount);
-    mount(
-        Some("proc"),
-        proc_target.as_str(),
-        Some("proc"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
-        None::<&str>,
-    )
-    .map_err(|error| InitError::syscall("workload-proc", error))?;
+) -> Result<(), InitError> {
     child_io.install()?;
     // Move the cwd under the future root before changing root. This avoids the
     // classic chroot escape precondition where cwd remains outside the jail.
@@ -2250,9 +2306,11 @@ fn workload_exec(
     // after every such transition and close the parent-death race again.
     prctl::set_pdeathsig(UnixSignal::SIGKILL)
         .map_err(|error| InitError::syscall("workload-setup", error))?;
-    verify_namespace_supervisor_liveness(&supervisor_liveness, "after workload identity setup")?;
-    drop(supervisor_liveness);
-    let closed_fds = close_unintended_fds(Some(preserve_fd))?;
+    if let Some(liveness) = supervisor_liveness {
+        verify_namespace_supervisor_liveness(&liveness, "after workload identity setup")?;
+        drop(liveness);
+    }
+    let closed_fds = close_unintended_fds(preserve_fd)?;
     if start.root_read_only
         && start.uid == 0
         && !uid_zero_read_only_guards_hold(RootReadOnlyGuards {
@@ -2272,6 +2330,170 @@ fn workload_exec(
         ));
     }
     prepare_exec_signal_state()?;
+    Ok(())
+}
+
+/// Candidate shells for a console line, most preferred first. An image need
+/// not have any: a `scratch` image has none, and its lines are still usable
+/// serial devices for whatever the workload puts on them.
+const CONSOLE_SHELLS: [&str; 3] = ["/bin/sh", "/bin/bash", "/bin/ash"];
+
+/// One console shell the supervisor is responsible for reaping.
+struct ConsoleShell {
+    pid: Pid,
+}
+
+/// Put an interactive shell on one extra serial line.
+///
+/// Reports its own setup failures the way the workload does: the child holds
+/// the write end of a close-on-exec pipe, so a successful exec closes it and
+/// the parent reads end of file, while any failure arrives as a record. A
+/// console that cannot start is a diagnostic, never the run's failure.
+fn spawn_console_shell(
+    config: &GuestConfig,
+    start: &Start,
+    index: u8,
+    mounted: &WorkloadMounts,
+) -> Result<(ConsoleShell, Option<InternalEvent>), InitError> {
+    let line = u32::from(index) + RESERVED_SERIAL_LINES_U32;
+    let device = format!("/dev/ttyS{line}");
+    let terminal = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(OFlag::O_NOCTTY.bits())
+        .open(&device)
+        .map_err(|error| InitError::io("console-shell", error))?;
+    let (result_reader, result_writer) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| InitError::syscall("console-shell", error))?;
+
+    // SAFETY: this process is single-threaded, as for the workload fork. The
+    // child performs bounded setup and ends only through execve or `_exit`.
+    match unsafe { fork() }.map_err(|error| InitError::syscall("console-shell", error))? {
+        ForkResult::Parent { child } => {
+            drop(result_writer);
+            drop(terminal);
+            let report = read_exec_result(File::from(result_reader))?;
+            let _ = line;
+            Ok((ConsoleShell { pid: child }, report))
+        }
+        ForkResult::Child => {
+            drop(result_reader);
+            let mut writer = File::from(result_writer);
+            let preserve = writer.as_raw_fd();
+            let error = match console_shell_exec(config, start, terminal, preserve, mounted) {
+                Ok(never) => match never {},
+                Err(error) => error,
+            };
+            let _ = write_internal_event(
+                &mut writer,
+                &InternalEvent::Error {
+                    errno: error.errno(),
+                    diagnostic: bounded_internal_diagnostic(&error.to_string()),
+                },
+            );
+            child_exit(127);
+        }
+    }
+}
+
+fn console_shell_exec(
+    config: &GuestConfig,
+    start: &Start,
+    terminal: File,
+    preserve_fd: i32,
+    mounted: &WorkloadMounts,
+) -> Result<Infallible, InitError> {
+    prctl::set_pdeathsig(UnixSignal::SIGKILL)
+        .map_err(|error| InitError::syscall("console-shell", error))?;
+    // `ChildIo::Terminal` is exactly what an interactive session needs and
+    // already does it: a new session, this line as its controlling terminal,
+    // and the three standard descriptors pointing at it.
+    let child_io = ChildIo::Terminal {
+        slave: OwnedFd::from(terminal),
+    };
+    enter_workload_context(
+        config,
+        start,
+        child_io,
+        Some(preserve_fd),
+        None,
+        mounted.filesystem_guards,
+    )?;
+    let environment = console_environment(start)?;
+    let mut last = None;
+    for shell in CONSOLE_SHELLS {
+        let program = CString::new(shell)
+            .map_err(|_| InitError::contract("console-shell", "shell path holds a NUL"))?;
+        // A leading `-` marks a login shell, which is what a serial console is.
+        let name = shell.rsplit('/').next().unwrap_or("sh");
+        let argv0 = CString::new(format!("-{name}"))
+            .map_err(|_| InitError::contract("console-shell", "shell name holds a NUL"))?;
+        last = Some(execve(&program, &[argv0], &environment));
+    }
+    Err(InitError::contract(
+        "console-shell",
+        match last {
+            Some(Err(errno)) => format!("no shell in the image could be started: {errno}"),
+            _ => "no shell in the image could be started".to_owned(),
+        },
+    ))
+}
+
+/// The workload's environment, plus a terminal type if it carries none.
+fn console_environment(start: &Start) -> Result<Vec<CString>, InitError> {
+    let mut environment = Vec::with_capacity(start.env.len() + 1);
+    let mut has_term = false;
+    for entry in &start.env {
+        has_term |= entry.starts_with("TERM=");
+        environment.push(
+            CString::new(entry.as_str())
+                .map_err(|_| InitError::contract("console-shell", "env entry holds a NUL"))?,
+        );
+    }
+    if !has_term {
+        // A serial line reports no terminal type of its own, and a shell with
+        // none behaves as though it were on a dumb terminal.
+        environment.push(
+            CString::new("TERM=vt100")
+                .map_err(|_| InitError::contract("console-shell", "TERM holds a NUL"))?,
+        );
+    }
+    Ok(environment)
+}
+
+fn workload_exec(
+    config: &GuestConfig,
+    start: &Start,
+    child_io: ChildIo,
+    supervisor_liveness: File,
+    preserve_fd: i32,
+    filesystem_guards: WorkloadFilesystemGuards,
+) -> Result<Infallible, InitError> {
+    prctl::set_pdeathsig(UnixSignal::SIGKILL)
+        .map_err(|error| InitError::syscall("workload-setup", error))?;
+    verify_namespace_supervisor_liveness(&supervisor_liveness, "during workload fork")?;
+    // Restrict what any later exec can acquire before the remaining privileged
+    // setup. Bounding-set removal does not revoke the current setup process's
+    // permitted/effective CAP_SYS_ADMIN or CAP_SYS_CHROOT; those are removed
+    // by the final capset immediately after the root transition.
+    prepare_capability_bounding_set(start.privileged)?;
+    let proc_target = format!("{}/proc", config.newroot_mount);
+    mount(
+        Some("proc"),
+        proc_target.as_str(),
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
+        None::<&str>,
+    )
+    .map_err(|error| InitError::syscall("workload-proc", error))?;
+    enter_workload_context(
+        config,
+        start,
+        child_io,
+        Some(preserve_fd),
+        Some(supervisor_liveness),
+        filesystem_guards,
+    )?;
 
     exec_exact(start)
 }
@@ -2808,6 +3030,56 @@ fn read_exec_result(mut reader: File) -> Result<Option<InternalEvent>, InitError
             "workload-exec",
             "exec failure pipe contained the wrong event kind",
         )),
+    }
+}
+
+/// Wait for the workload, reaping console shells as they die.
+///
+/// PID 1 of a PID namespace cannot finish exiting until every other process in
+/// that namespace has been reaped: the kernel kills them and then waits. The
+/// console shells are children of this supervisor, so this supervisor is the
+/// only process that can reap them -- and if it waits for the workload alone,
+/// the workload waits for the shells and the supervisor waits for the
+/// workload. Waiting for any child instead breaks that: each shell is reaped
+/// as it dies, which is exactly what lets PID 1 complete its own exit.
+///
+/// With no console shells there is nothing else to reap, and waiting for the
+/// exact PID keeps an unexpected child from being mistaken for the workload.
+fn wait_for_workload(workload: Pid, has_consoles: bool) -> Result<WorkloadStatus, InitError> {
+    if !has_consoles {
+        return wait_for_exact_child(workload);
+    }
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a live writable integer, and -1 asks for any
+        // child of this process, which is what the deadlock above requires.
+        let waited = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if waited < 0 {
+            let error = Errno::last();
+            if error == Errno::EINTR {
+                continue;
+            }
+            return Err(InitError::syscall("workload-wait", error));
+        }
+        if waited != workload.as_raw() {
+            // A console shell. Reaping it is the point; it reports nothing.
+            continue;
+        }
+        match decode_raw_wait_status(status, "workload-wait")? {
+            RawChildStatus::Exited(code) => {
+                return Ok(WorkloadStatus {
+                    code: Some(code),
+                    signal: None,
+                });
+            }
+            RawChildStatus::Signaled(signal) => {
+                return Ok(WorkloadStatus {
+                    code: None,
+                    signal: Some(signal),
+                });
+            }
+            RawChildStatus::Stopped | RawChildStatus::Continued => {}
+        }
     }
 }
 

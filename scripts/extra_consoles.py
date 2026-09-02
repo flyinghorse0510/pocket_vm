@@ -23,11 +23,9 @@ STORE = os.environ["STORE"]
 RUNTIME_ROOT = os.environ["RUNTIME_ROOT"]
 ALIAS = os.environ.get("CONSOLE_ALIAS", "base:latest")
 
-WORKLOAD = (
-    "ls -l /dev/ttyS4 /dev/ttyS5 >/dev/null 2>&1 && echo NODES_OK;"
-    " setsid sh -c 'exec /bin/sh -i </dev/ttyS4 >/dev/ttyS4 2>&1' &"
-    " sleep 25; echo MAIN_DONE"
-)
+# The workload does nothing to the lines. A shell on each is the runtime's
+# job now, so a workload that mentions them would not be testing that.
+WORKLOAD = "ls -l /dev/ttyS4 /dev/ttyS5 >/dev/null 2>&1 && echo NODES_OK; sleep 25; echo MAIN_DONE"
 
 
 def drain(fd, seconds):
@@ -75,11 +73,19 @@ def main():
 
     time.sleep(10)
     fd = os.open(paths[0], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    os.write(fd, b"echo SECOND_SHELL_OK; hostname\n")
+    os.write(fd, b"echo SECOND_SHELL_OK; hostname; id\n")
     seen = drain(fd, 10)
     print(f"second_shell={'1' if 'SECOND_SHELL_OK' in seen else '0'}")
     print(f"guest_hostname={'1' if 'pocket' in seen else '0'}")
+    print(f"shell_is_root={'1' if 'uid=0(root)' in seen else '0'}")
     os.close(fd)
+
+    # The second line must be independently usable, not just the first.
+    other = os.open(paths[1], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    os.write(other, b"echo OTHER_LINE_OK\n")
+    seen_other = drain(other, 8)
+    print(f"second_line={'1' if 'OTHER_LINE_OK' in seen_other else '0'}")
+    os.close(other)
 
     stdout, _ = process.communicate(timeout=180)
     print(f"nodes_present={'1' if 'NODES_OK' in stdout else '0'}")
