@@ -330,9 +330,17 @@ That gives a full independent session -- its own prompt, its own commands --
 running concurrently with the workload, which is the usual reason for wanting
 the line at all.
 
-At most 8 lines. UML compiles in 64 and four are reserved, so the limit is
-policy rather than the kernel's: each line costs a host pseudo-terminal and an
-inherited descriptor for the life of the run.
+At most 8 lines, refused before anything is opened if more are asked for. UML
+compiles in 64 and four are reserved, so the limit is policy rather than the
+kernel's: each line costs a host pseudo-terminal and an inherited descriptor
+for the life of the run.
+
+Allocating a line needs no privilege: the host end is `open("/dev/ptmx")`, the
+same call every terminal program makes, and the kernel names the device and
+gives it to the caller. If it fails -- no `/dev/pts`, no descriptors left --
+the run is refused rather than started without the lines it was asked for.
+Omitting `--consoles` allocates nothing and produces the same launch as before
+it existed.
 
 ## Seeing the guest boot
 

@@ -2124,6 +2124,16 @@ fn validate_run_feature_surface(arguments: &RunArgs) -> Result<(), CliError> {
              status is the point, and nothing would be left to report it",
         ));
     }
+    if arguments.consoles > pocket_runtime::MAX_EXTRA_CONSOLES {
+        return Err(invalid(
+            "consoles",
+            format!(
+                "at most {} extra serial lines; each costs a host pseudo-terminal \
+                 and an inherited descriptor for the whole run",
+                pocket_runtime::MAX_EXTRA_CONSOLES
+            ),
+        ));
+    }
     // `--rm` discards the run, so there is nothing left for a name to address.
     // Accepting both would silently ignore one of them.
     if arguments.rm && arguments.name.is_some() {
