@@ -78,6 +78,14 @@ pub struct RunOptions {
     pub memory: ParsedMemory,
     pub workload: WorkloadSpec,
     pub stdin: Vec<u8>,
+    /// Mirror the guest kernel console to this process's standard error as it
+    /// is produced.
+    ///
+    /// `console_log` gives the same transcript, but only once the run is over,
+    /// which is no help when the question is why a guest never reached a
+    /// prompt. This also asks the kernel for its full log rather than the
+    /// `quiet` subset, for the same reason the transcript does.
+    pub boot_log: bool,
     /// Keep this run after it exits, under this name, so it can be listed,
     /// committed or removed later.
     ///
@@ -442,7 +450,7 @@ impl<'runtime> Runtime<'runtime> {
             cpus,
             memory,
             guard_term_timeout: self.policy.guard_term_timeout,
-            verbose_console: options.console_log.is_some(),
+            verbose_console: options.console_log.is_some() || options.boot_log,
             network: options.workload.network,
         })?;
         let retained_cow = options.retain.as_ref().map(|_| paths.cow.clone());
@@ -462,6 +470,7 @@ impl<'runtime> Runtime<'runtime> {
             scaling_qualified,
             &options.stdin,
             options.terminal,
+            options.boot_log,
             generation_id,
             retained_cow,
         )?;
@@ -790,6 +799,7 @@ impl ActiveRun {
         scaling_qualified: bool,
         stdin: &[u8],
         terminal: Option<TerminalRequest>,
+        boot_log: bool,
         generation_id: GenerationId,
         retained_cow: Option<PathBuf>,
     ) -> Result<Self, RuntimeError> {
@@ -856,11 +866,19 @@ impl ActiveRun {
                 launch.channels.stderr,
                 policy.maximum_stderr_bytes,
             )),
-            console_worker: Some(CaptureWorker::spawn(
-                "console",
-                launch.channels.console,
-                policy.maximum_console_bytes,
-            )),
+            console_worker: Some(if boot_log {
+                CaptureWorker::spawn_teed(
+                    "console",
+                    launch.channels.console,
+                    policy.maximum_console_bytes,
+                )
+            } else {
+                CaptureWorker::spawn(
+                    "console",
+                    launch.channels.console,
+                    policy.maximum_console_bytes,
+                )
+            }),
             guard_stdout_worker: Some(CaptureWorker::spawn(
                 "guard-stdout",
                 guard_stdout,
@@ -1262,6 +1280,18 @@ impl CaptureWorker {
         R: Read + Send + 'static,
     {
         let handle = thread::spawn(move || capture(reader, maximum));
+        Self { role, handle }
+    }
+
+    /// Capture as usual, and mirror every byte to standard error on the way
+    /// past. The transcript still has to be complete, so the mirror is a tee
+    /// rather than a redirection: a failure to write it never truncates what
+    /// is captured.
+    fn spawn_teed<R>(role: &'static str, reader: R, maximum: usize) -> Self
+    where
+        R: Read + Send + 'static,
+    {
+        let handle = thread::spawn(move || capture_teed(reader, maximum));
         Self { role, handle }
     }
 }
@@ -2027,6 +2057,52 @@ fn capture<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream, Str
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error.to_string()),
         };
+        total_bytes = total_bytes.saturating_add(count as u64);
+        let remaining = maximum.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    Ok(CapturedStream {
+        truncated: total_bytes > bytes.len() as u64,
+        bytes,
+        total_bytes,
+    })
+}
+
+/// Capture exactly as `capture` does, mirroring each chunk to standard error.
+///
+/// The mirror is best effort. A console this cannot echo -- a closed stderr,
+/// a full pipe -- is still a console whose transcript has to be complete, so a
+/// write failure stops the mirroring and leaves the capture running.
+fn capture_teed<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream, String> {
+    let stderr = std::io::stderr();
+    let mut mirroring = true;
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
+    let mut total_bytes = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if mirroring {
+            let mut written = 0;
+            while written < count {
+                match nix::unistd::write(stderr.as_fd(), &buffer[written..count]) {
+                    Ok(0) => {
+                        mirroring = false;
+                        break;
+                    }
+                    Ok(sent) => written += sent,
+                    Err(nix::errno::Errno::EINTR) => {}
+                    Err(_) => {
+                        mirroring = false;
+                        break;
+                    }
+                }
+            }
+        }
         total_bytes = total_bytes.saturating_add(count as u64);
         let remaining = maximum.saturating_sub(bytes.len());
         bytes.extend_from_slice(&buffer[..count.min(remaining)]);

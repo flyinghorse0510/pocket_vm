@@ -430,6 +430,10 @@ struct RunArgs {
     /// Implied by `--tty`, which streams input instead of buffering it.
     #[arg(short = 'i', long)]
     interactive: bool,
+    /// Mirror the guest kernel console to stderr while the run boots, instead
+    /// of only writing it to a file afterwards.
+    #[arg(long)]
+    boot_log: bool,
     /// Name this run so it can be listed, committed and removed after it
     /// exits. Defaults to a generated name.
     #[arg(long)]
@@ -1720,6 +1724,7 @@ fn execute_run(
         },
         stdin: input,
         retain: retain.clone(),
+        boot_log: arguments.boot_log,
         terminal: terminal.as_ref().map(|session| session.request),
         console_log,
     };

@@ -725,7 +725,20 @@ pocket run --console-log /tmp/guest.log alpine:3.22 -- /bin/true
 ```
 
 It is written on success and on failure alike, which is the case it exists
-for. Errors are machine-readable: `E_CLI_INVALID_INPUT` means your command
+for. To watch the boot happen instead of reading it afterwards -- the useful
+form when a guest never reaches a prompt -- use `--boot-log`, which mirrors the
+kernel console to stderr as it is produced and works alongside `-t`:
+
+```sh
+pocket run --boot-log alpine:3.22 -- /bin/true
+```
+
+```
+[    0.000000] Linux version 7.2.0-pocket.1 ...
+[    0.130000] EXT4-fs (ubda): unmounting filesystem ...
+[    0.130000] reboot: Power down
+```
+ Errors are machine-readable: `E_CLI_INVALID_INPUT` means your command
 line, `E_STORE` the store, `E_IMAGE_BUILD` the conversion, `E_GUEST` the
 workload itself.
 

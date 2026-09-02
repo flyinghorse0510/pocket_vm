@@ -63,7 +63,8 @@ pocket run \
   [--user USER[:GROUP]] [--workdir ABSOLUTE_PATH] [-e KEY=VALUE] \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
   [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
-  [--root-readonly] [-i] [-t] [--name NAME | --rm] [--console-log ABSENT_PATH] \
+  [--root-readonly] [-i] [-t] [--name NAME | --rm] \
+  [--boot-log] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
 
@@ -284,6 +285,34 @@ stops it with the run, so a SIGKILLed caller cannot orphan it.
 
 `-p/--publish` remains refused: the helper accepts forwards over an API socket
 that is not wired up.
+
+## Seeing the guest boot
+
+Neither the kernel console nor guest-init diagnostics reach your terminal by
+default: a run prints what the workload printed and nothing else. The console
+is a separate UML channel from the workload's streams, so the two never mix in
+either direction.
+
+Two ways to see it:
+
+```sh
+pocket run --boot-log alpine:3.22 -- /bin/true            # live, on stderr
+pocket run --console-log /tmp/boot.log alpine:3.22 -- /bin/true   # to a file
+```
+
+`--console-log` writes the transcript on success and on failure alike, but only
+once the run is over, which is no help when the question is why a guest never
+reached a prompt. `--boot-log` mirrors the console as it is produced, and
+composes with `-t`: the session rides its own channel, so a boot log cannot
+scribble over a full-screen program.
+
+Both ask the kernel for its full log rather than the `quiet` subset a run
+otherwise boots with, because a transcript filtered to errors hides the lockdep
+and RCU reports someone keeping one is looking for. `--boot-log` mirrors rather
+than redirects, so asking for it never truncates the captured transcript.
+
+A failed run already reports a bounded console excerpt in its error without
+either flag.
 
 ## Kept runs
 
