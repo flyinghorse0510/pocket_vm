@@ -1710,6 +1710,23 @@ fn mount_workload_root(config: &GuestConfig, start: &Start) -> Result<WorkloadMo
     mount_host_volumes(newroot, start, &mut targets)?;
 
     create_curated_devices(newroot)?;
+    // A run that asked for extra serial lines gets their device nodes here.
+    // The lines exist because the launch configured them; this is only what
+    // makes them reachable from inside the workload's own /dev, which is a
+    // fresh tmpfs rather than the devtmpfs that named them at boot.
+    for index in 0..u64::from(start.extra_consoles) {
+        let line = RESERVED_SERIAL_LINES + index;
+        let path = format!("{newroot}/dev/ttyS{line}");
+        mknod(
+            path.as_str(),
+            SFlag::S_IFCHR,
+            Mode::from_bits_truncate(0o600),
+            makedev(SERIAL_MAJOR, SERIAL_MINOR_BASE + line),
+        )
+        .map_err(|error| InitError::syscall("namespace-devices", error))?;
+        fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .map_err(|error| InitError::io("namespace-devices", error))?;
+    }
 
     // A terminal session's PTY was allocated before this namespace existed,
     // from the instance mounted at boot. Every devpts mount is an independent
@@ -2052,6 +2069,12 @@ fn join_components(root: &Path, components: &[OsString]) -> PathBuf {
     }
     joined
 }
+
+/// UML serial lines are `TTY_MAJOR` with minors from 64, and the runtime uses
+/// the first four for control, input, output and diagnostics.
+const SERIAL_MAJOR: u64 = 4;
+const SERIAL_MINOR_BASE: u64 = 64;
+const RESERVED_SERIAL_LINES: u64 = 4;
 
 fn create_curated_devices(newroot: &str) -> Result<(), InitError> {
     let devices = [

@@ -239,6 +239,7 @@ mod tests {
             stdin_streaming: false,
             terminal_rows: 0,
             terminal_columns: 0,
+            extra_consoles: 0,
             stop_signal: 15,
             derivation_key: C.to_owned(),
             account_db_sha256: A.to_owned(),

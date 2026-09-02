@@ -430,6 +430,12 @@ struct RunArgs {
     /// Implied by `--tty`, which streams input instead of buffering it.
     #[arg(short = 'i', long)]
     interactive: bool,
+    /// Extra guest serial lines, each published as a pseudo-terminal you can
+    /// attach to with `screen`, `minicom` or any terminal program. The guest
+    /// exposes them as `/dev/ttyS4` upwards; what runs on one is up to the
+    /// workload.
+    #[arg(long, default_value = "0")]
+    consoles: u8,
     /// Mirror the guest kernel console to stderr while the run boots, instead
     /// of only writing it to a file afterwards.
     #[arg(long)]
@@ -1725,6 +1731,7 @@ fn execute_run(
         stdin: input,
         retain: retain.clone(),
         boot_log: arguments.boot_log,
+        extra_consoles: arguments.consoles,
         terminal: terminal.as_ref().map(|session| session.request),
         console_log,
     };
@@ -1747,13 +1754,20 @@ fn execute_run(
             let running = runtime
                 .start_leased(lease, options)
                 .map_err(|error| discard_on_error(error.into()))?;
+            announce_consoles(running.extra_console_paths(), stderr)?;
             let result = running.wait_interactive(|| session.handle.take_resize());
             session.handle.restore();
             result.map_err(|error| discard_on_error(error.into()))?
         }
-        None => runtime
-            .run_leased(lease, options)
-            .map_err(|error| discard_on_error(error.into()))?,
+        None => {
+            let running = runtime
+                .start_leased(lease, options)
+                .map_err(|error| discard_on_error(error.into()))?;
+            announce_consoles(running.extra_console_paths(), stderr)?;
+            running
+                .wait()
+                .map_err(|error| discard_on_error(error.into()))?
+        }
     };
     // A kept run becomes an instance only once it has finished and its overlay
     // is quiescent. Failing to record it must not discard the run's own
@@ -1776,6 +1790,24 @@ fn execute_run(
             .map_err(|source| output_error("write retention diagnostic", source))?;
     }
     emit_run_output(output, cpus, stdout, stderr)
+}
+
+/// Tell the operator where to attach for each extra serial line.
+///
+/// Printed as soon as the run has started rather than with the result: a line
+/// is only useful while the guest is still running, and a path reported
+/// afterwards names a device that has already gone.
+fn announce_consoles(paths: &[PathBuf], stderr: &mut dyn Write) -> Result<(), CliError> {
+    for (index, path) in paths.iter().enumerate() {
+        writeln!(
+            stderr,
+            "pocket: guest /dev/ttyS{} is attachable at {}",
+            index + 4,
+            path.display()
+        )
+        .map_err(|source| output_error("write console notice", source))?;
+    }
+    Ok(())
 }
 
 /// Seconds since the epoch, or zero on a clock this process cannot read.

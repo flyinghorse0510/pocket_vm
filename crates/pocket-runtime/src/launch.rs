@@ -22,6 +22,9 @@ pub(crate) const STDOUT_FD: RawFd = 11;
 pub(crate) const STDERR_FD: RawFd = 12;
 pub(crate) const STDIN_FD: RawFd = 13;
 pub(crate) const CONSOLE_FD: RawFd = 14;
+/// The first inherited descriptor an extra serial line may use. The runtime's
+/// own five channels occupy 10 through 14.
+pub(crate) const EXTRA_CONSOLE_FD_BASE: RawFd = 15;
 const RELOCATED_FD_MINIMUM: RawFd = 64;
 
 #[derive(Debug)]
@@ -38,6 +41,8 @@ pub(crate) struct RunPaths {
 #[derive(Debug)]
 pub(crate) struct LaunchInputs<'a> {
     pub profile: &'a VerifiedProfile,
+    /// Extra guest serial lines to allocate and publish.
+    pub extra_consoles: u8,
     pub paths: &'a RunPaths,
     pub base: &'a Path,
     pub cpus: ValidatedCpuRequest,
@@ -59,6 +64,10 @@ pub(crate) struct LaunchPlan {
     pub guard_arguments: Vec<OsString>,
     pub uml_command: Vec<OsString>,
     pub environment: BTreeMap<OsString, OsString>,
+    /// How many extra serial lines the command line declares. The plan and the
+    /// descriptors handed to the guard have to agree, so the count travels
+    /// with the command that names them.
+    pub extra_consoles: u8,
 }
 
 pub(crate) struct HostChannels {
@@ -67,6 +76,46 @@ pub(crate) struct HostChannels {
     pub stdout: UnixStream,
     pub stderr: UnixStream,
     pub console: UnixStream,
+    /// Masters of the pseudo-terminals backing any extra serial lines.
+    ///
+    /// Never read: they exist to be held. The guard has its own duplicates at
+    /// the descriptors its command line names, and closing these would take
+    /// the operator's attachable device away with them.
+    #[allow(dead_code)]
+    pub extra_consoles: Vec<nix::pty::PtyMaster>,
+}
+
+/// One extra serial line: the host keeps the master, and the slave is the path
+/// an operator attaches to, exactly as `-serial pty` does.
+pub(crate) struct ExtraConsole {
+    pub master: nix::pty::PtyMaster,
+    pub slave_path: PathBuf,
+}
+
+/// Allocate the pseudo-terminals backing a run's extra serial lines.
+fn allocate_extra_consoles(count: u8) -> Result<Vec<ExtraConsole>, RuntimeError> {
+    let mut consoles = Vec::with_capacity(usize::from(count));
+    for index in 0..count {
+        let describe = |what: &str, error: nix::errno::Errno| {
+            RuntimeError::invalid(
+                "extra_console",
+                format!("could not {what} for serial line {index}: {error}"),
+            )
+        };
+        let master =
+            nix::pty::posix_openpt(nix::fcntl::OFlag::O_RDWR | nix::fcntl::OFlag::O_NOCTTY)
+                .map_err(|error| describe("allocate a pseudo-terminal", error))?;
+        nix::pty::grantpt(&master).map_err(|error| describe("grant a pseudo-terminal", error))?;
+        nix::pty::unlockpt(&master).map_err(|error| describe("unlock a pseudo-terminal", error))?;
+        // The slave path is what an operator opens. Nothing here holds the
+        // slave open: an unopened line should read as unattached, and the
+        // master keeps the path alive regardless.
+        let slave_path = nix::pty::ptsname_r(&master)
+            .map(PathBuf::from)
+            .map_err(|error| describe("name a pseudo-terminal", error))?;
+        consoles.push(ExtraConsole { master, slave_path });
+    }
+    Ok(consoles)
 }
 
 struct ChildDescriptor {
@@ -78,6 +127,8 @@ pub(crate) struct GuardLaunch {
     pub child: Child,
     pub liveness: OwnedFd,
     pub channels: HostChannels,
+    /// Where an operator attaches for each extra serial line, in line order.
+    pub extra_console_paths: Vec<PathBuf>,
 }
 
 pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan, RuntimeError> {
@@ -140,6 +191,13 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
         OsString::from("ssl1=fd:13,fd:13"),
         OsString::from("ssl2=fd:11,fd:11"),
         OsString::from("ssl3=fd:12,fd:12"),
+    ]);
+    for index in 0..inputs.extra_consoles {
+        let line = u32::from(index) + 4;
+        let fd = EXTRA_CONSOLE_FD_BASE + RawFd::from(index);
+        uml_command.push(format!("ssl{line}=fd:{fd},fd:{fd}").into());
+    }
+    uml_command.extend([
         format!(
             "pocket.guest_contract_id={}",
             manifest.hello.guest_contract_id
@@ -197,6 +255,15 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
         guard_arguments.push(OsString::from("--inherit-fd"));
         guard_arguments.push(fd.to_string().into());
     }
+    // Every extra serial line's descriptor has to be declared too: the guard
+    // closes what it was not told to keep, so a line the command line names
+    // but the guard has not been given would leave the guest with a device
+    // that reads end-of-file forever.
+    for index in 0..inputs.extra_consoles {
+        guard_arguments.push(OsString::from("--inherit-fd"));
+        let fd = EXTRA_CONSOLE_FD_BASE + RawFd::from(index);
+        guard_arguments.push(fd.to_string().into());
+    }
     if inputs.network {
         // The guard starts and stops it, so a SIGKILLed caller cannot leave a
         // helper holding the run's socket open.
@@ -237,6 +304,7 @@ pub(crate) fn build_launch_plan(inputs: &LaunchInputs<'_>) -> Result<LaunchPlan,
     );
 
     Ok(LaunchPlan {
+        extra_consoles: inputs.extra_consoles,
         guard_program: inputs.profile.guard_path().to_path_buf(),
         guard_arguments,
         uml_command,
@@ -257,8 +325,9 @@ pub(crate) fn spawn_guard(plan: &LaunchPlan, lease: &File) -> Result<GuardLaunch
     let (stdout_host, stdout_guest) = socketpair("stdout")?;
     let (stderr_host, stderr_guest) = socketpair("stderr")?;
     let (console_host, console_guest) = socketpair("console")?;
+    let extra = allocate_extra_consoles(plan.extra_consoles)?;
 
-    let descriptors = vec![
+    let mut descriptors = vec![
         ChildDescriptor {
             source: relocate(lease.as_raw_fd(), "lease")?,
             target: LEASE_FD,
@@ -288,6 +357,22 @@ pub(crate) fn spawn_guard(plan: &LaunchPlan, lease: &File) -> Result<GuardLaunch
             target: CONSOLE_FD,
         },
     ];
+
+    // Each extra line's master is handed to the guard at the descriptor its
+    // command line names, and its slave path is reported so an operator can
+    // attach. The masters are kept open for the run: closing one would take
+    // the attachable device away with it.
+    let mut extra_masters = Vec::with_capacity(extra.len());
+    let mut extra_paths = Vec::with_capacity(extra.len());
+    for (index, console) in extra.into_iter().enumerate() {
+        let target = EXTRA_CONSOLE_FD_BASE + RawFd::try_from(index).unwrap_or(RawFd::MAX);
+        descriptors.push(ChildDescriptor {
+            source: relocate(console.master.as_raw_fd(), "extra-console")?,
+            target,
+        });
+        extra_paths.push(console.slave_path);
+        extra_masters.push(console.master);
+    }
     let mappings: Vec<(RawFd, RawFd)> = descriptors
         .iter()
         .map(|descriptor| (descriptor.source.as_raw_fd(), descriptor.target))
@@ -339,7 +424,9 @@ pub(crate) fn spawn_guard(plan: &LaunchPlan, lease: &File) -> Result<GuardLaunch
     Ok(GuardLaunch {
         child,
         liveness: liveness_write,
+        extra_console_paths: extra_paths,
         channels: HostChannels {
+            extra_consoles: extra_masters,
             control: control_host,
             stdin: stdin_host,
             stdout: stdout_host,
@@ -434,6 +521,7 @@ mod tests {
             .expect("memory request");
         let plan = build_launch_plan(&LaunchInputs {
             profile: &profile,
+            extra_consoles: 0,
             paths: &paths,
             base: &temporary.path().join("store/generation/base.ext4"),
             cpus,
@@ -470,6 +558,7 @@ mod tests {
         // the transcript silently omits every lockdep and RCU report.
         let verbose = build_launch_plan(&LaunchInputs {
             profile: &profile,
+            extra_consoles: 0,
             paths: &paths,
             base: &temporary.path().join("store/generation/base.ext4"),
             cpus,
@@ -547,6 +636,7 @@ mod tests {
         };
         let plan = build_launch_plan(&LaunchInputs {
             profile: &profile,
+            extra_consoles: 0,
             paths: &paths,
             base: &temporary.path().join("store/generation/base.ext4"),
             cpus: profile
@@ -591,6 +681,7 @@ mod tests {
         let mut environment = BTreeMap::new();
         environment.insert(OsString::from("PATH"), OsString::from("/usr/bin:/bin"));
         let plan = LaunchPlan {
+            extra_consoles: 0,
             guard_program: executable,
             guard_arguments: Vec::new(),
             uml_command: Vec::new(),

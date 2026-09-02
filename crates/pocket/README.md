@@ -64,7 +64,7 @@ pocket run \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
   [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
   [--root-readonly] [-i] [-t] [--name NAME | --rm] \
-  [--boot-log] [--console-log ABSENT_PATH] \
+  [--boot-log] [--consoles N] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
 
@@ -285,6 +285,47 @@ stops it with the run, so a SIGKILLed caller cannot orphan it.
 
 `-p/--publish` remains refused: the helper accepts forwards over an API socket
 that is not wired up.
+
+## Extra serial lines
+
+`--consoles N` gives the guest N serial lines beyond the four the runtime uses
+itself, each published as a pseudo-terminal an operator can attach to. This is
+what `-serial pty` is on qemu: the runtime provides the line, and what runs on
+it is the guest's business.
+
+```sh
+pocket run --consoles 2 alpine:3.22 -- /bin/sh -c '...'
+```
+
+```
+pocket: guest /dev/ttyS4 is attachable at /dev/pts/10
+pocket: guest /dev/ttyS5 is attachable at /dev/pts/11
+```
+
+The paths are printed as soon as the run starts, because that is when they are
+useful, and stay valid for as long as it runs. Attach with any terminal
+program:
+
+```sh
+screen /dev/pts/10
+```
+
+Inside the guest the lines are `/dev/ttyS4` upwards, `0600` and owned by root.
+Nothing runs on one unless the workload puts something there -- a run executes
+one process, and there is no init spawning gettys. A workload that wants a
+second session on a line starts one:
+
+```sh
+setsid sh -c 'exec /bin/sh -i </dev/ttyS4 >/dev/ttyS4 2>&1' &
+```
+
+That gives a full independent session -- its own prompt, its own commands --
+running concurrently with the workload, which is the usual reason for wanting
+the line at all.
+
+At most 8 lines. UML compiles in 64 and four are reserved, so the limit is
+policy rather than the kernel's: each line costs a host pseudo-terminal and an
+inherited descriptor for the life of the run.
 
 ## Seeing the guest boot
 

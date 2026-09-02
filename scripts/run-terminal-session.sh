@@ -87,6 +87,32 @@ grep -qx 'exit=7' "$WORK_ROOT/session.out" || \
 grep -qx 'no_terminal_refused=1' "$WORK_ROOT/session.out" || \
     die "--tty from a pipe was not refused"
 
+# Extra serial lines are the other half of the terminal story: the session
+# above is the workload's own, these are additional lines an operator attaches
+# to while it runs. A line that exists is not a line that works, so this uses
+# one rather than inspecting it.
+POCKET_BIN="$POCKET_BIN" PROFILE_BUNDLE="$PROFILE_BUNDLE" STORE="$STORE" \
+    RUNTIME_ROOT="$RUNTIME_ROOT" CONSOLE_ALIAS=session:latest \
+    python3 "$ROOT/scripts/extra_consoles.py" >"$WORK_ROOT/consoles.out" 2>"$WORK_ROOT/consoles.err" || {
+        sed -n '1,40p' "$WORK_ROOT/consoles.err" >&2
+        sed -n '1,40p' "$WORK_ROOT/consoles.out" >&2
+        die "the extra-console session did not complete"
+    }
+cat "$WORK_ROOT/consoles.out"
+
+grep -qx 'published_lines=2' "$WORK_ROOT/consoles.out" || \
+    die "both extra serial lines were not published"
+grep -qx 'path_present=1' "$WORK_ROOT/consoles.out" || \
+    die "an extra line's pseudo-terminal did not outlive the launch"
+grep -qx 'nodes_present=1' "$WORK_ROOT/consoles.out" || \
+    die "the guest has no device nodes for its extra serial lines"
+grep -qx 'second_shell=1' "$WORK_ROOT/consoles.out" || \
+    die "a shell on an extra line did not answer an attached operator"
+grep -qx 'guest_hostname=1' "$WORK_ROOT/consoles.out" || \
+    die "the shell on the extra line is not inside the guest"
+grep -qx 'main_workload=1' "$WORK_ROOT/consoles.out" || \
+    die "the main workload did not finish alongside the extra line"
+
 # Nothing may be left running, and the runtime root must be empty again.
 # .sweep.lock is the runtime root's orphan-reclamation lock, created once and
 # kept by design; it is not an operation directory.

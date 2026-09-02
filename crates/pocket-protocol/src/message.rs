@@ -69,6 +69,13 @@ pub const MAX_SHUTDOWN_GRACE_MS: u32 = 600_000;
 /// Exact upper bound on the synchronous standard-input payload the host may
 /// announce in START and then write to the guest stdin channel.
 pub const MAX_STDIN_BYTES: u64 = 16 * 1024 * 1024;
+/// Extra serial lines a run may ask for.
+///
+/// UML compiles in 64 (`NR_PORTS`) and the runtime reserves the first four for
+/// control, input, output and diagnostics, so 60 remain. The cap is lower than
+/// that on purpose: each line costs a host pseudo-terminal and an inherited
+/// descriptor for the life of the run.
+pub const MAX_EXTRA_CONSOLES: u8 = 8;
 
 /// Validation performed after decoding and before encoding any workload
 /// payload.
@@ -293,6 +300,15 @@ pub struct Start {
     pub terminal_rows: u16,
     #[n(29)]
     pub terminal_columns: u16,
+    /// Extra guest serial lines beyond the four the runtime uses itself.
+    ///
+    /// Each becomes a `/dev/ttyS` device the workload can open, with the host
+    /// end published as a pseudo-terminal an operator can attach to. The guest
+    /// only creates the device nodes: what runs on a line, if anything, is the
+    /// workload's decision, exactly as it is for a serial port on a real
+    /// machine.
+    #[n(30)]
+    pub extra_consoles: u8,
 }
 
 impl ValidateMessage for Start {
@@ -409,6 +425,12 @@ impl ValidateMessage for Start {
             return invalid(
                 "terminal_size",
                 "a size is meaningful only for a terminal session",
+            );
+        }
+        if self.extra_consoles > MAX_EXTRA_CONSOLES {
+            return invalid(
+                "extra_consoles",
+                "exceeds the serial lines the guest kernel provides",
             );
         }
         if self.stdin_streaming {
@@ -900,6 +922,7 @@ mod tests {
             stdin_streaming: false,
             terminal_rows: 0,
             terminal_columns: 0,
+            extra_consoles: 0,
             stop_signal: 15,
             derivation_key: digest('f'),
             account_db_sha256: digest('9'),
@@ -964,7 +987,7 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_exact_stdin_length_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        assert_eq!(&encoded[..2], &[0xb8, 30], "START must remain a 30-key map");
+        assert_eq!(&encoded[..2], &[0xb8, 31], "START must remain a 31-key map");
         // Trailing fields, innermost last: key 25 plus the 13-byte fixture
         // length, then key 26 and key 27, each a two-byte key plus a one-byte
         // boolean.
@@ -973,8 +996,13 @@ mod tests {
         // Keys 28 and 29 each carry a two-byte key and the fixture's
         // one-byte sizes.
         let size_field_bytes = (2 + 1) + (2 + 1);
-        let appended_field_bytes =
-            privileged_field_bytes + streaming_field_bytes + size_field_bytes + (2 + 1);
+        // Key 30 plus the fixture's one-byte console count.
+        let console_field_bytes = 2 + 1;
+        let appended_field_bytes = privileged_field_bytes
+            + streaming_field_bytes
+            + size_field_bytes
+            + console_field_bytes
+            + (2 + 1);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             &encoded[appended_offset..appended_offset + 2],
@@ -989,7 +1017,8 @@ mod tests {
     #[test]
     fn workload_start_rejects_pre_account_database_schema() {
         let mut encoded = encode_payload(&start()).expect("encode current START");
-        let appended_field_bytes = (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (1 + 2 + 64);
+        let appended_field_bytes =
+            (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (2 + 1) + (1 + 2 + 64);
         let appended_offset = encoded.len() - appended_field_bytes;
         assert_eq!(
             encoded[appended_offset], 24,

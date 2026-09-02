@@ -78,6 +78,10 @@ pub struct RunOptions {
     pub memory: ParsedMemory,
     pub workload: WorkloadSpec,
     pub stdin: Vec<u8>,
+    /// Extra guest serial lines, each published as a pseudo-terminal an
+    /// operator can attach to. The guest creates the device nodes; what runs
+    /// on a line is the workload's decision.
+    pub extra_consoles: u8,
     /// Mirror the guest kernel console to this process's standard error as it
     /// is produced.
     ///
@@ -422,6 +426,7 @@ impl<'runtime> Runtime<'runtime> {
             &options.workload,
             stdin_bytes,
             options.terminal,
+            options.extra_consoles,
         )?;
 
         let run_directory = RunDirectory::create(&self.runtime_root)?;
@@ -445,6 +450,7 @@ impl<'runtime> Runtime<'runtime> {
         }
         let plan = build_launch_plan(&LaunchInputs {
             profile: self.profile,
+            extra_consoles: options.extra_consoles,
             paths: &paths,
             base: base_path.as_path(),
             cpus,
@@ -454,7 +460,9 @@ impl<'runtime> Runtime<'runtime> {
             network: options.workload.network,
         })?;
         let retained_cow = options.retain.as_ref().map(|_| paths.cow.clone());
-        let launch = spawn_guard(&plan, lease.lock_file())?;
+        let mut launch = spawn_guard(&plan, lease.lock_file())?;
+        let extra_console_paths = std::mem::take(&mut launch.extra_console_paths);
+        let extra_console_masters = std::mem::take(&mut launch.channels.extra_consoles);
         // The guard's dup of this open file description is now the sole lock
         // owner required by the runtime lifecycle.
         drop(lease);
@@ -468,6 +476,7 @@ impl<'runtime> Runtime<'runtime> {
             base_size,
             self.policy,
             scaling_qualified,
+            extra_console_masters,
             &options.stdin,
             options.terminal,
             options.boot_log,
@@ -509,6 +518,7 @@ impl<'runtime> Runtime<'runtime> {
 
         Ok(RunningWorkload {
             active: Some(active),
+            extra_console_paths,
             ready,
             stop_signal: options.workload.stop_signal,
             scaling_qualified,
@@ -522,6 +532,7 @@ impl<'runtime> Runtime<'runtime> {
 /// Linux parent-death delivery is tied to that creating parent thread.
 pub struct RunningWorkload {
     active: Option<ActiveRun>,
+    extra_console_paths: Vec<PathBuf>,
     ready: Ready,
     stop_signal: u16,
     scaling_qualified: bool,
@@ -545,6 +556,15 @@ impl RunningWorkload {
     #[must_use]
     pub const fn ready(&self) -> &Ready {
         &self.ready
+    }
+
+    /// Where an operator attaches for each extra serial line, in line order.
+    ///
+    /// Available as soon as the run has started, because that is when it is
+    /// useful: a line nobody can be told about is a line nobody attaches to.
+    #[must_use]
+    pub fn extra_console_paths(&self) -> &[PathBuf] {
+        &self.extra_console_paths
     }
 
     /// Whether current host affinity and an observable cgroup-v2 CPU quota
@@ -754,6 +774,10 @@ impl Drop for RunningWorkload {
 
 struct ActiveRun {
     child: Option<Child>,
+    /// Masters of any extra serial lines. Never read: the guard has its own
+    /// duplicates, and these are held so the pseudo-terminal an operator was
+    /// told to attach to exists for as long as the run does.
+    _extra_consoles: Vec<nix::pty::PtyMaster>,
     liveness: Option<OwnedFd>,
     control: Option<ControlChannel>,
     stdin_stream: Option<UnixStream>,
@@ -797,6 +821,7 @@ impl ActiveRun {
         base_size: u64,
         policy: RuntimePolicy,
         scaling_qualified: bool,
+        extra_console_masters: Vec<nix::pty::PtyMaster>,
         stdin: &[u8],
         terminal: Option<TerminalRequest>,
         boot_log: bool,
@@ -849,6 +874,7 @@ impl ActiveRun {
         let stdin_stop = terminal.map(|_| Arc::new(AtomicBool::new(false)));
         Ok(Self {
             child: Some(launch.child),
+            _extra_consoles: extra_console_masters,
             liveness: Some(launch.liveness),
             control: Some(ControlChannel::new(launch.channels.control)),
             // Keep the host write side open through HELLO/START/READY. Closing
@@ -1660,6 +1686,7 @@ fn compare_generation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_start(
     profile: &VerifiedProfile,
     generation: &GenerationSpec,
@@ -1668,6 +1695,7 @@ fn build_start(
     workload: &WorkloadSpec,
     stdin_bytes: u64,
     terminal: Option<TerminalRequest>,
+    extra_consoles: u8,
 ) -> Result<Start, RuntimeError> {
     let descriptor_platform = generation.descriptor_platform().map(protocol_platform);
     let config_platform = protocol_platform(generation.config_platform());
@@ -1695,6 +1723,7 @@ fn build_start(
         volumes: workload.volumes.clone(),
         terminal: terminal.is_some(),
         stdin_streaming: terminal.is_some(),
+        extra_consoles,
         terminal_rows: terminal.map_or(0, |request| request.rows),
         terminal_columns: terminal.map_or(0, |request| request.columns),
         network_mode: u8::from(workload.network),

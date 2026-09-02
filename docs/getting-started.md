@@ -595,6 +595,35 @@ pocket run --user alice alpine:alice -- id
 uid=1000(alice) gid=1000(alice)
 ```
 
+## A second terminal into a running guest
+
+`--consoles N` adds serial lines to the guest and publishes each as a
+pseudo-terminal you can attach to, the way `-serial pty` works on qemu:
+
+```sh
+pocket run --consoles 1 alpine:3.22 -- /bin/sh -c '
+    setsid sh -c "exec /bin/sh -i </dev/ttyS4 >/dev/ttyS4 2>&1" &
+    sleep 300'
+```
+
+```
+pocket: guest /dev/ttyS4 is attachable at /dev/pts/10
+```
+
+Then from another terminal:
+
+```sh
+screen /dev/pts/10
+```
+
+You get a second, independent shell inside the same guest while the workload
+keeps running.
+
+The runtime provides the line; it does not decide what listens on it. A run
+executes one process and there is no init spawning login prompts, so the
+`setsid` line above is what puts a shell there. Inside the guest the lines are
+`/dev/ttyS4` upwards, and at most 8 can be asked for.
+
 ## Disk space inside the guest
 
 A converted image's filesystem is at least **8 GiB**, and that is also the
