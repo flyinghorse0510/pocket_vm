@@ -463,6 +463,7 @@ impl<'runtime> Runtime<'runtime> {
         let mut launch = spawn_guard(&plan, lease.lock_file())?;
         let extra_console_paths = std::mem::take(&mut launch.extra_console_paths);
         let extra_console_masters = std::mem::take(&mut launch.channels.extra_consoles);
+        run_directory.describe_consoles(&extra_console_paths);
         // The guard's dup of this open file description is now the sole lock
         // owner required by the runtime lifecycle.
         drop(lease);
@@ -1439,6 +1440,29 @@ impl RunDirectory {
     /// Best effort throughout: the run is already committed by the time this
     /// is called, and failing it would turn a cosmetic problem into a lost
     /// workload. A listing simply omits what it cannot read.
+    /// Record where this run's extra serial lines can be attached.
+    ///
+    /// Written after the launch, because the paths do not exist until then,
+    /// and appended rather than rewritten so a listing keeps everything the
+    /// first description already said. Best effort: a run must not fail
+    /// because its own description could not be extended.
+    fn describe_consoles(&self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        let joined = paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.path.join(RUN_DESCRIPTION))
+        {
+            let _ = writeln!(file, "consoles={joined}");
+        }
+    }
+
     fn describe(&self, generation: &GenerationId, cpus: u16, memory_bytes: u64) {
         let started = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

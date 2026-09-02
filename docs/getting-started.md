@@ -616,6 +616,13 @@ Then from another terminal:
 screen /dev/pts/10
 ```
 
+Any serial terminal program works -- `minicom -D`, `picocom`, `socat`, `tio`.
+If you backgrounded the run and lost the path, `pocket ps` reports it:
+
+```
+id=run-af990f6c... pid=3538462 ... consoles=/dev/pts/10,/dev/pts/11
+```
+
 You get a second, independent shell inside the same guest while the workload
 keeps running.
 

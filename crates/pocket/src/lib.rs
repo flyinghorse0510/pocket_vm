@@ -1349,13 +1349,14 @@ fn execute_ps(
         };
         writeln!(
             stdout,
-            "id={} generation={} pid={} started={} cpus={} memory_bytes={}",
+            "id={} generation={} pid={} started={} cpus={} memory_bytes={} consoles={}",
             operation.id,
             field("generation"),
             field("pid"),
             field("started"),
             field("cpus"),
             field("memory_bytes"),
+            field("consoles"),
         )
         .map_err(|source| output_error("write ps output", source))?;
     }

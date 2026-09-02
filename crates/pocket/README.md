@@ -307,7 +307,14 @@ useful, and stay valid for as long as it runs. Attach with any terminal
 program:
 
 ```sh
-screen /dev/pts/10
+screen /dev/pts/10          # or minicom -D, picocom, socat, tio
+```
+
+`pocket ps` reports them too, which is how a backgrounded run's lines are found
+without going back through its output:
+
+```
+id=run-af990f6c... generation=pkvm-gen-v1-... pid=3538462 ... consoles=/dev/pts/10,/dev/pts/11
 ```
 
 Inside the guest the lines are `/dev/ttyS4` upwards, `0600` and owned by root.
