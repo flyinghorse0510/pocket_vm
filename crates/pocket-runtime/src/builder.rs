@@ -524,6 +524,46 @@ fn rewrite_generation_marker(
 
 const GENERATION_MARKER_PATH: &str = "/.pocket-generation.cbor";
 
+/// Read one file out of a staged filesystem, or the empty string when it has
+/// none.
+///
+/// A missing passwd or group file is ordinary -- a `scratch` image has
+/// neither -- and the canonical database treats both as empty, so absence is
+/// not an error here either.
+fn read_guest_file(
+    image: &Path,
+    guest_path: &str,
+    context: &E2fsHelperContext<'_>,
+    image_bytes: u64,
+    logs: &mut Vec<StageLog>,
+) -> Result<String, HostBuildError> {
+    let target = context.tmp.join("guest-file");
+    let _ = fs::remove_file(&target);
+    logs.push(run_guarded_helper(
+        "commit-read-accounts",
+        E2fsHelper::Debugfs,
+        &[
+            OsString::from("-R"),
+            OsString::from(format!("dump {guest_path} {}", target.display())),
+            image.as_os_str().to_owned(),
+        ],
+        context,
+        image_bytes,
+    )?);
+    let bytes = match fs::read(&target) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(HostBuildError::io("read guest file", &target, error)),
+    };
+    let _ = fs::remove_file(&target);
+    String::from_utf8(bytes).map_err(|_| {
+        HostBuildError::invalid(
+            "accounts",
+            format!("{guest_path} is not UTF-8 and cannot be canonicalized"),
+        )
+    })
+}
+
 /// Copy the generation marker out of a staged filesystem.
 fn read_generation_marker(
     image: &Path,
@@ -761,12 +801,46 @@ impl<'builder> HostBuilder<'builder> {
         // that produced something unmountable has to fail here.
         verify_filesystem(&staged, &context, source_bytes, &mut logs)?;
 
+        // The account database is what `--user NAME` is resolved against, and
+        // a run is free to have added or renamed an account, so it is derived
+        // from the filesystem being published rather than inherited from the
+        // one it was copied from. The rootfs prefix is the image's own layout:
+        // the workload's `/` is `/rootfs` inside the image.
+        let passwd = read_guest_file(
+            &staged,
+            "/rootfs/etc/passwd",
+            &context,
+            source_bytes,
+            &mut logs,
+        )?;
+        let group = read_guest_file(
+            &staged,
+            "/rootfs/etc/group",
+            &context,
+            source_bytes,
+            &mut logs,
+        )?;
+        let accounts = pocket_protocol::account_database_from_files(&passwd, &group)
+            .map_err(|error| HostBuildError::invalid("accounts", error.to_string()))?;
+        let account_bytes = pocket_protocol::encode_payload(&accounts).map_err(|error| {
+            HostBuildError::invalid("accounts", format!("cannot encode: {error}"))
+        })?;
+        let mut file = transaction.create_sidecar("accounts.cbor")?;
+        write_synced(&mut file, &account_bytes, "accounts.cbor")?;
+        drop(file);
+        let (digest, size) = hash_path(&transaction.staging_path().join("accounts.cbor"))?;
+        let mut sidecars = vec![ImmutableSidecar::new("accounts.cbor", digest, size)?];
+
         let marker_bytes = read_generation_marker(&staged, &context, source_bytes, &mut logs)?;
         let mut marker: GenerationMarker =
             pocket_protocol::decode_payload(&marker_bytes).map_err(|error| {
                 HostBuildError::invalid("generation_marker", format!("cannot decode: {error}"))
             })?;
         marker.derivation_key = hex::encode(derivation_key.as_bytes());
+        // The marker binds the account database too, and this image has its
+        // own, so leaving the source's digest here would fail the guest's
+        // reconciliation for a database that is genuinely different.
+        marker.account_db_sha256 = hex::encode(digest.as_bytes());
         let updated = pocket_protocol::encode_payload(&marker).map_err(|error| {
             HostBuildError::invalid("generation_marker", format!("cannot encode: {error}"))
         })?;
@@ -779,10 +853,11 @@ impl<'builder> HostBuilder<'builder> {
         rewrite_generation_marker(&staged, &updated, &context, source_bytes, &mut logs)?;
         verify_filesystem(&staged, &context, source_bytes, &mut logs)?;
 
-        let mut sidecars = Vec::new();
-        // Still true of the committed image: how to start it, and who its
-        // accounts are.
-        for name in ["accounts.cbor", "image-config.json"] {
+        // Still true of the committed image: how it is started. A commit does
+        // not change the image's declared entrypoint, environment or working
+        // directory, so its configuration carries over unchanged.
+        {
+            let name = "image-config.json";
             let from = generation.directory_path().join(name);
             let bytes = fs::read(&from)
                 .map_err(|error| HostBuildError::io("read source sidecar", &from, error))?;

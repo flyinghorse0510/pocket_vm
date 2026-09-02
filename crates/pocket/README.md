@@ -327,19 +327,31 @@ marker, and publishes the result. The source is untouched, and committing the
 same overlay onto the same base twice converges on one generation rather than
 producing a new one each time.
 
-A committed image carries only the evidence still true of it.
-`image-config.json` and `accounts.cbor` describe how to start it and are
-carried across; the build evidence -- the filesystem manifest, the validation
-evidence, the build record -- describes a conversion that did not produce this
-filesystem, so it is replaced by a `commit-record.json` naming the source
-generation, the instance and the overlay digest. Carrying the old manifest
-instead would publish an image whose recorded inventory lists a filesystem that
-no longer exists.
+A committed image carries only evidence that is true of it.
+`image-config.json` describes how the image is started, which a commit does not
+change, so it carries over. `accounts.cbor` is **derived from the committed
+filesystem**, not inherited: it is the host-readable index of the guest's
+`/etc/passwd` and `/etc/group` that `--user NAME` is resolved against, and a
+run is free to have added or renamed an account, so it is read back out of the
+merged image. An account the run created is therefore selectable by name:
 
-Two consequences worth knowing. `accounts.cbor` is the source image's account
-database, so a run that edited `/etc/passwd` commits an image whose `--user`
-name resolution still reflects the original. And a run that changed nothing is
-refused rather than republished unchanged.
+```sh
+pocket run --name setup alpine:3.22 -- /bin/sh -c 'adduser -D -u 1000 alice'
+pocket commit setup alpine:alice
+pocket run --user alice alpine:alice -- id      # uid=1000(alice)
+```
+
+The build evidence -- the filesystem manifest, the validation evidence, the
+build record -- describes a conversion that did not produce this filesystem, so
+it is replaced by a `commit-record.json` naming the source generation, the
+instance and the overlay digest. Carrying the old manifest instead would
+publish an image whose recorded inventory lists a filesystem that no longer
+exists.
+
+Regenerating the account database also moves the marker: a generation marker
+binds its account digest, so both it and the derivation key are rewritten.
+
+A run that changed nothing is refused rather than republished unchanged.
 
 ## Filesystem size
 

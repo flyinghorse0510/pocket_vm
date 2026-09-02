@@ -704,6 +704,99 @@ pub struct AccountGroup {
     pub members: Vec<String>,
 }
 
+/// Hard cap on one line of a passwd or group file.
+pub const MAX_ACCOUNT_LINE_BYTES: usize = 64 * 1024;
+
+/// Derive the canonical account records from passwd and group file contents.
+///
+/// This is the single definition of what `accounts.cbor` contains. Two things
+/// produce it: the builder, from a freshly unpacked rootfs, and `commit`, from
+/// the filesystem a kept run left behind. They have to agree exactly -- the
+/// database is what `--user NAME` is resolved against, and a second
+/// implementation would be free to drift -- so the derivation lives with the
+/// format it produces and takes text rather than a path, leaving each caller
+/// to obtain the two files however it can reach them.
+pub fn account_database_from_files(
+    passwd: &str,
+    group: &str,
+) -> Result<AccountDatabase, ProtocolError> {
+    let mut users = Vec::new();
+    for line in account_lines(passwd)? {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() != 7 {
+            return invalid("passwd", "entry does not have seven fields");
+        }
+        validate_account_name("passwd.name", fields[0])?;
+        users.push(AccountUser {
+            name: fields[0].to_owned(),
+            uid: parse_account_id(fields[2], "passwd uid")?,
+            gid: parse_account_id(fields[3], "passwd gid")?,
+        });
+    }
+    users.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let mut groups = Vec::new();
+    for line in account_lines(group)? {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() != 4 {
+            return invalid("group", "entry does not have four fields");
+        }
+        validate_account_name("group.name", fields[0])?;
+        // Real group files carry members listed twice and stray commas that
+        // produce empty names -- `usermod -aG` run twice is enough. Neither
+        // carries any information, and the canonical database requires
+        // strictly sorted unique names, so canonicalize rather than abort.
+        let mut members = fields[3]
+            .split(',')
+            .filter(|member| !member.is_empty())
+            .map(|member| {
+                validate_account_name("group.members", member)?;
+                Ok(member.to_owned())
+            })
+            .collect::<Result<Vec<_>, ProtocolError>>()?;
+        members.sort();
+        members.dedup();
+        groups.push(AccountGroup {
+            name: fields[0].to_owned(),
+            gid: parse_account_id(fields[2], "group gid")?,
+            members,
+        });
+    }
+    groups.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let database = AccountDatabase {
+        schema: ACCOUNT_DB_SCHEMA.to_owned(),
+        users,
+        groups,
+    };
+    database.validate()?;
+    Ok(database)
+}
+
+fn account_lines(bytes: &str) -> Result<impl Iterator<Item = &str>, ProtocolError> {
+    if bytes
+        .lines()
+        .any(|line| line.len() > MAX_ACCOUNT_LINE_BYTES)
+    {
+        return invalid("account_file", "line exceeds hard cap");
+    }
+    Ok(bytes
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#')))
+}
+
+fn parse_account_id(value: &str, field: &'static str) -> Result<u32, ProtocolError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return invalid(field, "is not an unsigned decimal ID");
+    }
+    value
+        .parse::<u32>()
+        .map_err(|_| ProtocolError::InvalidMessage {
+            field,
+            reason: "does not fit u32",
+        })
+}
+
 /// Canonical account records derived inside the builder from the completed
 /// rootfs. Numeric IDs may repeat so later resolution can report ambiguity;
 /// names and serialized ordering are unique and deterministic.

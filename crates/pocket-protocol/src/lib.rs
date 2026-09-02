@@ -28,7 +28,7 @@ pub use builder::{
     MAX_ORIGINAL_USER_LENGTH, MAX_TOTAL_UNCOMPRESSED_BYTES, ManifestBegin, ManifestChunk,
     ManifestEnd, ManifestEntry, ManifestLimits, ManifestXattr, OciDescriptor,
     SOURCE_DATE_EPOCH_MAX, SOURCE_DATE_EPOCH_MIN, ToolIdentity, UserResolution,
-    builder_error_message, decode_builder_message,
+    account_database_from_files, builder_error_message, decode_builder_message,
 };
 pub use builder_state::{BuilderSession, BuilderState};
 pub use error::{FrameSection, ProtocolError};

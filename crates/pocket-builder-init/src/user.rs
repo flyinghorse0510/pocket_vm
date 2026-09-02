@@ -1,14 +1,12 @@
 use std::{fs, path::Path};
 
 use pocket_protocol::{
-    AccountDatabase, AccountGroup, AccountUser, MAX_ORIGINAL_USER_LENGTH, UserResolution,
-    ValidateMessage,
+    AccountDatabase, AccountUser, MAX_ORIGINAL_USER_LENGTH, UserResolution, ValidateMessage,
 };
 
 use crate::BuilderError;
 
 const MAX_ACCOUNT_FILE_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_ACCOUNT_LINE_BYTES: usize = 64 * 1024;
 
 /// Resolve Docker's image `User` evidence against the completed rootfs.
 /// The original string remains in `BUILD_DONE`; this function records the
@@ -24,66 +22,12 @@ pub fn resolve_image_user(rootfs: &Path, original: &str) -> Result<UserResolutio
 /// also the sole input to image-User resolution.
 pub fn build_account_database(rootfs: &Path) -> Result<AccountDatabase, BuilderError> {
     let passwd = read_account_file(&rootfs.join("etc/passwd"))?;
-    let groups = read_account_file(&rootfs.join("etc/group"))?;
-    let mut users = Vec::new();
-    for line in account_lines(&passwd)? {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() != 7 {
-            return Err(BuilderError::contract(
-                "account-database",
-                "passwd entry does not have seven fields",
-            ));
-        }
-        validate_name(fields[0], "user")?;
-        users.push(AccountUser {
-            name: fields[0].to_owned(),
-            uid: parse_required_id(fields[2], "passwd uid")?,
-            gid: parse_required_id(fields[3], "passwd gid")?,
-        });
-    }
-    users.sort_by(|left, right| left.name.cmp(&right.name));
-
-    let mut account_groups = Vec::new();
-    for line in account_lines(&groups)? {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() != 4 {
-            return Err(BuilderError::contract(
-                "account-database",
-                "group entry does not have four fields",
-            ));
-        }
-        validate_name(fields[0], "group")?;
-        // Real group files carry members listed twice and stray commas that
-        // produce empty names -- `usermod -aG` run twice is enough. Neither
-        // carries any information, and the canonical database the protocol
-        // transmits requires strictly sorted unique names, so canonicalize
-        // rather than abort a whole build over a cosmetic duplicate.
-        let mut members = fields[3]
-            .split(',')
-            .filter(|member| !member.is_empty())
-            .map(|member| {
-                validate_name(member, "group member")?;
-                Ok(member.to_owned())
-            })
-            .collect::<Result<Vec<_>, BuilderError>>()?;
-        members.sort();
-        members.dedup();
-        account_groups.push(AccountGroup {
-            name: fields[0].to_owned(),
-            gid: parse_required_id(fields[2], "group gid")?,
-            members,
-        });
-    }
-    account_groups.sort_by(|left, right| left.name.cmp(&right.name));
-    let database = AccountDatabase {
-        schema: pocket_protocol::ACCOUNT_DB_SCHEMA.to_owned(),
-        users,
-        groups: account_groups,
-    };
-    database
-        .validate()
-        .map_err(|error| BuilderError::protocol("account-database", error))?;
-    Ok(database)
+    let group = read_account_file(&rootfs.join("etc/group"))?;
+    // The canonicalization itself lives with the format, because `commit`
+    // derives the same database from a filesystem it reaches a different way
+    // and the two must not drift.
+    pocket_protocol::account_database_from_files(&passwd, &group)
+        .map_err(|error| BuilderError::protocol("account-database", error))
 }
 
 pub fn resolve_image_user_from_database(
@@ -237,21 +181,6 @@ fn read_account_file(path: &Path) -> Result<String, BuilderError> {
     fs::read_to_string(path).map_err(|error| BuilderError::io("resolve-user", error))
 }
 
-fn account_lines(bytes: &str) -> Result<impl Iterator<Item = &str>, BuilderError> {
-    if bytes
-        .lines()
-        .any(|line| line.len() > MAX_ACCOUNT_LINE_BYTES)
-    {
-        return Err(BuilderError::contract(
-            "resolve-user",
-            "account-file line exceeds hard cap",
-        ));
-    }
-    Ok(bytes
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#')))
-}
-
 fn parse_optional_id(value: &str, field: &'static str) -> Result<Option<u32>, BuilderError> {
     if !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Ok(None);
@@ -280,7 +209,7 @@ fn validate_name(value: &str, field: &'static str) -> Result<(), BuilderError> {
     {
         return Err(BuilderError::contract(
             "resolve-user",
-            format!("{field} name has invalid bytes"),
+            format!("{field} is empty, oversized, or holds a forbidden byte"),
         ));
     }
     Ok(())

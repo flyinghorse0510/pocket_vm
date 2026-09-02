@@ -62,7 +62,9 @@ printf 'profile_bundle=%s\n' "$PROFILE_BUNDLE"
 # One kept run that changes the filesystem, one discarded run.
 # shellcheck disable=SC2016  # the guest shell expands this, not this one
 "$POCKET_BIN" run "${common[@]}" --name kept --timeout 600s base:latest -- /bin/sh -c \
-    'echo POCKET_COMMIT_MARKER > /provenance.txt; mkdir -p /added; sync' \
+    'echo POCKET_COMMIT_MARKER > /provenance.txt; mkdir -p /added;
+     adduser -D -u 1000 committed_user; addgroup -g 1500 committed_group;
+     adduser committed_user committed_group; sync' \
     >"$WORK_ROOT/kept.out" 2>"$WORK_ROOT/kept.err" || {
         sed -n '1,40p' "$WORK_ROOT/kept.err" >&2
         die "the kept run failed"
@@ -98,6 +100,14 @@ source_has=$("$POCKET_BIN" run "${common[@]}" --rm --timeout 600s base:latest --
     /bin/sh -c 'cat /provenance.txt 2>/dev/null || echo SOURCE_CLEAN' 2>/dev/null | tr -d '\r\n')
 printf 'source_after_commit=%s\n' "$source_has"
 
+# An account the run created must be selectable by name on the committed
+# image. The account database is a host-readable index of the guest's
+# /etc/passwd, so carrying the source's across would leave this unresolvable
+# while the account plainly exists inside the image.
+committed_user=$("$POCKET_BIN" run "${common[@]}" --rm --timeout 600s \
+    --user committed_user:committed_group base:committed -- /bin/sh -c 'id' 2>&1 | tail -1)
+printf 'committed_user=%s\n' "$committed_user"
+
 "$POCKET_BIN" rm --store "$STORE" kept >"$WORK_ROOT/rm.out" 2>&1 || die "rm failed"
 remaining=$("$POCKET_BIN" ps --store "$STORE" --runtime-root "$RUNTIME_ROOT" -a 2>/dev/null | grep -c '^name=' || true)
 printf 'remaining_after_rm=%s\n' "$remaining"
@@ -108,6 +118,10 @@ grep -q 'POCKET_COMMIT_MARKER' <<<"$committed" || \
 grep -q 'DIR_PRESENT' <<<"$committed" || \
     die "the committed image is missing a directory the run created"
 [[ "$source_has" == SOURCE_CLEAN ]] || die "committing modified the source image"
+grep -q 'uid=1000(committed_user)' <<<"$committed_user" || \
+    die "an account the run created does not resolve by name on the committed image"
+grep -q 'gid=1500(committed_group)' <<<"$committed_user" || \
+    die "a group the run created does not resolve by name on the committed image"
 (( remaining == 0 )) || die "rm left $remaining kept runs behind"
 
 if find "$RUNTIME_ROOT" -mindepth 1 ! -name .sweep.lock -print -quit | grep -q .; then

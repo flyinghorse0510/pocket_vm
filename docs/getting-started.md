@@ -583,6 +583,18 @@ jq-1.8.1
 The image you started from is not modified; `commit` publishes a new one beside
 it.
 
+Accounts the run created come with it, and can be selected by name:
+
+```sh
+pocket run --name setup alpine:3.22 -- /bin/sh -c 'adduser -D -u 1000 alice'
+pocket commit setup alpine:alice
+pocket run --user alice alpine:alice -- id
+```
+
+```
+uid=1000(alice) gid=1000(alice)
+```
+
 ## Disk space inside the guest
 
 A converted image's filesystem is at least **8 GiB**, and that is also the
