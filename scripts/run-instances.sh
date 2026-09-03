@@ -63,8 +63,9 @@ printf 'profile_bundle=%s\n' "$PROFILE_BUNDLE"
 # shellcheck disable=SC2016  # the guest shell expands this, not this one
 "$POCKET_BIN" run "${common[@]}" --name kept --timeout 600s base:latest -- /bin/sh -c \
     'echo POCKET_COMMIT_MARKER > /provenance.txt; mkdir -p /added;
-     adduser -D -u 1000 committed_user; addgroup -g 1500 committed_group;
-     adduser committed_user committed_group; sync' \
+     echo run >> /tally.txt; echo "TALLY=$(wc -l < /tally.txt)";
+     adduser -D -u 1000 committed_user 2>/dev/null; addgroup -g 1500 committed_group 2>/dev/null;
+     adduser committed_user committed_group 2>/dev/null; sync' \
     >"$WORK_ROOT/kept.out" 2>"$WORK_ROOT/kept.err" || {
         sed -n '1,40p' "$WORK_ROOT/kept.err" >&2
         die "the kept run failed"
@@ -74,6 +75,19 @@ printf 'profile_bundle=%s\n' "$PROFILE_BUNDLE"
         sed -n '1,40p' "$WORK_ROOT/discarded.err" >&2
         die "the discarded run failed"
     }
+
+# Resuming must continue the same filesystem, not start a fresh one over the
+# same base: the tally is what distinguishes the two, because a fresh overlay
+# would report the same count every time.
+grep -q 'TALLY=1' "$WORK_ROOT/kept.out" || die "the first run did not report its tally"
+"$POCKET_BIN" start --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" \
+    --runtime-root "$RUNTIME_ROOT" --timeout 600s kept \
+    >"$WORK_ROOT/resume.out" 2>"$WORK_ROOT/resume.err" || {
+        sed -n '1,40p' "$WORK_ROOT/resume.err" >&2
+        die "resuming the kept run failed"
+    }
+resumed=$(grep -oE 'TALLY=[0-9]+' "$WORK_ROOT/resume.out" | tail -1)
+printf 'resumed_%s\n' "$resumed"
 
 "$POCKET_BIN" ps "${common[@]:2:2}" --runtime-root "$RUNTIME_ROOT" -a \
     >"$WORK_ROOT/ps.out" 2>"$WORK_ROOT/ps.err" || {
@@ -117,6 +131,8 @@ grep -q 'POCKET_COMMIT_MARKER' <<<"$committed" || \
     die "the committed image does not contain what the run wrote"
 grep -q 'DIR_PRESENT' <<<"$committed" || \
     die "the committed image is missing a directory the run created"
+[[ "$resumed" == TALLY=2 ]] || \
+    die "resuming reported $resumed; a continued overlay must tally 2, a fresh one 1"
 [[ "$source_has" == SOURCE_CLEAN ]] || die "committing modified the source image"
 grep -q 'uid=1000(committed_user)' <<<"$committed_user" || \
     die "an account the run created does not resolve by name on the committed image"

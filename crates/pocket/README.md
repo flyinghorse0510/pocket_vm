@@ -44,6 +44,10 @@ pocket generation list --store STORE --derivation DERIVATION_KEY [--json]
 
 pocket ps [--runtime-root RUNTIME_ROOT] [--store STORE] [-a] [--json]
 
+pocket start [--profile-bundle BUNDLE] [--store STORE] \
+  [--runtime-root RUNTIME_ROOT] [-t] [--boot-log] [--consoles N] \
+  [--timeout DURATION] NAME
+
 pocket rm [--store STORE] NAME...
 
 pocket commit [--store STORE] [--profile-bundle BUNDLE] \
@@ -401,6 +405,34 @@ and will not collect it while any instance needs it. That root and the name are
 separate records, so removing an instance releases both, and a crash between
 them leaves reclaimable space rather than an instance whose image has been
 collected.
+
+`start` runs a kept instance again, on the filesystem it left behind:
+
+```sh
+pocket run --name tally ubuntu:24.04 -- \
+  /bin/bash -c 'echo run >> /log.txt; wc -l < /log.txt'   # 1
+pocket start tally                                        # 2
+pocket start tally                                        # 3
+```
+
+It is the same instance continued, not a new one sharing a disk: the name, the
+creation time, the image and the recorded argv all stay, and only the outcome
+and finish time move. The overlay is written through, so state accumulates the
+way it does for a container that is stopped and started again.
+
+The record keeps the argv as a vector rather than the joined string it displays,
+because joining is lossy -- an argument containing a space cannot be recovered
+from it. What the record does *not* keep is the rest of the original command
+line: `--cpus`, `--memory`, `--user`, `--volume` and the rest are not replayed,
+because the record exists to say what the instance is, not to be a second copy
+of the image configuration. `start` takes `-t`, `--consoles`, `--boot-log` and
+`--timeout` of its own.
+
+Resuming rewrites the overlay, so its digest changes and the root that named
+the old one no longer describes it. The new root is registered before the
+record is repointed and the old one released only afterwards, so a crash
+between them leaves reclaimable space rather than an instance whose image can
+be collected.
 
 `commit` publishes what a kept run produced as a new image:
 

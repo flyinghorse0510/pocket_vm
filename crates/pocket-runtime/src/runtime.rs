@@ -125,8 +125,13 @@ pub struct RetainRequest {
     pub name: String,
     /// The reference the run was started from, recorded for listing.
     pub image_reference: String,
+    /// The exact argv, recorded so a resume replays what was actually run.
+    pub argv: Vec<String>,
     /// The command line, recorded for listing.
     pub command: String,
+    /// Resume this instance's existing overlay rather than starting a fresh
+    /// one, and update its record in place when the run ends.
+    pub resume: bool,
 }
 
 /// Initial window size for an interactive terminal session.
@@ -319,11 +324,29 @@ impl<'runtime> Runtime<'runtime> {
             (None, Some(signal)) => InstanceOutcome::Signalled(signal),
             _ => InstanceOutcome::Unknown,
         };
+        if retain.resume {
+            // The record already exists and keeps its original argv and
+            // creation time; what changes is where it ends and which root
+            // describes the overlay now that it has been written through.
+            let previous = self.store.instance(&retain.name)?;
+            let updated =
+                self.store
+                    .update_instance(&retain.name, retained.id(), finished_unix, outcome)?;
+            // Released only once nothing points at it any more.
+            if previous.retained_id() != retained.id() {
+                match self.store.remove_retained_cow(previous.retained_id()) {
+                    Ok(_) | Err(pocket_store::StoreError::RetainedCowNotFound) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            return Ok(updated);
+        }
         Ok(self.store.create_instance(
             &retain.name,
             output.generation_id,
             retained.id(),
             &retain.image_reference,
+            &retain.argv,
             &retain.command,
             created_unix,
             finished_unix,
@@ -439,10 +462,24 @@ impl<'runtime> Runtime<'runtime> {
         // make room is reported before a guest starts, and removed again if
         // the run never becomes an instance.
         if let Some(retain) = options.retain.as_ref() {
-            let directory = self.store.create_instance_directory(&retain.name)?;
+            let directory = if retain.resume {
+                self.store.instance_directory(&retain.name)?
+            } else {
+                self.store.create_instance_directory(&retain.name)?
+            };
             paths.cow = ManagedUmlPath::new(directory.join("root.cow"))?.into_path_buf();
         }
-        if paths.cow.exists() {
+        let resuming = options.retain.as_ref().is_some_and(|retain| retain.resume);
+        if resuming {
+            // UML only creates a COW that is absent, so a resume needs the
+            // overlay it is resuming to still be there.
+            if !paths.cow.exists() {
+                return Err(RuntimeError::invalid(
+                    "root.cow",
+                    "the overlay this run was told to resume no longer exists",
+                ));
+            }
+        } else if paths.cow.exists() {
             return Err(RuntimeError::invalid(
                 "root.cow",
                 "fresh COW leaf unexpectedly exists before UML launch",

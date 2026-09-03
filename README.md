@@ -20,6 +20,7 @@ pocket image pull ubuntu:24.04                    # docker pull
 pocket run ubuntu:24.04 -- /bin/sh -c 'nproc'     # docker run
 pocket run -t ubuntu:24.04 -- /bin/bash           # docker run -it
 pocket ps -a                                      # docker ps -a
+pocket start build                                # docker start
 pocket commit build ubuntu:with-tools             # docker commit
 pocket rm build                                   # docker rm
 ```
@@ -33,8 +34,9 @@ pocket run --name build --cpus 4 --memory 2G \
 ```
 
 A run is kept when it exits, so you can come back to what it produced — list it
-with `ps -a`, turn it into an image with `commit`, drop it with `rm`, or pass
-`--rm` to not keep it at all.
+with `ps -a`, run it again on the filesystem it left behind with `start`, turn
+it into an image with `commit`, drop it with `rm`, or pass `--rm` to not keep it
+at all.
 
 Where it differs, it says so by name rather than failing obscurely: there is no
 daemon, so `attach`, `exec` and `-d` are refused with the reason. A run is a

@@ -118,6 +118,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run a kept instance again, on the filesystem it left behind.
+    Start {
+        #[command(flatten)]
+        context: ProfileStoreArgs,
+        #[arg(long, value_name = "PATH")]
+        runtime_root: Option<PathBuf>,
+        /// Kept instance to resume, by name.
+        name: String,
+        /// Give the resumed run a terminal, as `run -t` does.
+        #[arg(short = 't', long)]
+        tty: bool,
+        /// Mirror the guest kernel console to stderr while it boots.
+        #[arg(long)]
+        boot_log: bool,
+        /// Extra guest serial lines, each with a login shell.
+        #[arg(long, default_value = "0")]
+        consoles: u8,
+        /// Bounded wall-clock execution timeout (`ms`, `s`, `m`, or `h`).
+        #[arg(long)]
+        timeout: Option<String>,
+    },
     /// Remove kept runs and the disk they hold.
     Rm {
         /// Store holding the kept runs. Defaults to `store` in the config file.
@@ -447,6 +468,10 @@ struct RunArgs {
     /// Discard the run when it exits instead of keeping it.
     #[arg(long)]
     rm: bool,
+    /// Internal: resume the named instance's existing overlay. Set by
+    /// `pocket start`, which is the supported spelling.
+    #[arg(long, hide = true)]
+    resume: bool,
     /// Run the workload on a terminal: allocate a PTY in the guest, put this
     /// terminal in raw mode, and stream both directions until it exits.
     /// Requires that this process's stdin and stdout are both terminals.
@@ -726,6 +751,15 @@ fn apply_config(command: &mut Command, config: &Config) {
             fill(profile_bundle, &config.profile_bundle);
             fill(runtime_root, &config.runtime_root);
         }
+        Command::Start {
+            context,
+            runtime_root,
+            ..
+        } => {
+            fill(&mut context.profile_bundle, &config.profile_bundle);
+            fill(&mut context.store, &config.store);
+            fill(runtime_root, &config.runtime_root);
+        }
         Command::Rm { store, .. } => fill(store, &config.store),
         Command::Generation { command } => match command {
             GenerationCommand::Inspect { store, .. } | GenerationCommand::List { store, .. } => {
@@ -793,6 +827,27 @@ fn execute(
             &reference,
             json,
             stdout,
+        ),
+        Command::Start {
+            context,
+            runtime_root,
+            name,
+            tty,
+            boot_log,
+            consoles,
+            timeout,
+        } => execute_start(
+            context,
+            runtime_root.as_deref(),
+            &name,
+            StartOptions {
+                tty,
+                boot_log,
+                consoles,
+                timeout,
+            },
+            stdout,
+            stderr,
         ),
         Command::Rm { store, names, json } => execute_rm(store.as_deref(), &names, json, stdout),
         Command::Attach => Err(unsupported(
@@ -1516,6 +1571,146 @@ fn execute_commit(
     Ok(CommandStatus::SUCCESS)
 }
 
+/// What a resume may set beyond the instance's own record.
+struct StartOptions {
+    tty: bool,
+    boot_log: bool,
+    consoles: u8,
+    timeout: Option<String>,
+}
+
+/// Run a kept instance again, on the filesystem it left behind.
+///
+/// The instance keeps its name, its identity and its command: a resume is the
+/// same run continued, not a new one that happens to share a disk. What it
+/// does not replay are the resource and identity flags of the original run,
+/// because those are not recorded -- the record exists to say what the
+/// instance is, not to be a second copy of the image configuration.
+fn execute_start(
+    context: ProfileStoreArgs,
+    runtime_root: Option<&Path>,
+    name: &str,
+    options: StartOptions,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let config = Config::load()?;
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
+    let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
+    let root = runtime_root
+        .map(Path::to_path_buf)
+        .or_else(|| config.runtime_root.clone())
+        .ok_or_else(|| {
+            invalid(
+                "runtime-root",
+                "pass --runtime-root or set runtime_root in the config file",
+            )
+        })?;
+    let runtime_root = managed_runtime_root(&root)?;
+
+    let instance = store.instance(name)?;
+    if instance.argv().is_empty() {
+        return Err(invalid(
+            "start",
+            "this instance recorded no command to replay",
+        ));
+    }
+    // Leasing the overlay before the generation keeps both alive for the run,
+    // and fails loudly if either has been collected since it was kept.
+    let retained = store.lease_retained_cow(instance.retained_id())?;
+    let lease = store.acquire_lease(instance.generation_id())?;
+    let _ = retained;
+
+    let requested_platform = requested_platform(&profile, context.platform.as_deref())?;
+    validate_requested_platform(&requested_platform, lease.generation())?;
+    let process = resolve_image_process(
+        &lease,
+        &ImageProcessOverrides {
+            argv: ImageArgv::Exact(instance.argv().to_vec()),
+            ..Default::default()
+        },
+    )?;
+
+    let terminal = hold_terminal(options.tty)?;
+    let runtime = Runtime::new(
+        &profile,
+        &store,
+        runtime_root,
+        RuntimePolicy {
+            execution_timeout: options.timeout.as_deref().map(parse_duration).transpose()?,
+            ..RuntimePolicy::default()
+        },
+    )?;
+    let run_options = RunOptions {
+        cpus: 1,
+        memory: ParsedMemory::from_bytes(profile.manifest().memory.default_memory_bytes)
+            .map_err(|error| invalid("memory", error.to_string()))?,
+        workload: WorkloadSpec {
+            argv: process.argv.clone(),
+            env: process.env,
+            cwd: process.working_dir,
+            uid: process.user.uid,
+            gid: process.user.gid,
+            supplementary_gids: process.user.supplementary_gids,
+            // A resume records neither of these, so it takes the same
+            // defaults a plain `run` would.
+            umask: parse_umask("022")?,
+            rlimits: Vec::new(),
+            hostname: "pocket".to_owned(),
+            root_read_only: false,
+            volumes: Vec::new(),
+            network: true,
+            privileged: false,
+            stop_signal: process.stop_signal,
+        },
+        stdin: Vec::new(),
+        retain: Some(RetainRequest {
+            name: instance.name().to_owned(),
+            image_reference: instance.image_reference().to_owned(),
+            argv: instance.argv().to_vec(),
+            command: instance.command().to_owned(),
+            resume: true,
+        }),
+        boot_log: options.boot_log,
+        extra_consoles: options.consoles,
+        terminal: terminal.as_ref().map(|session| session.request),
+        console_log: None,
+    };
+
+    let started_unix = unix_now();
+    let output = match terminal {
+        Some(mut session) => {
+            let running = runtime.start_leased(lease, run_options)?;
+            announce_consoles(running.extra_console_paths(), stderr)?;
+            let result = running.wait_interactive(|| session.handle.take_resize());
+            session.handle.restore();
+            result?
+        }
+        None => {
+            let running = runtime.start_leased(lease, run_options)?;
+            announce_consoles(running.extra_console_paths(), stderr)?;
+            running.wait()?
+        }
+    };
+
+    let retain = RetainRequest {
+        name: instance.name().to_owned(),
+        image_reference: instance.image_reference().to_owned(),
+        argv: instance.argv().to_vec(),
+        command: instance.command().to_owned(),
+        resume: true,
+    };
+    if let Err(error) = runtime.retain_instance(&output, &retain, started_unix, unix_now()) {
+        writeln!(stderr, "pocket: warning: instance not updated: {error}")
+            .map_err(|source| output_error("write retention diagnostic", source))?;
+    }
+    emit_run_output(output, 1, stdout, stderr)
+}
+
 /// Remove kept runs, reporting each by name.
 fn execute_rm(
     store: Option<&Path>,
@@ -1704,7 +1899,9 @@ fn execute_run(
         Some(RetainRequest {
             name,
             image_reference: arguments.image.clone(),
+            argv: process.argv.clone(),
             command: process.argv.join(" "),
+            resume: arguments.resume,
         })
     };
     // Taken as late as possible: everything that can be refused has been, so

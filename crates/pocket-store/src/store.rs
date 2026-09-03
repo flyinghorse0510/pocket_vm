@@ -38,7 +38,7 @@ const DERIVATION_MAGIC: &[u8; 8] = b"PKVMDER2";
 const ALIAS_MAGIC: &[u8; 8] = b"PKVMALS2";
 const LEASE_MAGIC: &[u8; 8] = b"PKVMLES2";
 const RETAINED_MAGIC: &[u8; 8] = b"PKVMRET2";
-const INSTANCE_MAGIC: &[u8; 8] = b"PKVMINS1";
+const INSTANCE_MAGIC: &[u8; 8] = b"PKVMINS2";
 const LOCK_MAGIC: &[u8; 8] = b"PKVMLCK2";
 
 const STORE_METADATA: &str = "store.meta";
@@ -401,6 +401,9 @@ pub const MAX_INSTANCE_NAME_BYTES: usize = 64;
 /// Bound on the recorded command line, which is evidence rather than input.
 pub const MAX_INSTANCE_COMMAND_BYTES: usize = 4096;
 
+/// Bound on a recorded argv, matching the protocol's own argument cap.
+pub const MAX_INSTANCE_ARGV: usize = 1024;
+
 /// How an instance ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceOutcome {
@@ -449,6 +452,10 @@ pub struct Instance {
     generation_id: GenerationId,
     retained_id: RetainedCowId,
     image_reference: String,
+    /// The exact argv to replay on a resume. `command` is the same thing
+    /// joined for display, and joining is lossy: an argument containing a
+    /// space cannot be recovered from it.
+    argv: Vec<String>,
     command: String,
     created_unix: u64,
     finished_unix: u64,
@@ -487,6 +494,11 @@ impl Instance {
     }
 
     #[must_use]
+    pub fn argv(&self) -> &[String] {
+        &self.argv
+    }
+
+    #[must_use]
     pub const fn created_unix(&self) -> u64 {
         self.created_unix
     }
@@ -518,6 +530,13 @@ impl Instance {
         bytes.extend_from_slice(self.generation_id.as_bytes());
         bytes.extend_from_slice(self.retained_id.as_bytes());
         put_text(&mut bytes, &self.image_reference);
+        put_u16(
+            &mut bytes,
+            u16::try_from(self.argv.len()).expect("validated argv length"),
+        );
+        for argument in &self.argv {
+            put_text(&mut bytes, argument);
+        }
         put_text(&mut bytes, &self.command);
         put_u64(&mut bytes, self.created_unix);
         put_u64(&mut bytes, self.finished_unix);
@@ -542,6 +561,11 @@ impl Instance {
                 StoreError::metadata(MetadataKind::Instance, path, "invalid retained-COW ID")
             })?;
             let image_reference = reader.text(MAX_INSTANCE_COMMAND_BYTES)?.to_owned();
+            let argv_len = reader.u16()?;
+            let mut argv = Vec::with_capacity(usize::from(argv_len));
+            for _ in 0..argv_len {
+                argv.push(reader.text(MAX_INSTANCE_COMMAND_BYTES)?.to_owned());
+            }
             let command = reader.text(MAX_INSTANCE_COMMAND_BYTES)?.to_owned();
             let created_unix = reader.u64()?;
             let finished_unix = reader.u64()?;
@@ -554,6 +578,7 @@ impl Instance {
                 generation_id: GenerationId::from_bytes(generation_bytes),
                 retained_id: RetainedCowId::from_bytes(retained_bytes),
                 image_reference,
+                argv,
                 command,
                 created_unix,
                 finished_unix,
@@ -1815,6 +1840,25 @@ impl Store {
         Ok(path)
     }
 
+    /// The directory an existing instance's overlay lives in.
+    ///
+    /// Unlike `create_instance_directory` this makes nothing: a resume works
+    /// on the overlay that is already there, and a name with no directory is a
+    /// caller resuming something that does not exist.
+    pub fn instance_directory(&self, name: &str) -> Result<PathBuf, StoreError> {
+        validate_instance_name(name)?;
+        self.validate_root_identity()?;
+        let id = Instance::derive_id(name);
+        let path = self
+            .root_path
+            .join("instances")
+            .join(instance_directory_name(id));
+        if !path.is_dir() {
+            return Err(StoreError::InstanceNotFound);
+        }
+        Ok(path)
+    }
+
     /// Remove an instance directory that never became an instance.
     ///
     /// Refuses once a record exists for the name. A caller cleaning up after
@@ -1860,12 +1904,20 @@ impl Store {
         generation_id: GenerationId,
         retained_id: RetainedCowId,
         image_reference: &str,
+        argv: &[String],
         command: &str,
         created_unix: u64,
         finished_unix: u64,
         outcome: InstanceOutcome,
     ) -> Result<Instance, StoreError> {
         validate_instance_name(name)?;
+        if argv.len() > MAX_INSTANCE_ARGV {
+            return Err(StoreError::metadata(
+                MetadataKind::Instance,
+                "<memory>",
+                format!("recorded argv exceeds {MAX_INSTANCE_ARGV} arguments"),
+            ));
+        }
         if image_reference.len() > MAX_INSTANCE_COMMAND_BYTES
             || command.len() > MAX_INSTANCE_COMMAND_BYTES
         {
@@ -1882,6 +1934,7 @@ impl Store {
             generation_id,
             retained_id,
             image_reference: image_reference.to_owned(),
+            argv: argv.to_vec(),
             command: command.to_owned(),
             created_unix,
             finished_unix,
@@ -1925,6 +1978,57 @@ impl Store {
             .map_err(|error| StoreError::io("sync instance publication", &final_path, error))?;
         drop(roots_lock);
         Ok(instance)
+    }
+
+    /// Replace an instance record in place, for a run that resumed it.
+    ///
+    /// A resume writes through the same overlay, so its digest changes and the
+    /// retained-COW record that named the old one no longer describes it. The
+    /// caller registers the new root first and passes it here; the old root is
+    /// released only once this record no longer points at it, so a crash
+    /// between the two leaves reclaimable space rather than an instance whose
+    /// backing image can be collected.
+    pub fn update_instance(
+        &self,
+        name: &str,
+        retained_id: RetainedCowId,
+        finished_unix: u64,
+        outcome: InstanceOutcome,
+    ) -> Result<Instance, StoreError> {
+        validate_instance_name(name)?;
+        self.validate_root_identity()?;
+        let id = Instance::derive_id(name);
+        let roots_lock = self.lock_roots_exclusive()?;
+        let previous = self.read_instance(id)?;
+        let updated = Instance {
+            retained_id,
+            finished_unix,
+            outcome,
+            ..previous
+        };
+        let final_name = instance_filename(id);
+        let final_path = self.instance_path(id);
+        let temp_name = format!(".tmp-instance-{}", unique_suffix());
+        let temp_path = self.root_path.join("instances").join(&temp_name);
+        write_new_synced(
+            &self.instances,
+            &temp_name,
+            &temp_path,
+            &updated.encode(),
+            IMMUTABLE_FILE_MODE,
+        )?;
+        rename_replace_at(
+            &self.instances,
+            &temp_name,
+            &self.instances,
+            &final_name,
+            &final_path,
+        )?;
+        self.instances
+            .sync_all()
+            .map_err(|error| StoreError::io("sync instance update", &final_path, error))?;
+        drop(roots_lock);
+        Ok(updated)
     }
 
     /// Read one instance by the name an operator typed.

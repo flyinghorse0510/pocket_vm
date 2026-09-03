@@ -624,6 +624,28 @@ still needs. Remove it when you are done:
 pocket rm build-one
 ```
 
+To pick up where a run left off, `start` it again — the filesystem is still
+there:
+
+```sh
+pocket run --name tally ubuntu:24.04 -- \
+  /bin/bash -c 'echo run >> /log.txt; wc -l < /log.txt'
+pocket start tally
+pocket start tally
+```
+
+```
+1
+2
+3
+```
+
+That is the same instance continuing, the way `docker start` resumes a stopped
+container: it keeps its name, its creation time and the command it was given,
+and its writes accumulate. Resource flags from the original run are not
+replayed, so `start` takes `-t`, `--consoles`, `--boot-log` and `--timeout` of
+its own.
+
 Turn what a run produced into a new image with `commit`, the way
 `docker commit` does:
 

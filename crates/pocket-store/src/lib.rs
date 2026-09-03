@@ -29,9 +29,9 @@ pub use identity::{
 };
 pub use store::{
     AliasRoot, BeginGeneration, GarbageCollectionReport, Generation, GenerationManifest,
-    GenerationTransaction, Instance, InstanceOutcome, Lease, MAX_INSTANCE_COMMAND_BYTES,
-    MAX_INSTANCE_NAME_BYTES, RecoveryReport, RetainedCow, RetainedCowLease, Store,
-    validate_instance_name,
+    GenerationTransaction, Instance, InstanceOutcome, Lease, MAX_INSTANCE_ARGV,
+    MAX_INSTANCE_COMMAND_BYTES, MAX_INSTANCE_NAME_BYTES, RecoveryReport, RetainedCow,
+    RetainedCowLease, Store, validate_instance_name,
 };
 
 /// On-disk store schema understood by this crate.
