@@ -486,7 +486,7 @@ full-screen programs work.
 
 ```sh
 pocket run -t alpine:3.22 -- /bin/sh
-pocket run -t --user builder alpine:3.22 -- /bin/sh   # as a pre-configured account
+pocket run -t --user daemon debian:13 -- /bin/bash   # as a pre-configured account
 ```
 
 Because the host terminal is raw, keys are not interpreted by the host: `^C`,

@@ -1,14 +1,44 @@
 # pocket_vm
 
-**Run Docker images in a real Linux kernel — without root, KVM, or a daemon.**
+**A rootless, unprivileged Linux VM with a container-shaped CLI.**
 
-pocket_vm boots a mainline Linux kernel per container using
-[User-Mode Linux](https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html),
-so a workload gets a kernel of its own rather than a namespaced view of yours.
-On the host it is an ordinary unprivileged process: no root, no setuid helper,
-no `CAP_*`, no KVM, no privileged mounts.
+Every workload gets its own mainline Linux kernel, running entirely in user
+space via
+[User-Mode Linux](https://docs.kernel.org/virt/uml/user_mode_linux_howto_v2.html)
+— not a namespaced view of yours. On the host it is an ordinary process owned
+by you: no root, no setuid helper, no `CAP_*`, no KVM, no `/dev` node, no
+daemon, nothing to install as an administrator.
 
-Your existing images work unchanged. Any public registry image will do.
+It takes ordinary OCI images and the commands you already know.
+
+## Familiar commands
+
+If you know Docker, you already know this:
+
+```sh
+pocket image pull ubuntu:24.04                    # docker pull
+pocket run ubuntu:24.04 -- /bin/sh -c 'nproc'     # docker run
+pocket run -t ubuntu:24.04 -- /bin/bash           # docker run -it
+pocket ps -a                                      # docker ps -a
+pocket commit build ubuntu:with-tools             # docker commit
+pocket rm build                                   # docker rm
+```
+
+The flags are the ones you would guess:
+
+```sh
+pocket run --name build --cpus 4 --memory 2G \
+  --volume "$PWD:/work" --user daemon --workdir /work \
+  -e BUILD=release ubuntu:24.04 -- /bin/bash -c 'echo $BUILD; nproc; ls'
+```
+
+A run is kept when it exits, so you can come back to what it produced — list it
+with `ps -a`, turn it into an image with `commit`, drop it with `rm`, or pass
+`--rm` to not keep it at all.
+
+Where it differs, it says so by name rather than failing obscurely: there is no
+daemon, so `attach`, `exec` and `-d` are refused with the reason. A run is a
+foreground process you own, and its exit status is yours.
 
 ## Quick start
 
@@ -18,74 +48,71 @@ Your existing images work unchanged. Any public registry image will do.
 make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 
-pocket image pull alpine:3.22
-
-pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
+pocket image pull ubuntu:24.04
+pocket run ubuntu:24.04 -- /bin/sh -c '. /etc/os-release; echo "$PRETTY_NAME"'
 ```
 
 ```
-3.22.5
+Ubuntu 24.04.4 LTS
 ```
 
-That is a Linux kernel booting, mounting the converted image, and running your
-command — started from an unprivileged process on your host.
+That is a Linux kernel booting, mounting the converted image and running your
+command — from an unprivileged process on your host.
 
-The guest has outbound network access by default, with no setup and no host
-privilege — no TUN device, no `CAP_NET_ADMIN`, nothing to configure:
+## What the kernel buys you
 
-```sh
-pocket run alpine:3.22 -- /bin/sh -c 'apk add --no-cache curl && curl -sI https://example.com | head -1'
-```
+Because the guest owns a kernel rather than borrowing yours, it can do things a
+container cannot, and none of it costs the host any privilege:
 
-Because the guest has its own kernel, it can run things a container cannot.
-Docker included:
+- **Outbound networking by default**, with no TUN device, no `CAP_NET_ADMIN`
+  and nothing to configure — the guest reaches a userspace TCP/IP stack over a
+  Unix socket.
+- **Real terminals.** `-t` gives an interactive session on a guest PTY, so job
+  control, `^C`, line editing and full-screen programs work, and resizing your
+  window resizes the guest's. `--consoles N` adds extra serial lines, each with
+  a login shell already on it and published as a host pseudo-terminal you can
+  `screen` into while the workload runs.
+- **Resizable disks.** `pocket image adjust --size 32G` republishes an image's
+  filesystem at another size.
+- **Its own mounts, cgroups and namespaces** — enough to run a full container
+  engine, unmodified. Not a shim and not a compatible subset: the stock
+  `docker:dind` image and the real `dockerd`, started by an unprivileged
+  process on your host.
 
-```sh
-pocket image pull docker:27-dind
-pocket run --privileged -e DOCKER_HOST=unix:///var/run/docker.sock \
-  docker:27-dind -- /bin/sh -c '
-    dockerd --host=unix:///var/run/docker.sock >/tmp/d.log 2>&1 &
-    until docker info >/dev/null 2>&1; do sleep 1; done
-    docker run --rm hello-world'
-```
+  ```sh
+  pocket run --privileged --cpus 4 --memory 2G \
+    -e DOCKER_HOST=unix:///var/run/docker.sock docker:27-dind -- /bin/sh -c '
+      dockerd --host=unix:///var/run/docker.sock >/tmp/d.log 2>&1 &
+      until docker info >/dev/null 2>&1; do sleep 1; done
+      docker run --rm hello-world'
+  ```
 
-That is a Docker daemon, with overlay2 and cgroup v2, inside a guest you
-started as an ordinary user. Giving it those privileges costs the host
-nothing, because the guest's kernel is its own. `make container-engine`
-reproduces it.
+  ```
+  Hello from Docker!
+  ```
 
-`-t` gives you an interactive shell, the same way `docker run -it` does:
+  `docker info` inside reports `engine=27.5.1 storage=overlay2 cgroup=v2
+  kernel=7.2.0-pocket.1` — its own kernel, not yours. It is the sharpest
+  measure of what owning a kernel means, because the daemon wants mount
+  namespaces, cgroup writes and its own overlay filesystem, which is exactly
+  the list a container cannot have. `--privileged` grants all of it inside the
+  guest and nothing at all on your machine. `make container-engine` reproduces
+  it.
 
-```sh
-pocket run -t alpine:3.22 -- /bin/sh
-```
-
-The guest allocates a real PTY and makes it the workload's controlling
-terminal, so `^C`, line editing and full-screen programs like `vi` work, and
-resizing your window resizes the guest's. Add `--user` to get a session as an
-account the image already defines; the image's own `login` works too.
-
-Share a folder with the host, and ask for more of the machine:
-
-```sh
-pocket run --volume "$PWD:/work" --cpus 4 --memory 2G alpine:3.22 -- \
-  /bin/sh -c 'nproc && ls /work'
-```
-
-Building once and installing elsewhere? `make package` writes a single
-relocatable tarball that carries its own installer, so the receiving machine
-needs no toolchain and no checkout.
+Installing elsewhere? `make package` writes a single relocatable tarball that
+carries its own installer, so the receiving machine needs no toolchain and no
+checkout.
 
 Full walkthrough, prerequisites and gotchas: **[Getting started](docs/getting-started.md)**.
 
 ## Why
 
-- **No privilege on the host.** No root, setuid, capabilities, KVM,
-  `/dev/fuse`, host user namespaces or writable host cgroups. Networking still
-  works: the guest reaches a userspace TCP/IP stack over a Unix socket, not a
-  TUN device.
-- **A real kernel per container.** Own scheduler, page cache and filesystem —
-  not a shared host kernel behind namespaces.
+- **Unprivileged where that is normally the hard part.** Mounts, device nodes,
+  cgroups and networking all work *inside* the guest without `/dev/fuse`, a
+  host user namespace or a delegated cgroup on your side. The network is a
+  userspace TCP/IP stack over a Unix socket, not a TUN device.
+- **A kernel, not a namespace.** Own scheduler, page cache and filesystem, so
+  guest root is genuinely root — of something that is not your machine.
 - **Your images, unmodified.** Verified against Debian, Alpine, Arch, Fedora,
   BusyBox, and `scratch` images with no shell and no `/etc`.
 - **Verifiable builds.** The kernel is fetched and signature-checked at build
