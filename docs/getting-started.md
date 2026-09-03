@@ -19,8 +19,54 @@ things to know before you start:
 
 ## Prerequisites
 
-No root is needed for anything here, including running containers. The build
-needs packages; installing them is the only step that uses `sudo`.
+### The host itself
+
+x86_64 Linux, and a kernel of **5.9 or newer**. That floor is not a
+preference: every run boots UML with `seccomp=on`, whose stub needs
+`close_range`, which arrived in 5.9 — and `seccomp=on` fails closed
+(`SECCOMP userspace requested but not functional!`) rather than falling back to
+anything slower.
+
+Nothing else about the distribution matters at run time. Everything shipped is
+statically linked -- the kernel, the guard and the CLI all have no interpreter
+and no `NEEDED` entries -- so there is no glibc version to satisfy and nothing
+to install alongside it.
+
+Two things that are configuration rather than versions:
+
+- The runtime root must sit somewhere that permits `PROT_EXEC` mappings. UML
+  exits if its temporary directory is on a `noexec` mount.
+- `tmpfs` is preferred but not required; UML only warns when the directory is
+  on ordinary disk.
+
+No root, no `sudo`, no kernel module, no `/dev/kvm`, `/dev/net/tun` or
+`/dev/fuse`, and no group membership.
+
+### Distributions
+
+Verified end to end on **Ubuntu 26.04.1** (kernel 7.0.0-30, gcc 15.2.0,
+binutils 2.46, make 4.4.1, Python 3.14.4, meson 1.10.1, Rust 1.93.1). The rest
+of this table is derived from published distribution kernels and the tool
+minimums below, not measured:
+
+| | kernel | runs | builds |
+|---|---|---|---|
+| Ubuntu 26.04 | 7.0 | yes, verified | yes, verified |
+| Ubuntu 24.04 | 6.8 | yes | yes |
+| Ubuntu 22.04 | 5.15 | yes | `meson` is likely too old |
+| Ubuntu 20.04 | 5.4 | no | no, Python is 3.8 |
+| Debian 13 / 12 | 6.12 / 6.1 | yes | yes |
+| Debian 11 | 5.10 | yes | tool versions are marginal |
+| RHEL / Rocky 9 | 5.14 | yes | yes |
+| RHEL / Rocky 8 | 4.18 | no | no |
+
+A distribution below the line can still *run* a profile built elsewhere,
+provided its kernel is 5.9 or newer: `make package` produces a relocatable
+tarball, and the artifacts inside it depend on nothing the host provides.
+
+### Build packages
+
+The build needs packages; installing them is the only step that uses `sudo`.
 
 ```sh
 sudo apt install -y \
@@ -49,6 +95,17 @@ rustc --version    # rustc 1.93.1
 
 You do **not** need Go installed. The Skopeo build downloads a pinned Go
 toolchain, checks its SHA-256, and uses it in an isolated cache.
+
+`bubblewrap` is used with `--unshare-net` to sandbox one Skopeo smoke test, so
+the build host must allow **unprivileged user namespaces**. A distribution that
+restricts them refuses that step; running it is otherwise unprivileged.
+
+The kernel build also imposes its own tool minimums, taken from
+`Documentation/process/changes.rst` in the pinned Linux 7.2 tree: GCC 8.1,
+binutils 2.30, GNU make 4.0, bison 2.0, flex 2.5.35 and Python 3.9. The
+`slirp4netns` chain additionally needs `meson` and `ninja`; it builds GLib from
+source, which wants a considerably newer `meson` than several
+long-term-support distributions package.
 
 The first build needs HTTPS access to `cdn.kernel.org`, `github.com`,
 `gitlab.freedesktop.org`, `download.gnome.org`, `curl.se`, `go.dev`,

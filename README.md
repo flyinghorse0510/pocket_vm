@@ -40,6 +40,22 @@ Where it differs, it says so by name rather than failing obscurely: there is no
 daemon, so `attach`, `exec` and `-d` are refused with the reason. A run is a
 foreground process you own, and its exit status is yours.
 
+## Requirements
+
+x86_64 Linux, kernel **5.9 or newer**, and no privilege of any kind — no root,
+no `sudo`, no kernel module, no `/dev/kvm`, `/dev/net/tun` or `/dev/fuse`.
+
+The kernel floor is UML's: every run uses its `seccomp` mode, whose stub needs
+`close_range`. Nothing else about the distribution matters at run time, because
+everything shipped is statically linked and depends on nothing the host
+provides.
+
+Building additionally wants Rust 1.93.1 exactly, the Linux 7.2 tree's own tool
+minimums (GCC 8.1, binutils 2.30, make 4.0, Python 3.9), and a host that allows
+unprivileged user namespaces. Verified end to end on Ubuntu 26.04;
+[Getting started](docs/getting-started.md) has the full list and a
+distribution table.
+
 ## Quick start
 
 ```sh

@@ -13,7 +13,7 @@ remain open, and packaging success cannot override any of them.
 
 | Dimension | Packaged boundary | Current status |
 |---|---|---|
-| Host kernel/userspace | x86_64 Linux able to execute the sealed UML and host binaries | Experimental; qualified-host range not frozen |
+| Host kernel/userspace | x86_64 Linux 5.9 or newer, able to execute the sealed UML and host binaries | Experimental; qualified-host range not frozen. The floor is UML's mandatory `seccomp` mode, whose stub requires `close_range` and fails closed without it; the shipped artifacts are static and impose no userspace version. Measured only on Ubuntu 26.04.1 / 7.0.0-30 |
 | Guest architecture | x86_64 UML (EM_X86_64 host executables) | Implemented profile only |
 | OCI platform | linux/amd64, subject to the profile's accepted variants | Experimental |
 | CPU count | SMP range is 1 through the sealed profile's effective maximum (currently 16) | Qualified on this host by `make lifecycle-soak`: 100 consecutive fresh full-lifecycle launches at each of 1, 2, 4, 12, and 16 vCPUs, plus five eight-way concurrent waves, with no failure and no leaked runtime directory; `make smp-scaling` measured between 3.48x and 3.86x for four separate guest processes at four vCPUs across runs, varying with host load |
