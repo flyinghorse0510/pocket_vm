@@ -55,7 +55,7 @@ pocket commit [--store STORE] [--profile-bundle BUNDLE] \
 
 pocket cache gc --store STORE --apply [--json]
 pocket cache roots --store STORE [--json]
-pocket cache forget --store STORE --alias ALIAS_ID
+pocket cache forget --store STORE (--alias ALIAS_ID | --retained RETAINED_ID)
 
 pocket run \
   --profile-bundle BUNDLE \
@@ -92,13 +92,21 @@ A store on NFS, 9p, or a FUSE filesystem works: those reject
 filesystem the store's own locks, rather than the kernel, are what make a
 publication non-replacing.
 
-`cache roots` lists the aliases that are currently keeping generations alive,
-and `cache forget` drops one by its own ID. An alias outlives the profile that
-created it and reconstructing its key needs that bundle, so without these two a
-resealed profile's aliases root their generations permanently and `cache gc` can
-never reclaim the space. Forgetting an alias removes only the alias record; the
-generation it named is collected by the next `cache gc --apply` if nothing else
-roots or leases it.
+`cache roots` lists everything currently keeping generations alive, and `cache
+forget` drops one root by its own ID. There are two kinds. An alias outlives the
+profile that created it and reconstructing its key needs that bundle, so without
+these two a resealed profile's aliases root their generations permanently and
+`cache gc` can never reclaim the space. A kept run is the other kind: its
+copy-on-write overlay stores only the difference from the base it ran against,
+so that base cannot be collected while the run is kept.
+
+Remove a kept run with `rm`, which drops its overlay and its root together;
+`cache forget --retained` refuses while a run still names it and says which one.
+That flag is for a root no run names any more, which a run interrupted between
+registering its overlay and recording its name can leave behind: it takes the
+overlay with it. Forgetting an alias removes only the alias record. Either way
+the generation is collected by the next `cache gc --apply` if nothing else roots
+or leases it.
 
 `image inspect` and `run` distinguish a full `pkvm-gen-v1-...` ID from an alias.
 Malformed values beginning with that prefix are rejected and never reinterpreted
@@ -612,7 +620,7 @@ This build does not implement:
 
 - authenticated registry pulls, credential-helper/Docker-config discovery,
   Docker daemon imports, archive selectors or multi-image archives, or image
-  removal. `cache roots` lists the aliases a store holds; `image list` does not
+  removal. `cache roots` lists the roots a store holds; `image list` does not
   exist;
 - installed-profile discovery, implicit profile selection, or `probe`;
 - inbound port forwards or host CPU affinity;

@@ -34,7 +34,8 @@ use pocket_runtime::{
 };
 use pocket_store::{
     AliasId, AliasKey, AliasRoot, DerivationKey, Digest, GarbageCollectionReport, Generation,
-    GenerationId, Instance, InstanceOutcome, Lease, Platform, Store, StoreError,
+    GenerationId, Instance, InstanceOutcome, Lease, Platform, RetainedCowId, RetainedRelease,
+    RetainedRoot, Store, StoreError,
 };
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -335,7 +336,7 @@ enum CacheCommand {
         #[arg(long)]
         json: bool,
     },
-    /// List the aliases that are currently rooting generations against collection.
+    /// List everything currently rooting a generation against collection.
     Roots {
         #[command(flatten)]
         store: StoreArgs,
@@ -343,13 +344,19 @@ enum CacheCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Drop one alias by ID so its generation becomes collectable.
+    /// Drop one root by ID so its generation becomes collectable.
+    #[command(group = clap::ArgGroup::new("root").required(true).args(["alias", "retained"]))]
     Forget {
         #[command(flatten)]
         store: StoreArgs,
-        /// Exact alias ID, as printed by `pocket cache roots`.
+        /// Exact alias ID, from an `alias=` row of `pocket cache roots`.
         #[arg(long, value_name = "ALIAS_ID")]
-        alias: String,
+        alias: Option<String>,
+        /// Exact retained-COW ID, from a `retained=` row of `pocket cache
+        /// roots`. For a root no kept run names any more; remove a named one
+        /// with `pocket rm` so its overlay goes with it.
+        #[arg(long, value_name = "RETAINED_ID")]
+        retained: Option<String>,
     },
 }
 
@@ -1313,20 +1320,58 @@ fn execute_cache(command: CacheCommand, stdout: &mut dyn Write) -> Result<Comman
         }
         CacheCommand::Roots { store, json } => {
             let store = open_store(required_path(&store.store, "store", "store")?)?;
-            write_alias_roots_output(stdout, &store.alias_roots()?, json)?;
+            write_roots_output(
+                stdout,
+                &store.alias_roots()?,
+                &store.retained_roots()?,
+                json,
+            )?;
             Ok(CommandStatus::SUCCESS)
         }
-        CacheCommand::Forget { store, alias } => {
-            let alias: AliasId = alias.parse().map_err(|_| {
+        CacheCommand::Forget {
+            store,
+            alias,
+            retained,
+        } => {
+            let store = open_store(required_path(&store.store, "store", "store")?)?;
+            if let Some(alias) = alias {
+                let alias: AliasId = alias.parse().map_err(|_| {
+                    invalid(
+                        "alias",
+                        "must be an alias ID from an `alias=` row of `pocket cache roots`",
+                    )
+                })?;
+                let removed = store.remove_alias_by_id(alias)?;
+                writeln!(stdout, "alias={alias} removed={removed}")
+                    .map_err(|source| output_error("write alias removal output", source))?;
+                return Ok(CommandStatus::SUCCESS);
+            }
+            let retained =
+                retained.ok_or_else(|| invalid("retained", "pass --alias or --retained"))?;
+            let retained: RetainedCowId = retained.parse().map_err(|_| {
                 invalid(
-                    "alias",
-                    "must be an alias ID as printed by `pocket cache roots`",
+                    "retained",
+                    "must be a retained-COW ID from a `retained=` row of `pocket cache roots`",
                 )
             })?;
-            let store = open_store(required_path(&store.store, "store", "store")?)?;
-            let removed = store.remove_alias_by_id(alias)?;
-            writeln!(stdout, "alias={alias} removed={removed}")
-                .map_err(|source| output_error("write alias removal output", source))?;
+            // A root a kept run still names is that run's overlay, and dropping
+            // it here would leave the run pointing at a base that can then be
+            // collected. `rm` drops the two together, so send the operator
+            // there rather than breaking the instance.
+            let removed = match store.release_orphaned_retained_cow(retained)? {
+                RetainedRelease::HeldBy(name) => {
+                    return Err(invalid(
+                        "retained",
+                        format!(
+                            "the kept run {name} still holds this root; remove it with `pocket rm {name}`"
+                        ),
+                    ));
+                }
+                RetainedRelease::Released(_) => true,
+                RetainedRelease::Absent => false,
+            };
+            writeln!(stdout, "retained={retained} removed={removed}")
+                .map_err(|source| output_error("write retained removal output", source))?;
             Ok(CommandStatus::SUCCESS)
         }
     }
@@ -1974,8 +2019,14 @@ fn execute_run(
     if let Some(retain) = retain.as_ref() {
         match runtime.retain_instance(&output, retain, started_unix, unix_now()) {
             Ok(instance) => {
-                writeln!(stderr, "pocket: kept as {}", instance.name())
-                    .map_err(|source| output_error("write retention notice", source))?;
+                // Only to a terminal. `run` streams the workload's own stderr,
+                // and a consumer reading that stream is entitled to receive
+                // exactly what the workload wrote; a name it can already get
+                // from `ps -a` is not worth corrupting the stream for.
+                if io::stderr().is_terminal() {
+                    writeln!(stderr, "pocket: kept as {}", instance.name())
+                        .map_err(|source| output_error("write retention notice", source))?;
+                }
             }
             Err(error) => {
                 let _ = runtime.discard_retained(&retain.name);
@@ -3290,34 +3341,66 @@ fn write_gc_output(
     Ok(())
 }
 
-fn write_alias_roots_output(
+/// Report every root, both kinds, in one listing.
+///
+/// The two are reported together because the question an operator brings here
+/// is "why will this generation not collect", and either kind can be the
+/// answer. Each entry names the command that releases it: `cache forget` for
+/// an alias, `rm` for a kept run.
+fn write_roots_output(
     output: &mut dyn Write,
-    roots: &[AliasRoot],
+    aliases: &[AliasRoot],
+    retained: &[RetainedRoot],
     json_output: bool,
 ) -> Result<(), CliError> {
     if json_output {
-        let value = json!({
-            "roots": roots
-                .iter()
-                .map(|root| json!({
+        // Both kinds share one array so that reading it answers "what is
+        // rooted" without knowing in advance which kinds exist; `kind` tags
+        // each entry, and the fields after it are those of that kind.
+        let mut roots: Vec<serde_json::Value> = aliases
+            .iter()
+            .map(|root| {
+                json!({
+                    "kind": "alias",
                     "alias_id": root.id.to_string(),
                     "profile_id": root.profile_id,
                     "reference": root.reference,
                     "platform": root.platform,
                     "selector_policy_id": root.selector_policy_id,
                     "generation_id": root.generation_id.to_string(),
-                }))
-                .collect::<Vec<_>>(),
-        });
-        return write_json(output, &value);
+                })
+            })
+            .collect();
+        roots.extend(retained.iter().map(|root| {
+            json!({
+                "kind": "retained",
+                "retained_id": root.id.to_string(),
+                "instance": root.instance_name,
+                "generation_id": root.generation_id.to_string(),
+                "cow_bytes": root.cow_size,
+            })
+        }));
+        return write_json(output, &json!({ "roots": roots }));
     }
-    for root in roots {
+    for root in aliases {
         writeln!(
             output,
             "alias={} profile={} platform={} generation={} reference={}",
             root.id, root.profile_id, root.platform, root.generation_id, root.reference,
         )
         .map_err(|source| output_error("write alias root output", source))?;
+    }
+    for root in retained {
+        // A retained COW whose instance record is gone still roots its
+        // generation. Printing a placeholder keeps the row rather than hiding
+        // the very root that would otherwise be unexplainable.
+        let instance = root.instance_name.as_deref().unwrap_or("-");
+        writeln!(
+            output,
+            "retained={} instance={} generation={} cow_bytes={}",
+            root.id, instance, root.generation_id, root.cow_size,
+        )
+        .map_err(|source| output_error("write retained root output", source))?;
     }
     Ok(())
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs::File,
     io::{self, Read},
@@ -276,6 +276,33 @@ pub struct AliasRoot {
     pub platform: String,
     pub selector_policy_id: String,
     pub generation_id: GenerationId,
+}
+
+/// A kept run's copy-on-write root.
+///
+/// A retained COW roots the generation its run started from, for as long as
+/// the COW survives: the COW stores only the difference from that base, so the
+/// base cannot be collected while it exists. The instance record carries the
+/// name an operator knows the run by, but the root is the COW itself, so one
+/// whose instance record is missing still holds its generation and is reported
+/// without a name rather than left out of the listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedRoot {
+    pub id: RetainedCowId,
+    pub generation_id: GenerationId,
+    pub instance_name: Option<String>,
+    pub cow_size: u64,
+}
+
+/// What releasing a retained-COW root by its own ID did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetainedRelease {
+    /// The root and the overlay it held are gone.
+    Released(RetainedCow),
+    /// No such root, so there is nothing to release.
+    Absent,
+    /// A kept run still names it, and removing that run is how it goes.
+    HeldBy(String),
 }
 
 /// A shared generation lease. Its lock remains held until this value is dropped.
@@ -1620,10 +1647,11 @@ impl Store {
 
     /// Every alias root in the store, in canonical ID order.
     ///
-    /// Aliases are the only thing that keeps a generation alive across a
-    /// collection, and an alias outlives the profile that created it. Without
-    /// a way to see them, a resealed profile's aliases root their generations
-    /// forever and `garbage_collect` can never reclaim the space.
+    /// An alias outlives the profile that created it, and reconstructing its
+    /// key needs that bundle. Without a way to see them, a resealed profile's
+    /// aliases root their generations forever and `garbage_collect` can never
+    /// reclaim the space. Aliases are not the only roots, though: see
+    /// [`Store::retained_roots`] for the other kind.
     pub fn alias_roots(&self) -> Result<Vec<AliasRoot>, StoreError> {
         self.validate_root_identity()?;
         let roots_lock = self.lock_roots_shared()?;
@@ -1655,6 +1683,53 @@ impl Store {
                 platform: record.key.requested_platform().canonical_text(),
                 selector_policy_id: record.key.selector_policy_id().to_owned(),
                 generation_id: record.generation_id,
+            });
+        }
+        drop(roots_lock);
+        roots.sort_by_key(|root| root.id);
+        Ok(roots)
+    }
+
+    /// Every retained-COW root in the store, in canonical ID order.
+    ///
+    /// Aliases are not the only thing holding a generation against collection:
+    /// a kept run roots the base it ran against too. Listing only one kind
+    /// leaves the other invisible, so a collection that refuses to reclaim a
+    /// generation cannot be explained from the command line -- which is the
+    /// one question this listing exists to answer.
+    pub fn retained_roots(&self) -> Result<Vec<RetainedRoot>, StoreError> {
+        self.validate_root_identity()?;
+        let roots_lock = self.lock_roots_shared()?;
+        let mut names: BTreeMap<RetainedCowId, String> = BTreeMap::new();
+        for instance in self.read_instances_locked()? {
+            names.insert(instance.retained_id(), instance.name().to_owned());
+        }
+        let mut roots = Vec::new();
+        for name in list_names(&self.retained, &self.root_path.join("retained"))? {
+            let path = self.root_path.join("retained").join(&name);
+            let Some(text) = name.to_str() else {
+                return Err(StoreError::metadata(
+                    MetadataKind::RetainedCow,
+                    path,
+                    "non-UTF-8 retained-COW entry",
+                ));
+            };
+            if text.starts_with(".tmp-retained-") {
+                continue;
+            }
+            let Some(id) = parse_retained_filename(text) else {
+                return Err(StoreError::metadata(
+                    MetadataKind::RetainedCow,
+                    path,
+                    "unknown retained-COW entry",
+                ));
+            };
+            let record = self.read_retained(id)?;
+            roots.push(RetainedRoot {
+                id: record.id(),
+                generation_id: record.generation_id(),
+                instance_name: names.get(&id).cloned(),
+                cow_size: record.cow_size(),
             });
         }
         drop(roots_lock);
@@ -2049,6 +2124,15 @@ impl Store {
     pub fn instances(&self) -> Result<Vec<Instance>, StoreError> {
         self.validate_root_identity()?;
         let roots_lock = self.lock_roots_shared()?;
+        let mut found = self.read_instances_locked()?;
+        drop(roots_lock);
+        found.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(found)
+    }
+
+    /// Read every instance record. The caller holds the roots lock, so this
+    /// and a retained-COW listing can be taken from one consistent snapshot.
+    fn read_instances_locked(&self) -> Result<Vec<Instance>, StoreError> {
         let mut found = Vec::new();
         for entry in list_names(&self.instances, &self.root_path.join("instances"))? {
             let Some(name) = entry.to_str() else {
@@ -2062,8 +2146,6 @@ impl Store {
             };
             found.push(self.read_instance(id)?);
         }
-        drop(roots_lock);
-        found.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(found)
     }
 
@@ -2177,6 +2259,57 @@ impl Store {
     }
 
     /// Remove a durable retained-COW root. This never deletes the COW itself.
+    /// Release a retained-COW root that no instance names, and the overlay it
+    /// holds.
+    ///
+    /// [`Store::remove_retained_cow`] drops the record alone, which is what
+    /// its two callers want: a resume replaces the record, and a named removal
+    /// deletes the instance directory itself. An orphaned root has no instance
+    /// to do that, so dropping only its record would strand the overlay --
+    /// which is the space releasing it is supposed to reclaim.
+    ///
+    /// The check for an owning instance happens under the same exclusive lock
+    /// as the removal. Split across two acquisitions it would be a race: a run
+    /// finishing between them would have its root pulled out from under it.
+    pub fn release_orphaned_retained_cow(
+        &self,
+        id: RetainedCowId,
+    ) -> Result<RetainedRelease, StoreError> {
+        self.validate_root_identity()?;
+        let roots_lock = self.lock_roots_exclusive()?;
+        for instance in self.read_instances_locked()? {
+            if instance.retained_id() == id {
+                let name = instance.name().to_owned();
+                drop(roots_lock);
+                return Ok(RetainedRelease::HeldBy(name));
+            }
+        }
+        let retained = match self.read_retained(id) {
+            Ok(retained) => retained,
+            Err(StoreError::RetainedCowNotFound) => {
+                drop(roots_lock);
+                return Ok(RetainedRelease::Absent);
+            }
+            Err(error) => return Err(error),
+        };
+        let name = retained_filename(id);
+        unlink_file_at(&self.retained, &name, &self.retained_path(id))?;
+        self.retained.sync_all().map_err(|error| {
+            StoreError::io("sync retained-COW removal", self.retained_path(id), error)
+        })?;
+        // Only ever a directory this store owns, directly under `instances`.
+        // The record's path is not a licence to delete anywhere it points.
+        let instances_root = self.root_path.join("instances");
+        if let Some(directory) = retained.cow_path().as_path().parent()
+            && directory.parent() == Some(instances_root.as_path())
+            && let Some(entry) = directory.file_name()
+        {
+            let _ = remove_tree_at(&self.instances, entry, directory, self.root_device);
+        }
+        drop(roots_lock);
+        Ok(RetainedRelease::Released(retained))
+    }
+
     pub fn remove_retained_cow(&self, id: RetainedCowId) -> Result<RetainedCow, StoreError> {
         self.validate_root_identity()?;
         let roots_lock = self.lock_roots_exclusive()?;
@@ -4710,6 +4843,173 @@ mod tests {
         assert_eq!(report.blocked_entries, vec![stage_path.clone()]);
         assert!(report.removed_staging.is_empty());
         assert!(stage_path.exists());
+    }
+
+    /// A kept run roots its base, so `cache roots` has to show it. Listing
+    /// only aliases leaves a refused collection with no visible cause: the
+    /// operator sees `rooted` in the GC report and an empty or unrelated root
+    /// listing, and nothing connects the two.
+    #[test]
+    fn retained_cows_are_listed_as_roots_and_name_their_instance() {
+        let (_temporary, store) = fixture();
+        let base_id = publish(&store, spec(70), b"kept base");
+
+        let lease = store.acquire_lease(base_id).expect("lease base");
+        // Where a real run puts it: inside the instance directory the store
+        // reserved for that name. Releasing an orphan has to reclaim this.
+        let directory = store
+            .create_instance_directory("kept-run")
+            .expect("reserve instance directory");
+        let cow_path = directory.join("root.cow");
+        std::fs::write(&cow_path, b"kept cow").expect("write COW");
+        std::fs::set_permissions(&cow_path, Permissions::from_mode(PRIVATE_FILE_MODE))
+            .expect("make COW private");
+        let retained = store
+            .register_retained_cow(
+                &lease,
+                ManagedUmlPath::new(&cow_path).expect("managed COW path"),
+                Digest::of_bytes(b"kept cow"),
+                RetainedCowState::Clean,
+            )
+            .expect("register retained COW");
+        drop(lease);
+        store
+            .create_instance(
+                "kept-run",
+                base_id,
+                retained.id(),
+                "example.test/image:tag",
+                &["/bin/true".to_owned()],
+                "/bin/true",
+                1,
+                2,
+                InstanceOutcome::Exited(0),
+            )
+            .expect("create instance");
+
+        // The generation is rooted, and the listing says by what.
+        let report = store.garbage_collect().expect("collect with a kept run");
+        assert_eq!(report.rooted, vec![base_id]);
+        assert!(report.collected.is_empty());
+        assert!(
+            store.alias_roots().expect("alias roots").is_empty(),
+            "no alias roots this generation, so only the retained root explains it"
+        );
+        let roots = store.retained_roots().expect("retained roots");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id, retained.id());
+        assert_eq!(roots[0].generation_id, base_id);
+        assert_eq!(roots[0].instance_name.as_deref(), Some("kept-run"));
+        assert_eq!(roots[0].cow_size, b"kept cow".len() as u64);
+
+        // A root whose instance record is gone still holds its generation, so
+        // it stays in the listing rather than disappearing from it.
+        let instance_id = store.instance("kept-run").expect("instance").id();
+        std::fs::remove_file(store.instance_path(instance_id))
+            .expect("drop the instance record while leaving its root");
+        let orphaned = store
+            .retained_roots()
+            .expect("retained roots after orphaning");
+        assert_eq!(orphaned.len(), 1);
+        assert_eq!(orphaned[0].id, retained.id());
+        assert_eq!(orphaned[0].instance_name, None);
+        assert_eq!(
+            store
+                .garbage_collect()
+                .expect("collect with an orphaned root")
+                .rooted,
+            vec![base_id],
+            "an unnamed root still roots"
+        );
+
+        // Releasing the root is what makes the base collectable -- and it
+        // takes the overlay with it, which is the space being reclaimed.
+        assert!(cow_path.exists());
+        match store
+            .release_orphaned_retained_cow(retained.id())
+            .expect("release orphaned root")
+        {
+            RetainedRelease::Released(released) => assert_eq!(released.id(), retained.id()),
+            other => panic!("expected the orphan to be released, got {other:?}"),
+        }
+        assert!(
+            !cow_path.exists(),
+            "releasing an orphaned root must not strand its overlay"
+        );
+        assert!(
+            !directory.exists(),
+            "the instance directory it owned goes with it"
+        );
+        assert!(store.retained_roots().expect("retained roots").is_empty());
+        // Releasing again is not an error, and says nothing was there.
+        assert_eq!(
+            store
+                .release_orphaned_retained_cow(retained.id())
+                .expect("release an absent root"),
+            RetainedRelease::Absent
+        );
+        assert_eq!(
+            store
+                .garbage_collect()
+                .expect("collect once released")
+                .collected,
+            vec![base_id]
+        );
+    }
+
+    /// Releasing a root by ID is for orphans. A root a kept run still names is
+    /// that run's overlay: dropping it would leave the run on a base that the
+    /// very next collection is free to delete.
+    #[test]
+    fn a_retained_root_a_kept_run_still_names_is_not_released_by_id() {
+        let (_temporary, store) = fixture();
+        let base_id = publish(&store, spec(71), b"held base");
+
+        let lease = store.acquire_lease(base_id).expect("lease base");
+        let directory = store
+            .create_instance_directory("held-run")
+            .expect("reserve instance directory");
+        let cow_path = directory.join("root.cow");
+        std::fs::write(&cow_path, b"held cow").expect("write COW");
+        std::fs::set_permissions(&cow_path, Permissions::from_mode(PRIVATE_FILE_MODE))
+            .expect("make COW private");
+        let retained = store
+            .register_retained_cow(
+                &lease,
+                ManagedUmlPath::new(&cow_path).expect("managed COW path"),
+                Digest::of_bytes(b"held cow"),
+                RetainedCowState::Clean,
+            )
+            .expect("register retained COW");
+        drop(lease);
+        store
+            .create_instance(
+                "held-run",
+                base_id,
+                retained.id(),
+                "example.test/image:tag",
+                &["/bin/true".to_owned()],
+                "/bin/true",
+                1,
+                2,
+                InstanceOutcome::Exited(0),
+            )
+            .expect("create instance");
+
+        assert_eq!(
+            store
+                .release_orphaned_retained_cow(retained.id())
+                .expect("refuse a held root"),
+            RetainedRelease::HeldBy("held-run".to_owned())
+        );
+        assert!(cow_path.exists(), "the refused root keeps its overlay");
+        assert_eq!(
+            store
+                .garbage_collect()
+                .expect("collect with a held root")
+                .rooted,
+            vec![base_id]
+        );
     }
 
     #[test]
