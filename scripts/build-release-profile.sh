@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
@@ -8,12 +10,17 @@ LOCK_FILE="$ROOT/config/sources.lock.toml"
 TEMPLATE="$ROOT/config/profile/x86_64-smp-p4k.template.json"
 MKE2FS_CONFIG="$ROOT/config/profile/mke2fs.conf"
 E2FSCK_CONFIG="$ROOT/config/profile/e2fsck.conf"
-KERNEL_DIR="$BUILD_ROOT/kernel/x86_64-smp-p4k"
+# Only the kernel differs between variants; every other input here is host
+# independent and byte-identical, so the release directory is shared while the
+# kernel and the sealed bundles are kept apart. Separate output parents matter
+# because `latest` is a single answer to "which bundle did this build seal",
+# and two variants sharing one would make it the wrong answer half the time.
+KERNEL_DIR="$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX"
 RELEASE_DIR="$BUILD_ROOT/release/x86_64-smp-p4k"
 E2FS_DIR="$BUILD_ROOT/tools/e2fsprogs-1.47.2"
 SKOPEO_DIR="$BUILD_ROOT/tools/skopeo-1.23.0"
 SLIRP4NETNS_DIR="$BUILD_ROOT/tools/slirp4netns-1.3.5"
-OUTPUT_PARENT="$BUILD_ROOT/profiles"
+OUTPUT_PARENT="$BUILD_ROOT/profiles$LINUX_OUTPUT_SUFFIX"
 SEALER_TARGET_DIR="$BUILD_ROOT/profile-sealer-target"
 UMOCI=${POCKET_UMOCI:-/usr/bin/umoci}
 export LC_ALL=C
@@ -85,8 +92,12 @@ RUST_RELEASE=$(rustc --version | awk '{print $2}')
 verify_digest "$TEMPLATE" "$(lock_value development_artifacts profile_template_sha256)"
 verify_digest "$MKE2FS_CONFIG" "$(lock_value development_artifacts mke2fs_config_sha256)"
 verify_digest "$E2FSCK_CONFIG" "$(lock_value development_artifacts e2fsck_config_sha256)"
-verify_digest "$KERNEL_DIR/linux" "$(lock_value development_artifacts linux_uml_sha256)"
-verify_digest "$KERNEL_DIR/.config" "$(lock_value development_artifacts linux_uml_config_sha256)"
+# The kernel's digests come from the variant's own lock section, so a variant
+# kernel can never be sealed against the default's expectations.
+KERNEL_SECTION=development_artifacts
+[[ -z $LINUX_VARIANT ]] || KERNEL_SECTION="linux.variant.$LINUX_VARIANT"
+verify_digest "$KERNEL_DIR/linux" "$(lock_value "$KERNEL_SECTION" linux_uml_sha256)"
+verify_digest "$KERNEL_DIR/.config" "$(lock_value "$KERNEL_SECTION" linux_uml_config_sha256)"
 verify_digest "$E2FS_DIR/mke2fs" "$(lock_value development_artifacts mke2fs_sha256)"
 verify_digest "$E2FS_DIR/e2fsck" "$(lock_value development_artifacts e2fsck_sha256)"
 verify_digest "$E2FS_DIR/resize2fs" "$(lock_value development_artifacts resize2fs_sha256)"

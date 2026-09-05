@@ -1,0 +1,57 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] modpost: name the ARM relocations old elf.h omits
+
+addend_arm_rel() decodes relocations that the ARM ELF ABI has always
+numbered the same way, but which host <elf.h> only learned to name in glibc
+2.18.  Building modpost on an older host therefore fails on eight identifiers
+rather than on anything the host is unable to do.
+
+Supply the ABI values when the host header predates them.  A host that
+already declares them keeps its own definitions.
+---
+ scripts/mod/modpost.h | 32 ++++++++++++++++++++++++++++++++
+ 1 file changed, 32 insertions(+)
+
+diff --git a/scripts/mod/modpost.h b/scripts/mod/modpost.h
+index 2aecb8f..59bd292 100644
+--- a/scripts/mod/modpost.h
++++ b/scripts/mod/modpost.h
+@@ -16,6 +16,38 @@
+ #include <list_types.h>
+ #include "elfconfig.h"
+ 
++/*
++ * addend_arm_rel() decodes relocations that the ARM ELF ABI has always
++ * numbered the same way, but which host <elf.h> only learned to name in
++ * glibc 2.18. Building modpost on an older host therefore fails on the names
++ * rather than on anything the host cannot do. Supply the ABI values when the
++ * host header predates them; a host that already declares them keeps its own.
++ */
++#ifndef R_ARM_CALL
++#define R_ARM_CALL		28
++#endif
++#ifndef R_ARM_JUMP24
++#define R_ARM_JUMP24		29
++#endif
++#ifndef R_ARM_THM_JUMP24
++#define R_ARM_THM_JUMP24	30
++#endif
++#ifndef R_ARM_MOVW_ABS_NC
++#define R_ARM_MOVW_ABS_NC	43
++#endif
++#ifndef R_ARM_MOVT_ABS
++#define R_ARM_MOVT_ABS		44
++#endif
++#ifndef R_ARM_THM_MOVW_ABS_NC
++#define R_ARM_THM_MOVW_ABS_NC	47
++#endif
++#ifndef R_ARM_THM_MOVT_ABS
++#define R_ARM_THM_MOVT_ABS	48
++#endif
++#ifndef R_ARM_THM_JUMP19
++#define R_ARM_THM_JUMP19	51
++#endif
++
+ /* On BSD-alike OSes elf.h defines these according to host's word size */
+ #undef ELF_ST_BIND
+ #undef ELF_ST_TYPE

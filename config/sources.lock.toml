@@ -13,12 +13,43 @@ signature_sha256 = "5b0efe843da506fb58849e9abc4baf85e0517269f0d24a404aff447082a0
 signed_tar_sha256 = "772bec644c5532319f1987a3bd99b6d7f13ab40222a4de4ff98bc39857ed8f2b"
 signer_email = "gregkh@kernel.org"
 signer_fingerprint = "647F28654894E3BD457199BE38DBBDC86092693E"
+# The signer's own Web Key Directory entry, which is where gpg's --locate-keys
+# would look. Fetched directly when the host's gpg predates WKD support (2.1.12);
+# whatever it returns is still only accepted if its fingerprint is the one above.
+signer_key_url = "https://kernel.org/.well-known/openpgpkey/hu/e3n9xnm94c5apezqnj1pmrfuaoyfm8cf?l=gregkh"
 upstream_tree_sha1 = "a25d6a94ad99aa059aa6dc728c45052fb2968352"
-upstream_manifest_sha256 = "904af608b9cfcfad86faab7a69acf8128d1ea838d2bb1201e4a31b92c7d68223"
-patch_series_sha256 = "e8210ef5de71ff10617d2b0792f4dac747d730283ec7466df5d434fc39d7b479"
+upstream_manifest_sha256 = "cb1092ce77b44712d6ea3db42567e50bbc80e779de1aa6ec3fceb0b9c53c9e2c"
+patch_series_sha256 = "292f5bb1dd5e4b9e54a2ee0a51af9da8baa18dbaf996abd1a2bbbd3ecaaa16e7"
 patched_tree_sha1 = "8afe7ef519c031ab21fbbd78ccf6b53fcef038ba"
-patched_manifest_sha256 = "b2f0ee2e18201e2f45f72058edf009c2fcb724721d62408dafe240e746f2ce40"
+patched_manifest_sha256 = "951088deef3bcfcb589d956cf228be3cf93aec8e278adf85a2887846737a7c4d"
 source_date_epoch = 1786940622
+
+# EXPERIMENTAL, opt-in kernel variant for hosts whose kernel and C library
+# predate what UML's seccomp backend assumes. Nothing below is used unless the
+# operator sets POCKET_KERNEL_VARIANT=el7 (or runs `make kernel-el7`); the
+# default build never reads this section and its output is unaffected.
+#
+# The overlay applies on top of the default patch series -- base_tree_sha1
+# here is exactly the default series' patched_tree_sha1 above, so the two locks
+# are a chain rather than two independent claims about the same tree.
+#
+# The artifact digests are toolchain-bound, as the default build's are. They
+# were produced on the reference host recorded below; a different compiler or
+# linker changes the bytes and fails the build closed rather than silently
+# shipping something else.
+[linux.variant.el7]
+description = "CentOS 7 / EL7-vintage hosts: kernels without close_range or execveat, and glibc 2.17"
+patch_series_sha256 = "63cf3db6743afdce3b002ab15b277e9bf98ac56d49a8cf35ffadc9ea7c5d1bce"
+base_tree_sha1 = "8afe7ef519c031ab21fbbd78ccf6b53fcef038ba"
+base_manifest_sha256 = "951088deef3bcfcb589d956cf228be3cf93aec8e278adf85a2887846737a7c4d"
+patched_tree_sha1 = "a2c81478dd3a13b7d67b603260e71e08981ebd2b"
+patched_manifest_sha256 = "4035a843465dbdb9b15e65e76bb86e33ef3eb1bd8cb5c45959cfc764f94d14d1"
+linux_uml_sha256 = "e22a9033e70f9b5deaf4c93c19570f5cc57016e2d1b8a5eccf047de769bfa71b"
+linux_uml_config_sha256 = "ffc32864ca3487e93db88bd7e87ebb4c8ea83d85e684d0b67742c196292b276b"
+validated_host = "CentOS Linux 7.9.2009, kernel 3.10.0-1160.119.1.el7.x86_64, glibc 2.17"
+reference_cc = "gcc 13.4.0"
+reference_ld = "GNU ld (GNU Binutils) 2.44"
+reference_make = "GNU Make 4.4.1"
 
 [e2fsprogs]
 release = "1.47.2"

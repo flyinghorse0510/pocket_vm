@@ -1,0 +1,23 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: define PTRACE_SYSEMU for headers that omit it
+
+This header already supplies PTRACE_SYSEMU_SINGLESTEP for glibc before
+2.27.  Those same versions also leave out PTRACE_SYSEMU itself, which
+userspace_tramp()'s ptrace path uses, so define it the same way.
+---
+ arch/x86/um/shared/sysdep/ptrace_user.h | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/arch/x86/um/shared/sysdep/ptrace_user.h b/arch/x86/um/shared/sysdep/ptrace_user.h
+index 98da231..fc0e5d0 100644
+--- a/arch/x86/um/shared/sysdep/ptrace_user.h
++++ b/arch/x86/um/shared/sysdep/ptrace_user.h
+@@ -18,3 +18,8 @@
+ #ifndef PTRACE_SYSEMU_SINGLESTEP
+ #define PTRACE_SYSEMU_SINGLESTEP 32
+ #endif
++
++/* Likewise PTRACE_SYSEMU itself, which those versions also leave out. */
++#ifndef PTRACE_SYSEMU
++#define PTRACE_SYSEMU 31
++#endif

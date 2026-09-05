@@ -5,6 +5,14 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=scripts/linux-source-lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
+# Every permission bit in this tree is bound into the locked manifest, and the
+# operator's umask reaches all three ways files get created here: tar
+# extraction, `git apply`, and mkdir. Left to the environment, a correct and
+# signature-verified tarball fails its identity check on any host that does not
+# happen to use 0022. Fix it for the pipeline rather than record the umask of
+# whoever produced the lock.
+umask 0022
+
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 SOURCE_PARENT="$BUILD_ROOT/src"
@@ -21,11 +29,11 @@ acquire_linux_pipeline_lock "$BUILD_ROOT"
 mkdir -p -- "$SOURCE_PARENT" "$TMP_PARENT"
 
 TARBALL=$("$ROOT/scripts/fetch-linux.sh")
-[[ $TARBALL == "$BUILD_ROOT/downloads/$LINUX_SOURCE_NAME.tar.xz" ]] || \
+[[ $TARBALL == "$BUILD_ROOT/downloads/$LINUX_ARCHIVE_NAME.tar.xz" ]] || \
     die "fetch-linux returned an unexpected tarball path"
 
 STAGING=$(mktemp -d "$TMP_PARENT/linux-source-prepare.XXXXXX")
-STAGED_TREE="$STAGING/$LINUX_SOURCE_NAME"
+STAGED_TREE="$STAGING/$LINUX_ARCHIVE_NAME"
 METADATA="$STAGING/identity"
 cleanup_staging() {
     cleanup_linux_staging "$STAGING" "$TMP_PARENT" linux-source-prepare.
@@ -36,9 +44,9 @@ archive_entries=0
 while IFS= read -r member; do
     ((archive_entries += 1))
     normalized=${member%/}
-    [[ $normalized == "$LINUX_SOURCE_NAME" || $normalized == "$LINUX_SOURCE_NAME/"* ]] || \
+    [[ $normalized == "$LINUX_ARCHIVE_NAME" || $normalized == "$LINUX_ARCHIVE_NAME/"* ]] || \
         die "Linux archive member escapes its one locked top-level directory: $member"
-    relative=${normalized#"$LINUX_SOURCE_NAME"}
+    relative=${normalized#"$LINUX_ARCHIVE_NAME"}
     relative=${relative#/}
     if [[ -n $relative ]]; then
         [[ $relative != /* && $relative != ../* && $relative != */../* && $relative != */.. ]] || \
@@ -51,6 +59,9 @@ while IFS= read -r member; do
 done < <(LC_ALL=C tar -tf "$TARBALL")
 [[ $archive_entries -gt 1000 ]] || die "Linux archive member list is implausibly small"
 
+# The umask fixed above is what makes this deterministic. Restoring the
+# archive's own modes instead would be wrong here: upstream ships 0664 and
+# 0775 members, and a verified source tree should not be group-writable.
 tar --extract --file "$TARBALL" --directory "$STAGING" \
     --no-same-owner --delay-directory-restore
 [[ -d $STAGED_TREE && ! -L $STAGED_TREE ]] || die "Linux archive did not extract its locked root"
@@ -89,6 +100,9 @@ identity_tmp="$STAGING/source.identity"
     printf 'patch_series_sha256=%s\n' "$LINUX_PATCH_SERIES_SHA256"
     printf 'patched_tree_sha1=%s\n' "$LINUX_PATCHED_TREE"
     printf 'patched_manifest_sha256=%s\n' "$LINUX_PATCHED_MANIFEST"
+    printf 'variant=%s\n' "${LINUX_VARIANT:-none}"
+    [[ -z ${LINUX_VARIANT:-} ]] || \
+        printf 'variant_series_sha256=%s\n' "$(sha256sum "$LINUX_OVERLAY_LOCK" | awk '{print $1}')"
 } > "$identity_tmp"
 chmod 0444 "$identity_tmp"
 mv --no-target-directory -- "$identity_tmp" "$SOURCE_PARENT/$LINUX_SOURCE_NAME.identity"

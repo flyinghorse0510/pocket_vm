@@ -6,21 +6,53 @@
 # These globals are the deliberate interface exported to sourcing scripts.
 # shellcheck disable=SC2034
 LINUX_RELEASE=7.2
+# The archive's own top-level directory, fixed by the upstream tarball.
 # shellcheck disable=SC2034
-LINUX_SOURCE_NAME=linux-7.2
+LINUX_ARCHIVE_NAME=linux-7.2
+
+# Optional, experimental kernel variants.
+#
+# A variant applies one additional locked patch overlay on top of the default
+# series and publishes to its own source and output paths, so selecting one
+# can neither disturb the default build nor be mistaken for it. Nothing here
+# happens unless the operator names a variant: POCKET_KERNEL_VARIANT is empty
+# by default, and an unknown value is refused rather than ignored.
+#
+# The set is a fixed allow-list, not whatever directories happen to exist, so
+# a stray directory under kernel/patches cannot become a buildable variant.
+LINUX_SUPPORTED_VARIANTS=(el7)
+LINUX_VARIANT=${POCKET_KERNEL_VARIANT:-}
+if [[ -n $LINUX_VARIANT ]]; then
+    linux_variant_known=0
+    for linux_variant_candidate in "${LINUX_SUPPORTED_VARIANTS[@]}"; do
+        [[ $linux_variant_candidate == "$LINUX_VARIANT" ]] && linux_variant_known=1
+    done
+    [[ $linux_variant_known -eq 1 ]] || \
+        die "POCKET_KERNEL_VARIANT is not a supported kernel variant: $LINUX_VARIANT"
+    unset linux_variant_known linux_variant_candidate
+    # shellcheck disable=SC2034
+    LINUX_SOURCE_NAME=$LINUX_ARCHIVE_NAME-$LINUX_VARIANT
+    # shellcheck disable=SC2034
+    LINUX_OUTPUT_SUFFIX=-$LINUX_VARIANT
+else
+    # shellcheck disable=SC2034
+    LINUX_SOURCE_NAME=$LINUX_ARCHIVE_NAME
+    # shellcheck disable=SC2034
+    LINUX_OUTPUT_SUFFIX=
+fi
 
 linux_lock_value() {
-    local lock_file=$1 key=$2
+    local lock_file=$1 key=$2 section=${3:-linux}
     local -a matches=()
     mapfile -t matches < <(
-        awk -v wanted="$key" '
-            /^\[linux\]$/ { inside = 1; next }
+        awk -v wanted="$key" -v heading="[$section]" '
+            $0 == heading { inside = 1; next }
             /^\[/ { if (inside) exit }
             inside && $0 ~ "^" wanted " = " { print; count++ }
             END { if (count != 1) exit 3 }
         ' "$lock_file"
-    ) || die "missing or duplicate linux.$key in $lock_file"
-    [[ ${#matches[@]} -eq 1 ]] || die "missing or duplicate linux.$key in $lock_file"
+    ) || die "missing or duplicate $section.$key in $lock_file"
+    [[ ${#matches[@]} -eq 1 ]] || die "missing or duplicate $section.$key in $lock_file"
 
     local value=${matches[0]#*= }
     if [[ $value =~ ^\"([^\"]*)\"$ ]]; then
@@ -28,7 +60,7 @@ linux_lock_value() {
     elif [[ $value =~ ^[0-9]+$ ]]; then
         printf '%s\n' "$value"
     else
-        die "linux.$key has an unsupported lock-file value"
+        die "$section.$key has an unsupported lock-file value"
     fi
 }
 
@@ -59,6 +91,7 @@ load_linux_source_locks() {
     LINUX_SIGNED_TAR_SHA256=$(linux_lock_value "$LINUX_SOURCE_LOCK" signed_tar_sha256)
     LINUX_SIGNER_EMAIL=$(linux_lock_value "$LINUX_SOURCE_LOCK" signer_email)
     LINUX_SIGNER_FINGERPRINT=$(linux_lock_value "$LINUX_SOURCE_LOCK" signer_fingerprint)
+    LINUX_SIGNER_KEY_URL=$(linux_lock_value "$LINUX_SOURCE_LOCK" signer_key_url)
     LINUX_UPSTREAM_TREE=$(linux_lock_value "$LINUX_SOURCE_LOCK" upstream_tree_sha1)
     LINUX_UPSTREAM_MANIFEST=$(linux_lock_value "$LINUX_SOURCE_LOCK" upstream_manifest_sha256)
     LINUX_PATCH_SERIES_SHA256=$(linux_lock_value "$LINUX_SOURCE_LOCK" patch_series_sha256)
@@ -73,6 +106,8 @@ load_linux_source_locks() {
     [[ $LINUX_SIGNATURE_URL == "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$LINUX_RELEASE.tar.sign" ]] || \
         die "Linux signature URL is outside the pinned kernel.org location"
     [[ $LINUX_SIGNER_EMAIL == gregkh@kernel.org ]] || die "unexpected Linux signer email lock"
+    [[ $LINUX_SIGNER_KEY_URL == "https://kernel.org/.well-known/openpgpkey/hu/"* ]] || \
+        die "Linux signer key URL is outside the signer's own Web Key Directory"
     [[ $LINUX_SOURCE_DATE_EPOCH == 1786940622 ]] || die "unexpected Linux source date epoch"
 
     require_hex "$LINUX_TAG_OBJECT" 40 "Linux tag object"
@@ -94,43 +129,67 @@ load_linux_source_locks() {
         die "Linux patch-series lock SHA-256 mismatch"
 
     load_linux_patch_series
+    load_linux_variant_overlay
 }
 
 load_linux_patch_series() {
     LINUX_PATCH_FILES=()
+    LINUX_PATCH_DIRS=()
     LINUX_PATCH_HASHES=()
     LINUX_PATCH_PATHS=()
     LINUX_PATCH_MODES=()
     LINUX_PATCH_PRE_BLOBS=()
     LINUX_PATCH_POST_BLOBS=()
+
+    linux_load_series_file "$LINUX_SERIES_LOCK" "$LINUX_PATCH_DIR" \
+        pocket-linux-patch-series-v1 upstream \
+        "$LINUX_UPSTREAM_TREE" "$LINUX_UPSTREAM_MANIFEST" \
+        "$LINUX_PATCHED_TREE" "$LINUX_PATCHED_MANIFEST"
+}
+
+# Read one series file: its schema line, the tree it starts from, its ordered
+# patches, and the tree it produces. Records append to the shared patch arrays
+# so a variant overlay can be loaded straight after the default series and the
+# two applied as one ordered run. Everything is checked here; nothing
+# downstream reads the file again.
+linux_load_series_file() {
+    local lock_file=$1 patch_dir=$2 schema=$3 start_kind=$4
+    local expect_start_tree=$5 expect_start_manifest=$6
+    local expect_end_tree=$7 expect_end_manifest=$8
     local line_number=0 kind first second third fourth fifth sixth extra
-    local series_upstream_tree='' series_upstream_manifest=''
-    local series_patched_tree='' series_patched_manifest=''
+    local series_start_tree='' series_start_manifest=''
+    local series_end_tree='' series_end_manifest=''
+    local -a series_files=() series_hashes=()
     local -A seen_files=() seen_paths=()
+
+    [[ -f $lock_file && ! -L $lock_file ]] || \
+        die "Linux patch-series lock is missing or not a regular file: $lock_file"
+    [[ -d $patch_dir && ! -L $patch_dir ]] || \
+        die "Linux patch directory is missing or not a directory: $patch_dir"
 
     while IFS=$'\t' read -r kind first second third fourth fifth sixth extra || [[ -n $kind ]]; do
         ((line_number += 1))
         if ((line_number == 1)); then
-            [[ $kind == pocket-linux-patch-series-v1 && -z ${first:-} ]] || \
-                die "unsupported Linux patch-series schema"
+            [[ $kind == "$schema" && -z ${first:-} ]] || \
+                die "unsupported Linux patch-series schema: $lock_file"
             continue
         fi
         case "$kind" in
-            upstream-tree)
-                [[ -z $second && -z $extra && -z $series_upstream_tree ]] || die "malformed upstream-tree record"
-                series_upstream_tree=$first
+            "$start_kind-tree")
+                [[ -z $second && -z $extra && -z $series_start_tree ]] || die "malformed $start_kind-tree record"
+                series_start_tree=$first
                 ;;
-            upstream-manifest)
-                [[ -z $second && -z $extra && -z $series_upstream_manifest ]] || die "malformed upstream-manifest record"
-                series_upstream_manifest=$first
+            "$start_kind-manifest")
+                [[ -z $second && -z $extra && -z $series_start_manifest ]] || die "malformed $start_kind-manifest record"
+                series_start_manifest=$first
                 ;;
             patched-tree)
-                [[ -z $second && -z $extra && -z $series_patched_tree ]] || die "malformed patched-tree record"
-                series_patched_tree=$first
+                [[ -z $second && -z $extra && -z $series_end_tree ]] || die "malformed patched-tree record"
+                series_end_tree=$first
                 ;;
             patched-manifest)
-                [[ -z $second && -z $extra && -z $series_patched_manifest ]] || die "malformed patched-manifest record"
-                series_patched_manifest=$first
+                [[ -z $second && -z $extra && -z $series_end_manifest ]] || die "malformed patched-manifest record"
+                series_end_manifest=$first
                 ;;
             patch)
                 [[ -z ${extra:-} && -n $sixth ]] || die "malformed patch record at line $line_number"
@@ -145,33 +204,91 @@ load_linux_patch_series() {
                 [[ -z ${seen_paths[$third]+present} ]] || die "multiple locked patches modify $third"
                 seen_files[$first]=1
                 seen_paths[$third]=1
+                series_files+=("$first")
+                series_hashes+=("$second")
                 LINUX_PATCH_FILES+=("$first")
+                LINUX_PATCH_DIRS+=("$patch_dir")
                 LINUX_PATCH_HASHES+=("$second")
                 LINUX_PATCH_PATHS+=("$third")
                 LINUX_PATCH_MODES+=("$fourth")
                 LINUX_PATCH_PRE_BLOBS+=("$fifth")
                 LINUX_PATCH_POST_BLOBS+=("$sixth")
                 ;;
-            '') die "blank line in Linux patch-series lock" ;;
+            '') die "blank line in Linux patch-series lock: $lock_file" ;;
             *) die "unknown Linux patch-series record at line $line_number: $kind" ;;
         esac
-    done < "$LINUX_SERIES_LOCK"
+    done < "$lock_file"
 
-    [[ ${#LINUX_PATCH_FILES[@]} -gt 0 ]] || die "Linux patch-series lock contains no patches"
-    [[ $series_upstream_tree == "$LINUX_UPSTREAM_TREE" ]] || die "patch lock upstream tree mismatch"
-    [[ $series_upstream_manifest == "$LINUX_UPSTREAM_MANIFEST" ]] || die "patch lock upstream manifest mismatch"
-    [[ $series_patched_tree == "$LINUX_PATCHED_TREE" ]] || die "patch lock patched tree mismatch"
-    [[ $series_patched_manifest == "$LINUX_PATCHED_MANIFEST" ]] || die "patch lock patched manifest mismatch"
+    [[ ${#series_files[@]} -gt 0 ]] || die "Linux patch-series lock contains no patches: $lock_file"
+    [[ $series_start_tree == "$expect_start_tree" ]] || die "patch lock $start_kind tree mismatch: $lock_file"
+    [[ $series_start_manifest == "$expect_start_manifest" ]] || die "patch lock $start_kind manifest mismatch: $lock_file"
+    [[ $series_end_tree == "$expect_end_tree" ]] || die "patch lock patched tree mismatch: $lock_file"
+    [[ $series_end_manifest == "$expect_end_manifest" ]] || die "patch lock patched manifest mismatch: $lock_file"
 
+    # The directory must hold exactly the locked patches and nothing else, so
+    # an unlocked file dropped beside them is a failure rather than a no-op.
     local -a disk_patches=()
-    mapfile -t disk_patches < <(find "$LINUX_PATCH_DIR" -maxdepth 1 -type f -name '*.patch' -printf '%f\n' | LC_ALL=C sort)
-    [[ ${#disk_patches[@]} -eq ${#LINUX_PATCH_FILES[@]} ]] || die "unlocked or missing Linux patch file"
+    mapfile -t disk_patches < <(find "$patch_dir" -maxdepth 1 -type f -name '*.patch' -printf '%f\n' | LC_ALL=C sort)
+    [[ ${#disk_patches[@]} -eq ${#series_files[@]} ]] || die "unlocked or missing Linux patch file in $patch_dir"
     local index patch_sha
-    for index in "${!LINUX_PATCH_FILES[@]}"; do
-        [[ ${disk_patches[$index]} == "${LINUX_PATCH_FILES[$index]}" ]] || die "Linux patch order/file set differs from series.lock"
-        patch_sha=$(sha256sum "$LINUX_PATCH_DIR/${LINUX_PATCH_FILES[$index]}" | awk '{print $1}')
-        [[ $patch_sha == "${LINUX_PATCH_HASHES[$index]}" ]] || die "Linux patch SHA-256 mismatch: ${LINUX_PATCH_FILES[$index]}"
+    for index in "${!series_files[@]}"; do
+        [[ ${disk_patches[$index]} == "${series_files[$index]}" ]] || die "Linux patch order/file set differs from $lock_file"
+        patch_sha=$(sha256sum "$patch_dir/${series_files[$index]}" | awk '{print $1}')
+        [[ $patch_sha == "${series_hashes[$index]}" ]] || \
+            die "Linux patch SHA-256 mismatch: ${series_files[$index]}"
     done
+}
+
+# Load the selected variant's overlay on top of the default series. The
+# overlay declares the tree it starts from, which must be exactly the tree the
+# default series produces, so the two locks are chained rather than merely
+# adjacent. With no variant selected this does nothing at all.
+load_linux_variant_overlay() {
+    [[ -n $LINUX_VARIANT ]] || return 0
+
+    LINUX_BASE_PATCH_COUNT=${#LINUX_PATCH_FILES[@]}
+    LINUX_BASE_PATCHED_TREE=$LINUX_PATCHED_TREE
+    LINUX_BASE_PATCHED_MANIFEST=$LINUX_PATCHED_MANIFEST
+    LINUX_OVERLAY_DIR="$LINUX_PATCH_DIR/$LINUX_VARIANT"
+    LINUX_OVERLAY_LOCK="$LINUX_OVERLAY_DIR/series.lock"
+    LINUX_VARIANT_SECTION="linux.variant.$LINUX_VARIANT"
+
+    local overlay_series_sha overlay_tree overlay_manifest observed
+    local overlay_base_tree overlay_base_manifest
+    overlay_series_sha=$(linux_lock_value "$LINUX_SOURCE_LOCK" patch_series_sha256 "$LINUX_VARIANT_SECTION")
+    overlay_base_tree=$(linux_lock_value "$LINUX_SOURCE_LOCK" base_tree_sha1 "$LINUX_VARIANT_SECTION")
+    overlay_base_manifest=$(linux_lock_value "$LINUX_SOURCE_LOCK" base_manifest_sha256 "$LINUX_VARIANT_SECTION")
+    overlay_tree=$(linux_lock_value "$LINUX_SOURCE_LOCK" patched_tree_sha1 "$LINUX_VARIANT_SECTION")
+    overlay_manifest=$(linux_lock_value "$LINUX_SOURCE_LOCK" patched_manifest_sha256 "$LINUX_VARIANT_SECTION")
+    require_hex "$overlay_series_sha" 64 "$LINUX_VARIANT overlay patch-series SHA-256"
+    require_hex "$overlay_base_tree" 40 "$LINUX_VARIANT overlay base tree"
+    require_hex "$overlay_base_manifest" 64 "$LINUX_VARIANT overlay base manifest"
+    require_hex "$overlay_tree" 40 "$LINUX_VARIANT overlay patched tree"
+    require_hex "$overlay_manifest" 64 "$LINUX_VARIANT overlay patched manifest"
+
+    # The variant declares the tree it builds on, in the same file as the
+    # default series' result. They have to be the same tree, or the overlay is
+    # describing a base this build does not produce.
+    [[ $overlay_base_tree == "$LINUX_BASE_PATCHED_TREE" ]] || \
+        die "$LINUX_VARIANT overlay names a base tree the default series does not produce"
+    [[ $overlay_base_manifest == "$LINUX_BASE_PATCHED_MANIFEST" ]] || \
+        die "$LINUX_VARIANT overlay names a base manifest the default series does not produce"
+
+    [[ -f $LINUX_OVERLAY_LOCK && ! -L $LINUX_OVERLAY_LOCK ]] || \
+        die "$LINUX_VARIANT overlay lock is missing or not a regular file: $LINUX_OVERLAY_LOCK"
+    observed=$(sha256sum "$LINUX_OVERLAY_LOCK" | awk '{print $1}')
+    [[ $observed == "$overlay_series_sha" ]] || \
+        die "$LINUX_VARIANT overlay patch-series lock SHA-256 mismatch"
+
+    linux_load_series_file "$LINUX_OVERLAY_LOCK" "$LINUX_OVERLAY_DIR" \
+        pocket-linux-patch-overlay-v1 base \
+        "$LINUX_BASE_PATCHED_TREE" "$LINUX_BASE_PATCHED_MANIFEST" \
+        "$overlay_tree" "$overlay_manifest"
+
+    # From here on the published tree is the variant's, so every downstream
+    # identity check compares against what this build will actually produce.
+    LINUX_PATCHED_TREE=$overlay_tree
+    LINUX_PATCHED_MANIFEST=$overlay_manifest
 }
 
 acquire_linux_pipeline_lock() {
@@ -211,6 +328,14 @@ initialize_source_index() {
         git init --quiet --template="$metadata/template" "$metadata/repository"
     isolated_git "$tree" "$metadata" config core.autocrlf false
     isolated_git "$tree" "$metadata" config core.filemode true
+    # Importing a kernel tree creates far more loose objects than the default
+    # threshold, so the commit below would kick off a detached repack. This
+    # repository is a throwaway used only to compute identities: there is
+    # nothing to reclaim, and a background process still writing into it races
+    # the staging directory's removal. Newer Git is more eager about this than
+    # older, so it shows up as a build that fails on one host and not another.
+    isolated_git "$tree" "$metadata" config gc.auto 0
+    isolated_git "$tree" "$metadata" config maintenance.auto false
     isolated_git "$tree" "$metadata" add --all --force
     local tree_id
     tree_id=$(isolated_git "$tree" "$metadata" write-tree)
@@ -286,7 +411,7 @@ apply_locked_patch_series() {
     local index patch_file path before_tree after_tree observed_tree
     local -a changed_paths=()
     for index in "${!LINUX_PATCH_FILES[@]}"; do
-        patch_file="$LINUX_PATCH_DIR/${LINUX_PATCH_FILES[$index]}"
+        patch_file="${LINUX_PATCH_DIRS[$index]}/${LINUX_PATCH_FILES[$index]}"
         path=${LINUX_PATCH_PATHS[$index]}
         verify_source_blob "$tree" "$metadata" "$path" \
             "${LINUX_PATCH_MODES[$index]}" "${LINUX_PATCH_PRE_BLOBS[$index]}" \
@@ -306,6 +431,14 @@ apply_locked_patch_series() {
             "${LINUX_PATCH_MODES[$index]}" "${LINUX_PATCH_POST_BLOBS[$index]}" \
             "post-patch ${LINUX_PATCH_FILES[$index]}"
         isolated_git "$tree" "$metadata" apply --check --reverse --index --whitespace=error-all "$patch_file"
+        # With a variant selected, the default series still has to land on the
+        # exact tree the overlay declares as its base, so the two locks are
+        # verified as a chain rather than only at the end.
+        if [[ -n ${LINUX_BASE_PATCH_COUNT:-} ]] && ((index + 1 == LINUX_BASE_PATCH_COUNT)); then
+            observed_tree=$(isolated_git "$tree" "$metadata" write-tree)
+            [[ $observed_tree == "$LINUX_BASE_PATCHED_TREE" ]] || \
+                die "default patch series did not reproduce the tree $LINUX_VARIANT builds on: observed $observed_tree"
+        fi
     done
     observed_tree=$(isolated_git "$tree" "$metadata" write-tree)
     [[ $observed_tree == "$LINUX_PATCHED_TREE" ]] || \
@@ -316,7 +449,7 @@ audit_patch_series_reverse_forward() {
     local tree=$1 metadata=$2
     local index patch_file path observed_tree
     for ((index = ${#LINUX_PATCH_FILES[@]} - 1; index >= 0; index--)); do
-        patch_file="$LINUX_PATCH_DIR/${LINUX_PATCH_FILES[$index]}"
+        patch_file="${LINUX_PATCH_DIRS[$index]}/${LINUX_PATCH_FILES[$index]}"
         path=${LINUX_PATCH_PATHS[$index]}
         verify_source_blob "$tree" "$metadata" "$path" \
             "${LINUX_PATCH_MODES[$index]}" "${LINUX_PATCH_POST_BLOBS[$index]}" \
@@ -332,7 +465,7 @@ audit_patch_series_reverse_forward() {
         die "reverse patch audit did not reproduce the upstream Git tree"
 
     for index in "${!LINUX_PATCH_FILES[@]}"; do
-        patch_file="$LINUX_PATCH_DIR/${LINUX_PATCH_FILES[$index]}"
+        patch_file="${LINUX_PATCH_DIRS[$index]}/${LINUX_PATCH_FILES[$index]}"
         path=${LINUX_PATCH_PATHS[$index]}
         isolated_git "$tree" "$metadata" apply --check --cached --whitespace=error-all "$patch_file"
         isolated_git "$tree" "$metadata" apply --cached --whitespace=error-all "$patch_file"

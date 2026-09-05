@@ -52,6 +52,11 @@ The kernel floor is UML's: every run uses its `seccomp` mode, whose stub needs
 everything shipped is statically linked and depends on nothing the host
 provides.
 
+That floor is UML's source, not seccomp's. An experimental, opt-in kernel
+variant lifts it for EL7-vintage hosts — kernel 3.10, glibc 2.17 — and boots a
+guest there under `seccomp=on`. It is off unless asked for by name and does not
+affect the default build: see [EL7 host support](docs/el7-host-support.md).
+
 Building additionally wants Rust 1.93.1 exactly, the Linux 7.2 tree's own tool
 minimums (GCC 8.1, binutils 2.30, make 4.0, Python 3.9), and a host that allows
 unprivileged user namespaces. Verified end to end on Ubuntu 26.04;

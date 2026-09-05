@@ -32,6 +32,21 @@ statically linked -- the kernel, the guard and the CLI all have no interpreter
 and no `NEEDED` entries -- so there is no glibc version to satisfy and nothing
 to install alongside it.
 
+The 5.9 floor comes from UML's source rather than from seccomp, which the
+kernel has supported since 3.5. An experimental, opt-in kernel variant removes
+UML's dependency on the newer syscalls and boots a guest under `seccomp=on` on
+a CentOS 7 host: see [EL7 host support](el7-host-support.md). It is off unless
+asked for by name and changes nothing about the default build.
+
+To find out whether a given host can run the backend at all -- including the
+parts a version number does not tell you -- build and run the standalone probe:
+
+```sh
+make host-seccomp-probe
+```
+
+It ends in `POCKET_HOST_SECCOMP_PROBE_OK`, or names what the host is missing.
+
 Two things that are configuration rather than versions:
 
 - The runtime root must sit somewhere that permits `PROT_EXEC` mappings. UML
@@ -59,10 +74,19 @@ minimums below, not measured:
 | Debian 11 | 5.10 | yes | tool versions are marginal |
 | RHEL / Rocky 9 | 5.14 | yes | yes |
 | RHEL / Rocky 8 | 4.18 | no | no |
+| CentOS 7 | 3.10 | only with the `el7` kernel variant | kernel only, verified |
 
 A distribution below the line can still *run* a profile built elsewhere,
 provided its kernel is 5.9 or newer: `make package` produces a relocatable
 tarball, and the artifacts inside it depend on nothing the host provides.
+
+The CentOS 7 row says "kernel only" about *building*: that host has no Rust
+toolchain, so its kernel is built there and the rest of a release comes from a
+current host. Running is another matter -- `pocket` itself, `image pull` and
+`run` included, has been exercised on it against a profile sealed with that
+kernel. One host-side knob is needed first: RHEL 7 ships
+`user.max_user_namespaces` at 0, and unprivileged guest networking wants a
+network namespace.
 
 ### Build packages
 
@@ -819,9 +843,11 @@ pocket cache forget --alias <ALIAS_ID>
 pocket cache gc     --apply
 ```
 
-A generation stays on disk while any alias points at it. `cache gc` only
-reclaims what nothing references, so drop the alias first with `cache forget`
-if you want the space back.
+Two things root a generation: an alias pointing at it, and a kept run whose
+overlay was taken from it. `cache roots` lists both, so a collection that
+declines to reclaim something can be explained. `cache gc` only reclaims what
+nothing references, so release the root first -- `cache forget` for an alias,
+`rm` for a kept run -- if you want the space back.
 
 To delete a whole store, note that `rm -rf` alone will not do it. Published
 generations are mode `0400` files inside `0500` directories — that is what

@@ -1,0 +1,467 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: launch the stub without execveat or close_range
+
+The trampoline depends on two syscalls newer than the oldest host the
+seccomp backend can otherwise run on: execveat (3.19) to start the stub, and
+close_range (5.9, with CLOSE_RANGE_CLOEXEC from 5.11) to make sure nothing
+else reaches guest userspace.  Give both an exact fallback.
+
+For the exec, the stub is still reachable by name through the descriptor that
+is open at that moment, so name it that way.  The path is formatted by hand:
+this runs in a CLONE_VM | CLONE_VFORK child sharing the address space of a
+suspended parent, where snprintf() would take a lock and use buffers that
+parent owns.  For the same reason the new failure paths leave through the
+exit syscall rather than exit().
+
+For the descriptors, enumerate /proc/self/fd with raw openat/getdents64 and
+close everything outside an exact keep-list.  Each record is validated before
+it is trusted -- length, alignment, containment, and a terminator inside the
+record -- names are parsed as plain non-negative decimals with no overflow,
+and any step that cannot be completed is fatal, because a descriptor whose
+fate is unknown may reach the guest, and one of them maps all of UML's
+physical memory.  The descriptor table was copied at clone(), so no other UML
+thread can add to it while this runs.
+
+Both paths now share one order, which fixes two things on every host.
+Descriptor 0 is claimed for the signalling socket after anything still needed
+is moved off it, so a UML started without open standard descriptors no longer
+loses a mapping descriptor; and the socket is not closed after a dup2() onto
+itself, which would have closed the descriptor just installed.  CLOEXEC is
+then cleared on both mapping descriptors rather than only the data one -- they
+are the same descriptor today, and nothing here needs them to be.
+
+The clone itself now goes through the raw helper, so starting a userspace
+process no longer corrupts the UML kernel thread's cached ids.
+
+An unexpected close_range() failure is now fatal instead of discarded.
+
+Report the error the raw clone returned.  On that path the value is the
+syscall's own negative errno; libc's errno is untouched, so printing it would
+name an unrelated number.
+---
+ arch/um/os-Linux/skas/process.c | 360 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 342 insertions(+), 18 deletions(-)
+
+diff --git a/arch/um/os-Linux/skas/process.c b/arch/um/os-Linux/skas/process.c
+index aced69d..96b2c3f 100644
+--- a/arch/um/os-Linux/skas/process.c
++++ b/arch/um/os-Linux/skas/process.c
+@@ -7,6 +7,8 @@
+ 
+ #include <stdlib.h>
+ #include <stdbool.h>
++#include <limits.h>
++#include <stddef.h>
+ #include <unistd.h>
+ #include <sched.h>
+ #include <errno.h>
+@@ -291,16 +293,196 @@ struct tramp_data {
+ #define CLOSE_RANGE_CLOEXEC	(1U << 2)
+ #endif
+ 
++/*
++ * close_range() is a 5.9 syscall and execveat() a 3.19 one. Both have exact
++ * replacements below for hosts that lack them, but the numbers are still
++ * needed to ask, on headers old enough not to name them.
++ */
++#ifndef __NR_close_range
++#define __NR_close_range	436
++#endif
++#ifndef __NR_execveat
++#define __NR_execveat		322
++#endif
++
++/*
++ * Everything from here to the exec runs inside the CLONE_VM | CLONE_VFORK
++ * child, sharing one address space with a parent that stays suspended until
++ * this child execs or exits. libc calls that allocate, take a lock, or write
++ * errno reach into state that parent owns, so this work is done with raw
++ * syscalls -- whose return value is the error -- and leaves through the exit
++ * syscall rather than exit().
++ */
++static __attribute__((noreturn)) void tramp_exit(int status)
++{
++	for (;;)
++		stub_syscall1(__NR_exit, status);
++}
++
++/* getdents64's record, which no userspace header declares. */
++struct tramp_dirent {
++	unsigned long long d_ino;
++	long long d_off;
++	unsigned short d_reclen;
++	unsigned char d_type;
++	char d_name[];
++};
++
++#define TRAMP_DIRENT_NAME_OFFSET offsetof(struct tramp_dirent, d_name)
++
++/*
++ * Turn one /proc/self/fd entry name into a descriptor number, given the exact
++ * number of bytes the record set aside for the name. Anything that is not a
++ * plain non-negative decimal -- "." and ".." included -- is not a descriptor,
++ * a name with no terminator inside its record is refused rather than read
++ * past, and a value too large for an int is refused rather than wrapped.
++ */
++static int tramp_entry_fd(const char *name, unsigned long limit)
++{
++	unsigned long value = 0;
++	unsigned long index;
++
++	if (limit == 0 || name[0] == '\0')
++		return -1;
++
++	for (index = 0; index < limit && name[index] != '\0'; index++) {
++		if (name[index] < '0' || name[index] > '9')
++			return -1;
++
++		value = (value * 10) + (unsigned long)(name[index] - '0');
++		if (value > INT_MAX)
++			return -1;
++	}
++
++	if (index == limit)
++		return -1;
++
++	return (int)value;
++}
++
++/*
++ * Close every descriptor except those named in `keep`: the replacement for
++ * close_range() on hosts without it. The surviving set is enumerated rather
++ * than assumed, and any step that cannot be completed is fatal to the caller,
++ * because a descriptor whose fate is unknown is one that may reach guest
++ * userspace -- and one of them maps all of UML's physical memory.
++ *
++ * The descriptor table was copied at clone() (CLONE_FILES is not used), so no
++ * other UML thread can add to it while this runs.
++ */
++static int tramp_close_except(const int *keep, unsigned int keep_count)
++{
++	/* Aligned for the eight-byte-aligned records getdents64 returns. */
++	unsigned long long buffer[64];
++	long dirfd, bytes, offset;
++
++	dirfd = stub_syscall4(__NR_openat, AT_FDCWD, (long)"/proc/self/fd",
++			      O_RDONLY | O_DIRECTORY | O_CLOEXEC, 0);
++	if (dirfd < 0)
++		return -1;
++
++	for (;;) {
++		bytes = stub_syscall3(__NR_getdents64, dirfd,
++				      (long)buffer, sizeof(buffer));
++		if (bytes == -EINTR)
++			continue;
++		if (bytes < 0)
++			goto fail;
++		if (bytes == 0)
++			break;
++
++		offset = 0;
++		while (offset < bytes) {
++			struct tramp_dirent *entry;
++			unsigned short reclen;
++			unsigned int index;
++			int fd, wanted;
++
++			if (bytes - offset < (long)TRAMP_DIRENT_NAME_OFFSET)
++				goto fail;
++
++			entry = (struct tramp_dirent *)
++				((char *)buffer + offset);
++			memcpy(&reclen, &entry->d_reclen, sizeof(reclen));
++
++			if (reclen <= TRAMP_DIRENT_NAME_OFFSET ||
++			    (reclen & 7) != 0 ||
++			    (long)reclen > bytes - offset)
++				goto fail;
++
++			fd = tramp_entry_fd(entry->d_name,
++					    reclen - TRAMP_DIRENT_NAME_OFFSET);
++			offset += reclen;
++
++			if (fd < 0 || fd == (int)dirfd)
++				continue;
++
++			wanted = 0;
++			for (index = 0; index < keep_count; index++) {
++				if (keep[index] == fd)
++					wanted = 1;
++			}
++			if (wanted)
++				continue;
++
++			if (stub_syscall1(__NR_close, fd) != 0)
++				goto fail;
++		}
++	}
++
++	return stub_syscall1(__NR_close, dirfd) == 0 ? 0 : -1;
++
++fail:
++	stub_syscall1(__NR_close, dirfd);
++	return -1;
++}
++
++/*
++ * Write "/proc/self/fd/<n>" into a caller-supplied buffer. Done by hand for
++ * the reason given above: snprintf() would take a lock and use buffers the
++ * suspended parent owns.
++ */
++static int tramp_format_fd_path(char *buffer, unsigned long size, int fd)
++{
++	static const char prefix[] = "/proc/self/fd/";
++	unsigned long length = sizeof(prefix) - 1;
++	unsigned int value = (unsigned int)fd;
++	char digits[16];
++	unsigned long count = 0;
++
++	if (fd < 0)
++		return -1;
++
++	do {
++		digits[count++] = (char)('0' + (value % 10));
++		value /= 10;
++	} while (value != 0 && count < sizeof(digits));
++
++	if (value != 0 || size < length + count + 1)
++		return -1;
++
++	memcpy(buffer, prefix, length);
++	while (count > 0)
++		buffer[length++] = digits[--count];
++	buffer[length] = '\0';
++
++	return 0;
++}
++
+ static int userspace_tramp(void *data)
+ {
+ 	struct tramp_data *tramp_data = data;
+ 	char *const argv[] = { "uml-userspace", NULL };
++	char *const envp[] = { NULL };
++	char exe_path[sizeof("/proc/self/fd/") + 16];
++	int exe_fd = stub_exe_fd;
++	int keep[4];
++	long res;
+ 	unsigned long long offset;
+ 	struct stub_init_data init_data = {
+ 		.seccomp = using_seccomp,
+ 		.stub_start = STUB_START,
+ 	};
+-	int ret;
+ 
+ 	/*
+ 	 * Arm this before exec so there is no window in which a stub can be
+@@ -337,31 +519,109 @@ static int userspace_tramp(void *data)
+ 	init_data.stub_data_offset = MMAP_OFFSET(offset);
+ 
+ 	/*
+-	 * Avoid leaking unneeded FDs to the stub by setting CLOEXEC on all FDs
+-	 * and then unsetting it on all memory related FDs.
+-	 * This is not strictly necessary from a safety perspective.
++	 * Descriptor 0 is about to become the signalling socket, so move
++	 * anything the stub still needs off it first. UML is not guaranteed to
++	 * have been started with the standard descriptors open, so one of
++	 * these can legitimately be descriptor 0 -- and when more than one is,
++	 * they are the same open file and take the same replacement.
+ 	 */
+-	syscall(__NR_close_range, 0, ~0U, CLOSE_RANGE_CLOEXEC);
+-
+-	fcntl(init_data.stub_data_fd, F_SETFD, 0);
++	if (exe_fd == 0 || init_data.stub_code_fd == 0 ||
++	    init_data.stub_data_fd == 0) {
++		res = stub_syscall3(__NR_fcntl, 0, F_DUPFD, 1);
++		if (res < 0)
++			tramp_exit(8);
++
++		if (exe_fd == 0)
++			exe_fd = (int)res;
++		if (init_data.stub_code_fd == 0)
++			init_data.stub_code_fd = (int)res;
++		if (init_data.stub_data_fd == 0)
++			init_data.stub_data_fd = (int)res;
++
++		stub_syscall1(__NR_close, 0);
++	}
+ 
+ 	/* dup2 signaling FD/socket to STDIN */
+-	if (dup2(tramp_data->sockpair[0], 0) < 0)
+-		exit(3);
+-	close(tramp_data->sockpair[0]);
++	if (stub_syscall2(__NR_dup2, tramp_data->sockpair[0], 0) < 0)
++		tramp_exit(3);
++	/*
++	 * dup2() onto itself is a no-op that returns success, so the socket is
++	 * only closed here when it was not already descriptor 0. Closing it
++	 * unconditionally would close the descriptor just installed.
++	 */
++	if (tramp_data->sockpair[0] != 0)
++		stub_syscall1(__NR_close, tramp_data->sockpair[0]);
+ 
+ 	/* Write init_data and close write side */
+-	ret = write(tramp_data->sockpair[1], &init_data, sizeof(init_data));
+-	close(tramp_data->sockpair[1]);
++	res = stub_syscall3(__NR_write, tramp_data->sockpair[1],
++			    (long)&init_data, sizeof(init_data));
++	stub_syscall1(__NR_close, tramp_data->sockpair[1]);
+ 
+-	if (ret != sizeof(init_data))
+-		exit(4);
++	if (res != sizeof(init_data))
++		tramp_exit(4);
++
++	/*
++	 * Nothing the stub did not ask for may reach guest userspace. One
++	 * call does that where it exists; where it does not, the descriptor
++	 * table is enumerated and everything outside this set is closed, which
++	 * is the same guarantee arrived at the long way. EINVAL covers a
++	 * kernel that has close_range() (5.9) but not CLOSE_RANGE_CLOEXEC
++	 * (5.11). Any other failure leaves the descriptor state only partly
++	 * understood, which is not a state to exec from.
++	 */
++	keep[0] = 0;
++	keep[1] = exe_fd;
++	keep[2] = init_data.stub_code_fd;
++	keep[3] = init_data.stub_data_fd;
++
++	res = stub_syscall3(__NR_close_range, 0, ~0U, CLOSE_RANGE_CLOEXEC);
++	if (res == -ENOSYS || res == -EINVAL) {
++		if (tramp_close_except(keep, 4))
++			tramp_exit(8);
++	} else if (res != 0) {
++		tramp_exit(8);
++	}
++
++	/*
++	 * These have to survive the exec: descriptor 0 carries the signalling
++	 * socket, and the mapping descriptors are what the stub maps its code
++	 * and data from. They are the same descriptor today, and are handled
++	 * as two because nothing here needs them to be one.
++	 */
++	if (stub_syscall3(__NR_fcntl, 0, F_SETFD, 0) != 0 ||
++	    stub_syscall3(__NR_fcntl, init_data.stub_code_fd, F_SETFD, 0) != 0 ||
++	    stub_syscall3(__NR_fcntl, init_data.stub_data_fd, F_SETFD, 0) != 0)
++		tramp_exit(8);
++
++	/*
++	 * The executable descriptor is the opposite case: it has to be open
++	 * for the exec below to name it, and gone the moment that exec
++	 * succeeds. Verify the flag took rather than assume it.
++	 */
++	if (stub_syscall3(__NR_fcntl, exe_fd, F_SETFD, FD_CLOEXEC) != 0)
++		tramp_exit(8);
++	if (stub_syscall3(__NR_fcntl, exe_fd, F_GETFD, 0) != FD_CLOEXEC)
++		tramp_exit(8);
+ 
+ 	/* Raw execveat for compatibility with older libc versions */
+-	syscall(__NR_execveat, stub_exe_fd, (unsigned long)"",
+-		(unsigned long)argv, NULL, AT_EMPTY_PATH);
++	res = stub_syscall5(__NR_execveat, exe_fd, (long)"",
++			    (long)argv, (long)envp, AT_EMPTY_PATH);
++	if (res != -ENOSYS)
++		tramp_exit(5);
++
++	/*
++	 * No execveat on this host. The executable is still reachable by name
++	 * through the descriptor that is open right now, so name it that way.
++	 * The stub is an ELF image, so this does not meet the close-on-exec
++	 * interpreter-script case, and an unlinked temporary file stays
++	 * executable through its own /proc/self/fd entry.
++	 */
++	if (tramp_format_fd_path(exe_path, sizeof(exe_path), exe_fd))
++		tramp_exit(5);
+ 
+-	exit(5);
++	stub_syscall3(__NR_execve, (long)exe_path, (long)argv, (long)envp);
++
++	tramp_exit(5);
+ }
+ 
+ extern char stub_exe_start[];
+@@ -375,6 +635,55 @@ extern char *tempdir;
+ #define MFD_EXEC 0x0010U
+ #endif
+ 
++/*
++ * memfd_create() and file sealing both arrived in Linux 3.17, and glibc only
++ * wrapped memfd_create() in 2.27. The kernel interface is what it always was;
++ * only the host's declarations of it are missing, so declare them. A kernel
++ * that really does not have the call fails it, and init_stub_exe_fd() already
++ * answers that by writing the stub to a temporary file instead.
++ */
++#ifndef MFD_CLOEXEC
++#define MFD_CLOEXEC		0x0001U
++#endif
++#ifndef MFD_ALLOW_SEALING
++#define MFD_ALLOW_SEALING	0x0002U
++#endif
++#ifndef F_ADD_SEALS
++#define F_ADD_SEALS		(1024 + 9)
++#endif
++#ifndef F_SEAL_SEAL
++#define F_SEAL_SEAL		0x0001
++#endif
++#ifndef F_SEAL_SHRINK
++#define F_SEAL_SHRINK		0x0002
++#endif
++#ifndef F_SEAL_GROW
++#define F_SEAL_GROW		0x0004
++#endif
++#ifndef F_SEAL_WRITE
++#define F_SEAL_WRITE		0x0008
++#endif
++
++/*
++ * `defined(__GLIBC__) &&` does not protect the test that follows it: #if
++ * expands the whole expression before evaluating &&, so an undefined
++ * function-like __GLIBC_PREREQ is a syntax error rather than a false branch.
++ * Give it a definition that answers "not that glibc" for any other libc.
++ */
++#ifndef __GLIBC_PREREQ
++#define __GLIBC_PREREQ(major, minor) 0
++#endif
++
++#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 27)
++#ifndef __NR_memfd_create
++#define __NR_memfd_create	319
++#endif
++static int memfd_create(const char *name, unsigned int flags)
++{
++	return (int)syscall(__NR_memfd_create, name, flags);
++}
++#endif
++
+ static int __init init_stub_exe_fd(void)
+ {
+ 	size_t written = 0;
+@@ -489,13 +798,28 @@ int start_userspace(struct mm_id *mm_id)
+ 	if (using_seccomp)
+ 		proc_data->futex = FUTEX_IN_CHILD;
+ 
++	/*
++	 * Not libc's clone(): for CLONE_VM without CLONE_THREAD it clobbers
++	 * this thread's own cached process and thread ids, which older libc
++	 * then reads back for pthread_cancel() and pthread_sigqueue(). See
++	 * stub_clone_vm().
++	 */
++#ifdef STUB_CLONE_VM_AVAILABLE
++	mm_id->pid = stub_clone_vm(userspace_tramp, (void *) sp,
++				   CLONE_VFORK | CLONE_VM | SIGCHLD,
++				   (void *)&tramp_data);
++	if (mm_id->pid < 0) {
++		err = mm_id->pid;
++		mm_id->pid = -1;
++#else
+ 	mm_id->pid = clone(userspace_tramp, (void *) sp,
+ 		    CLONE_VFORK | CLONE_VM | SIGCHLD,
+ 		    (void *)&tramp_data);
+ 	if (mm_id->pid < 0) {
+ 		err = -errno;
++#endif
+ 		printk(UM_KERN_ERR "%s : clone failed, errno = %d\n",
+-		       __func__, errno);
++		       __func__, -err);
+ 		goto out_close;
+ 	}
+ 

@@ -22,9 +22,19 @@ fi
 [[ -n "$PROFILE_INPUT" ]] || \
     die "usage: scripts/run-rust-release-e2e.sh ABSOLUTE_PROFILE_BUNDLE"
 
-for command in awk cargo cmp find grep jq mkdir mktemp readlink sed sha256sum stat tr; do
+for command in awk cmp find grep jq mkdir mktemp readlink sed sha256sum stat tr; do
     require_command "$command"
 done
+# cargo is only needed to produce the executable, not to exercise it. Demanding
+# it unconditionally would rule out the case this lane is most useful for:
+# running an already-built, statically linked pocket on a host that has no Rust
+# toolchain at all.
+(( BUILD_POCKET == 0 )) || require_command cargo
+# The archive fixtures below are built byte-reproducibly, which needs tar's
+# --sort (GNU tar 1.28). Checked here rather than discovered on the fixture
+# itself, which happens deep into the run and looks like a product failure.
+tar --help 2>&1 | grep -q -- --sort || \
+    die "GNU tar with --sort is required (1.28 or newer); found: $(tar --version | awk 'NR == 1')"
 
 PROFILE_BUNDLE=$(readlink -e -- "$PROFILE_INPUT")
 [[ -n "$PROFILE_BUNDLE" && -d "$PROFILE_BUNDLE" ]] || \
@@ -96,6 +106,11 @@ run_guest() {
     local user=0:0
     local execution_timeout=180s
 
+    # `options` is usually empty. Expanding an empty array as "${a[@]}" is an
+    # unbound-variable error under `set -u` before Bash 4.4, which is what a
+    # host of this vintage ships, so every expansion of one below is written
+    # in the form that predates that fix.
+
     while (( $# > 0 )) && [[ $1 != -- ]]; do
         if [[ $1 == --user ]]; then
             (( $# >= 2 )) || die "internal E2E error: missing --user value for $label"
@@ -118,6 +133,11 @@ run_guest() {
     local stdout="$LOG_ROOT/$version-$label.stdout"
     local stderr="$LOG_ROOT/$version-$label.stderr"
     local status
+
+    # --rm on every run in this lane. These cases assert what a run produced,
+    # not what it left behind; keeping each one roots its generation, which
+    # defeats the collection assertions at the end, and retains a copy-on-write
+    # file per case. Retention has a lane of its own.
     if "$POCKET_BIN" run \
         --profile-bundle "$PROFILE_BUNDLE" \
         --store "$STORE" \
@@ -125,7 +145,8 @@ run_guest() {
         --platform linux/amd64 \
         --user "$user" \
         --timeout "$execution_timeout" \
-        "${options[@]}" \
+        --rm \
+        ${options[@]+"${options[@]}"} \
         "$generation" -- "${command[@]}" \
         >"$stdout" 2>"$stderr"
     then
@@ -164,6 +185,7 @@ run_stdin_case() {
         --platform linux/amd64 \
         --user 0:0 \
         --timeout 180s \
+        --rm \
         -i \
         "$generation" -- \
         /bin/sh -c "$guest_program" \
@@ -227,6 +249,7 @@ run_image_defaults() {
         --runtime-root "$RUNTIME_ROOT" \
         --platform linux/amd64 \
         --timeout 180s \
+        --rm \
         "$generation" \
         >"$stdout" 2>"$stderr"
     then
@@ -258,6 +281,7 @@ run_stdin_guest() {
         --platform linux/amd64 \
         --user 0:0 \
         --timeout 180s \
+        --rm \
         -i \
         "$generation" -- \
         /bin/sh -c 'IFS= read -r line; printf "stdin=%s\n" "$line"' \
@@ -335,6 +359,7 @@ assert_concurrent_cow_isolation() {
         --platform linux/amd64
         --user 0:0
         --timeout 180s
+        --rm
         "$generation"
         --
         /bin/sh -c
@@ -560,7 +585,7 @@ assert_host_volumes_are_shared_persistent_and_exclusive() {
     rm -f -- "$shared/holding"
     "$POCKET_BIN" run \
         --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
-        --timeout 120s --volume "$shared:/data" \
+        --timeout 120s --rm --volume "$shared:/data" \
         "$generation" -- /bin/sh -c 'touch /data/holding; sleep 20' \
         >"$out-holder.stdout" 2>"$out-holder.stderr" &
     local holder=$!
@@ -578,7 +603,7 @@ assert_host_volumes_are_shared_persistent_and_exclusive() {
     local status=0
     "$POCKET_BIN" run \
         --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" --runtime-root "$RUNTIME_ROOT" \
-        --timeout 120s --volume "$shared:/data" \
+        --timeout 120s --rm --volume "$shared:/data" \
         "$generation" -- /bin/true >"$out-second.stdout" 2>"$out-second.stderr" || status=$?
     kill "$holder" 2>/dev/null || true
     wait "$holder" 2>/dev/null || true
@@ -675,10 +700,92 @@ assert_container_engine_prerequisites() {
     assert_exact_output "$LOG_ROOT/$version-foreign-mounts.stdout" $'mounted-and-left\n'
 }
 
-# An alias is the only thing that roots a generation, it outlives the profile
-# that created it, and reconstructing its key needs that bundle. Without a way
-# to see and drop one by its own ID, a resealed profile's aliases root their
-# generations permanently and collection can never reclaim the space.
+# A kept run roots the generation it ran against, and that root has to be
+# visible: an operator who sees a collection refuse a generation has no other
+# way to find out what is holding it.
+assert_kept_runs_are_visible_roots() {
+    local version=$1
+    local generation=$2
+    local name output retained retained_id before
+
+    # The retention notice goes only to a terminal, so it deliberately stays
+    # out of the workload's stderr and a script reads the name back from the
+    # instance listing instead. Take the listing before and after rather than
+    # assuming this run is the only entry: what else the lane keeps is not this
+    # assertion's business, and encoding a guess about it is how the comment
+    # above the collection assertions came to be wrong.
+    before="$LOG_ROOT/$version-kept-ps-before.json"
+    "$POCKET_BIN" ps --all --store "$STORE" --runtime-root "$RUNTIME_ROOT" --json \
+        >"$before" || die "listing kept runs failed"
+    "$POCKET_BIN" run \
+        --profile-bundle "$PROFILE_BUNDLE" \
+        --store "$STORE" \
+        --runtime-root "$RUNTIME_ROOT" \
+        --platform linux/amd64 \
+        --user 0:0 \
+        --timeout 180s \
+        "$generation" -- /bin/true \
+        >/dev/null 2>"$LOG_ROOT/$version-kept.stderr" || die "the kept run failed"
+    assert_exact_output "$LOG_ROOT/$version-kept.stderr" ''
+    "$POCKET_BIN" ps --all --store "$STORE" --runtime-root "$RUNTIME_ROOT" --json \
+        >"$LOG_ROOT/$version-kept-ps.json" || die "listing kept runs failed"
+    name=$(jq -er -s '
+        (.[0].exited // [] | map(.name)) as $before
+        | ((.[1].exited // [] | map(.name)) - $before)
+        | if length == 1 then .[0] else empty end' \
+        "$before" "$LOG_ROOT/$version-kept-ps.json") || \
+        die "the kept run did not add exactly one instance to the listing"
+    [[ -n $name ]] || die "the kept run has no name"
+
+    output="$LOG_ROOT/$version-kept-roots.json"
+    "$POCKET_BIN" cache roots --store "$STORE" --json >"$output" || \
+        die "cache roots failed"
+    retained=$(jq -er --arg name "$name" \
+        '[.roots[] | select(.kind == "retained" and .instance == $name)] |
+         length == 1 and .[0].generation_id != null' "$output") || \
+        die "cache roots does not list the kept run $name"
+    [[ $retained == true ]] || die "cache roots misreports the kept run $name"
+    jq -e --arg generation "$generation" --arg name "$name" \
+        '[.roots[] | select(.kind == "retained" and .instance == $name)][0].generation_id
+         == $generation' "$output" >/dev/null || \
+        die "cache roots names the wrong generation for $name"
+
+    # What the listing claims is what collection does: refuse, and say so.
+    "$POCKET_BIN" cache gc --store "$STORE" --apply --json \
+        >"$LOG_ROOT/$version-kept-gc.json" || die "collection with a kept run failed"
+    jq -e --arg generation "$generation" \
+        '(.rooted | index($generation)) and (.collected | index($generation) | not)' \
+        "$LOG_ROOT/$version-kept-gc.json" >/dev/null || \
+        die "a generation rooted by a kept run was not protected"
+
+    # The root belongs to a run that still names it, so releasing it by ID
+    # would strand that run on a collectable base. Refused, and it says how.
+    retained_id=$(jq -er --arg name "$name" \
+        '[.roots[] | select(.kind == "retained" and .instance == $name)][0].retained_id' \
+        "$output") || die "cache roots does not report a retained ID for $name"
+    if "$POCKET_BIN" cache forget --store "$STORE" --retained "$retained_id" \
+        >"$LOG_ROOT/$version-forget-held.txt" 2>&1
+    then
+        die "cache forget released a root a kept run still holds"
+    fi
+    grep -Fq "pocket rm $name" "$LOG_ROOT/$version-forget-held.txt" || \
+        die "refusing to release a held root does not say how to release it"
+
+    # Dropping the run drops the root, and the listing agrees.
+    "$POCKET_BIN" rm --store "$STORE" "$name" >/dev/null || die "removing the kept run failed"
+    "$POCKET_BIN" cache roots --store "$STORE" --json \
+        >"$LOG_ROOT/$version-kept-roots-after.json" || die "cache roots failed after rm"
+    jq -e --arg name "$name" \
+        '[.roots[] | select(.kind == "retained" and .instance == $name)] | length == 0' \
+        "$LOG_ROOT/$version-kept-roots-after.json" >/dev/null || \
+        die "cache roots still lists the removed run $name"
+}
+
+# An alias outlives the profile that created it, and reconstructing its key
+# needs that bundle. Without a way to see and drop one by its own ID, a
+# resealed profile's aliases root their generations permanently and collection
+# can never reclaim the space. A kept instance roots a generation too, so this
+# assertion holds only because every run in this lane passes --rm.
 assert_alias_roots_can_be_released() {
     local doomed_generation=$1
     local doomed_reference=$2
@@ -734,7 +841,7 @@ assert_signal_killed_runs_are_reclaimed() {
     mkdir -m 0700 -- "$victim_root"
     "$POCKET_BIN" run \
         --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" \
-        --runtime-root "$victim_root" --timeout 120s \
+        --runtime-root "$victim_root" --timeout 120s --rm \
         "$generation" -- /bin/sh -c 'printf "ready\n"; sleep 60' \
         >"$LOG_ROOT/reclaim-victim.stdout" 2>"$LOG_ROOT/reclaim-victim.stderr" &
     local victim=$!
@@ -766,7 +873,7 @@ assert_signal_killed_runs_are_reclaimed() {
 
     "$POCKET_BIN" run \
         --profile-bundle "$PROFILE_BUNDLE" --store "$STORE" \
-        --runtime-root "$victim_root" --timeout 120s \
+        --runtime-root "$victim_root" --timeout 120s --rm \
         "$generation" -- /bin/true \
         >"$LOG_ROOT/reclaim-sweeper.stdout" 2>"$LOG_ROOT/reclaim-sweeper.stderr" || {
             sed -n '1,120p' "$LOG_ROOT/reclaim-sweeper.stderr" >&2
@@ -984,6 +1091,7 @@ assert_host_volumes_are_shared_persistent_and_exclusive 24.04 "${GENERATIONS[24.
 assert_default_network_reaches_the_internet 24.04 "${GENERATIONS[24.04]}"
 assert_container_engine_prerequisites 24.04 "${GENERATIONS[24.04]}"
 assert_signal_killed_runs_are_reclaimed "${GENERATIONS[24.04]}"
+assert_kept_runs_are_visible_roots 24.04 "${GENERATIONS[24.04]}"
 # The Docker-save archive built its own generation under its own alias, so it is
 # the one input this suite can release without losing anything it still checks.
 assert_alias_roots_can_be_released \

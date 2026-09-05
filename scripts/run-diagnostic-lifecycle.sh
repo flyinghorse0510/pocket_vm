@@ -10,6 +10,8 @@
 
 # shellcheck source=scripts/lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 export LC_ALL=C
 
@@ -168,19 +170,43 @@ for shared in downloads tools cache oci; do
         cp -a "$BUILD_ROOT/$shared" "$TREE_BUILD/$shared"
 done
 
+# Rewrite one locked digest inside one named section.
+#
+# The section has to be named. These keys are not unique in the file: a kernel
+# variant locks its own linux_uml_sha256, and rewriting whichever copy comes
+# first would silently relock the variant and leave this lane's own digest
+# untouched.
 relock() {
-    local key=$1 value=$2
-    python3 - "$TREE/config/sources.lock.toml" "$key" "$value" <<'PYTHON'
+    local key=$1 value=$2 section=${3:-development_artifacts}
+    python3 - "$TREE/config/sources.lock.toml" "$key" "$value" "$section" <<'PYTHON'
 import pathlib
 import re
 import sys
 
-path, key, value = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path, key, value, section = (
+    pathlib.Path(sys.argv[1]),
+    sys.argv[2],
+    sys.argv[3],
+    sys.argv[4],
+)
 text = path.read_text()
-updated, count = re.subn(rf'{key} = "[0-9a-f]{{64}}"', f'{key} = "{value}"', text, count=1)
+heading = f"[{section}]"
+start = text.find(f"\n{heading}\n")
+if start < 0:
+    raise SystemExit(f"no [{section}] section to relock {key} in")
+start += 1
+end = text.find("\n[", start + len(heading))
+end = len(text) if end < 0 else end + 1
+body, count = re.subn(
+    rf'^{re.escape(key)} = "[0-9a-f]{{64}}"$',
+    f'{key} = "{value}"',
+    text[start:end],
+    count=1,
+    flags=re.MULTILINE,
+)
 if count != 1:
-    raise SystemExit(f"could not relock {key}")
-path.write_text(updated)
+    raise SystemExit(f"could not relock {section}.{key}")
+path.write_text(text[:start] + body + text[end:])
 PYTHON
 }
 
@@ -213,12 +239,12 @@ else
     }
 fi
 
-grep -Fxq 'CONFIG_DEBUG_ATOMIC_SLEEP=y' "$TREE_BUILD/kernel/x86_64-smp-p4k/.config" || \
+grep -Fxq 'CONFIG_DEBUG_ATOMIC_SLEEP=y' "$TREE_BUILD/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/.config" || \
     die "the diagnostic kernel did not enable CONFIG_DEBUG_ATOMIC_SLEEP"
-grep -Fxq 'CONFIG_PROVE_LOCKING=y' "$TREE_BUILD/kernel/x86_64-smp-p4k/.config" || \
+grep -Fxq 'CONFIG_PROVE_LOCKING=y' "$TREE_BUILD/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/.config" || \
     die "the diagnostic kernel did not enable CONFIG_PROVE_LOCKING"
 printf 'diagnostic_kernel_sha256=%s\n' \
-    "$(sha256sum "$TREE_BUILD/kernel/x86_64-smp-p4k/linux" | awk '{print $1}')"
+    "$(sha256sum "$TREE_BUILD/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/linux" | awk '{print $1}')"
 
 printf 'sealing the diagnostic profile\n'
 POCKET_BUILD_ROOT="$TREE_BUILD" make -C "$TREE" release-profile >"$DIAG_ROOT/profile.log" 2>&1 || {

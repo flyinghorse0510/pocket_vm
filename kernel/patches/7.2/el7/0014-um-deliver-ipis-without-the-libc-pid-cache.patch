@@ -1,0 +1,126 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: deliver IPIs without the libc pid cache
+
+os_send_ipi() addresses the target through pthread_sigqueue(), which
+builds the syscall from the thread-group id libc caches in the calling
+thread's control block.  With the clone fix in place that cache is no longer
+corrupted, but the dependency is worth removing anyway: it is not needed, it
+is invisible when it breaks, and it still applies to architectures where the
+raw clone is unavailable.
+
+Address the thread directly with ids read from the kernel.  A failure now
+panics rather than returning into a hang: all five callers discard the result,
+and a dropped reschedule or cross-call is not survivable -- an SMP guest stops
+with every CPU idle and nothing logged.
+---
+ arch/um/os-Linux/smp.c | 71 ++++++++++++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 69 insertions(+), 2 deletions(-)
+
+diff --git a/arch/um/os-Linux/smp.c b/arch/um/os-Linux/smp.c
+index 18d3858..be2923e 100644
+--- a/arch/um/os-Linux/smp.c
++++ b/arch/um/os-Linux/smp.c
+@@ -7,6 +7,9 @@
+ #include <errno.h>
+ #include <pthread.h>
+ #include <signal.h>
++#include <string.h>
++#include <sys/syscall.h>
++#include <unistd.h>
+ #include <kern_util.h>
+ #include <um_malloc.h>
+ #include <init.h>
+@@ -28,11 +31,47 @@ int uml_curr_cpu(void)
+ 
+ static pthread_t cpu_threads[CONFIG_NR_CPUS];
+ 
++/*
++ * Inter-processor interrupts cannot go through pthread_sigqueue() on every
++ * host. That wrapper addresses the target with the thread-group id glibc
++ * caches in the *calling* thread's control block -- and glibc's own clone()
++ * clobbers that cache to -1 whenever CLONE_VM is set without CLONE_THREAD,
++ * which is exactly how UML starts every userspace process. Because UML also
++ * does not pass CLONE_SETTLS, the child shares the parent's control block and
++ * the -1 lands in the UML kernel thread itself.
++ *
++ * glibc 2.25 removed the cache, so this is invisible on current hosts. On
++ * older ones the first userspace process UML starts disables every subsequent
++ * IPI: rt_tgsigqueueinfo is handed a thread-group id of -1 and returns EINVAL,
++ * every caller below discards the result, and the guest simply stops making
++ * progress with all of its CPUs idle.
++ *
++ * Address the thread directly instead. These are the ids the kernel gave us,
++ * read once and never cached anywhere libc can reach, and the syscall is the
++ * same one pthread_sigqueue would have made.
++ */
++static pid_t uml_tgid;
++static pid_t cpu_tids[CONFIG_NR_CPUS];
++
++#ifndef __NR_rt_tgsigqueueinfo
++#define __NR_rt_tgsigqueueinfo 297
++#endif
++
++static pid_t os_raw_gettid(void)
++{
++	return (pid_t)syscall(__NR_gettid);
++}
++
+ static void *cpu_thread(void *arg)
+ {
+ 	struct cpu_thread_data *data = arg;
+ 
+ 	__curr_cpu = data->cpu;
++	/*
++	 * Recorded before the CPU is announced as present, so that it is
++	 * already there for the first IPI anyone can send to it.
++	 */
++	cpu_tids[data->cpu] = os_raw_gettid();
+ 
+ 	uml_start_secondary(data);
+ 
+@@ -91,9 +130,35 @@ void os_start_secondary(void *arg, jmp_buf *switch_buf)
+ 
+ int os_send_ipi(int cpu, int vector)
+ {
+-	union sigval value = { .sival_int = vector };
++	siginfo_t info;
++	pid_t tid = cpu_tids[cpu];
++
++	if (tid <= 0)
++		panic("%s: CPU#%d has no thread id", __func__, cpu);
++
++	memset(&info, 0, sizeof(info));
++	info.si_signo = IPI_SIGNAL;
++	/*
++	 * SI_QUEUE is what sigqueue() reports and the only source the kernel
++	 * lets an unprivileged caller claim for another thread.
++	 */
++	info.si_code = SI_QUEUE;
++	info.si_pid = uml_tgid;
++	info.si_uid = getuid();
++	info.si_value.sival_int = vector;
++
++	if (syscall(__NR_rt_tgsigqueueinfo, uml_tgid, tid,
++		    IPI_SIGNAL, &info) < 0) {
++		/*
++		 * Every caller discards this result, and a dropped IPI is not
++		 * survivable -- a missed reschedule or function call leaves
++		 * the guest wedged with no indication of why. Say so instead.
++		 */
++		panic("%s: failed to signal CPU#%d (tid %d), errno = %d",
++		      __func__, cpu, tid, errno);
++	}
+ 
+-	return pthread_sigqueue(cpu_threads[cpu], IPI_SIGNAL, value);
++	return 0;
+ }
+ 
+ static void __local_ipi_set(int enable)
+@@ -144,5 +209,7 @@ void __init os_init_smp(void)
+ 	if (sigaction(IPI_SIGNAL, &action, NULL) < 0)
+ 		panic("%s: sigaction failed, errno = %d", __func__, errno);
+ 
++	uml_tgid = (pid_t)syscall(__NR_getpid);
+ 	cpu_threads[0] = pthread_self();
++	cpu_tids[uml_curr_cpu()] = os_raw_gettid();
+ }

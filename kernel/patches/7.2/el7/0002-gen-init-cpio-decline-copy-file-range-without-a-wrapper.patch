@@ -1,0 +1,63 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] gen_init_cpio: decline copy_file_range without a wrapper
+
+copy_file_range() is an optimisation here: the caller already treats a
+short or failed range copy as ordinary and finishes the file with the
+read/write loop that follows it.
+
+glibc only wrapped the syscall in 2.27, so on an older host the link fails on
+a symbol whose absence the surrounding code is already written to handle.
+Give it a call that declines.
+
+Guard the version test itself: `defined(__GLIBC__) &&` does not protect a
+function-like __GLIBC_PREREQ, because #if expands the whole expression before
+evaluating &&, so a libc without that macro fails to preprocess rather than
+taking the false branch.
+---
+ usr/gen_init_cpio.c | 33 +++++++++++++++++++++++++++++++++
+ 1 file changed, 33 insertions(+)
+
+diff --git a/usr/gen_init_cpio.c b/usr/gen_init_cpio.c
+index b7296ed..a2e7bad 100644
+--- a/usr/gen_init_cpio.c
++++ b/usr/gen_init_cpio.c
+@@ -14,6 +14,39 @@
+ #include <ctype.h>
+ #include <limits.h>
+ 
++/*
++ * `defined(__GLIBC__) &&` does not protect the test that follows it: #if
++ * expands the whole expression before evaluating &&, so an undefined
++ * function-like __GLIBC_PREREQ is a syntax error rather than a false branch.
++ * Give it a definition that answers "not that glibc" for any other libc.
++ */
++#ifndef __GLIBC_PREREQ
++#define __GLIBC_PREREQ(major, minor) 0
++#endif
++
++/*
++ * copy_file_range() is only an optimisation here: the caller already treats a
++ * short or failed range copy as ordinary, and finishes the file with the
++ * read/write loop that follows it. A host whose libc predates the wrapper
++ * (glibc 2.27) therefore needs nothing more than a call that declines.
++ */
++#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 27)
++static ssize_t copy_file_range(int fd_in, loff_t *off_in,
++			       int fd_out, loff_t *off_out,
++			       size_t len, unsigned int flags)
++{
++	(void)fd_in;
++	(void)off_in;
++	(void)fd_out;
++	(void)off_out;
++	(void)len;
++	(void)flags;
++
++	errno = ENOSYS;
++	return -1;
++}
++#endif
++
+ /*
+  * Original work by Jeff Garzik
+  *

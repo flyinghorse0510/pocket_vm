@@ -9,8 +9,8 @@ ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 DOWNLOAD_DIR="$BUILD_ROOT/downloads"
 GNUPG_HOME="$BUILD_ROOT/gnupg-linux-release"
-TARBALL="$DOWNLOAD_DIR/$LINUX_SOURCE_NAME.tar.xz"
-SIGNATURE="$DOWNLOAD_DIR/$LINUX_SOURCE_NAME.tar.sign"
+TARBALL="$DOWNLOAD_DIR/$LINUX_ARCHIVE_NAME.tar.xz"
+SIGNATURE="$DOWNLOAD_DIR/$LINUX_ARCHIVE_NAME.tar.sign"
 DOWNLOAD_LOCK="$BUILD_ROOT/locks/linux-download.lock"
 
 for command in awk curl find flock gpg sha256sum xz; do
@@ -67,8 +67,20 @@ actual_signed_tar_sha=$(xz -cd -- "$TARBALL" | sha256sum | awk '{print $1}')
 
 if ! gpg --no-options --batch --homedir "$GNUPG_HOME" \
     --list-keys "$LINUX_SIGNER_FINGERPRINT" >/dev/null 2>&1; then
-    gpg --no-options --batch --homedir "$GNUPG_HOME" --auto-key-locate clear,wkd \
-        --locate-keys "$LINUX_SIGNER_EMAIL" >/dev/null
+    # gpg learned Web Key Directory lookups in 2.1.12; an older one rejects the
+    # mechanism list outright. Fetch the signer's WKD entry directly in that
+    # case -- the same URL and the same bytes gpg would have retrieved. The
+    # retrieval path is not trusted either way: the fingerprint check below
+    # accepts only the locked key, and the signature must then produce exactly
+    # one VALIDSIG from it.
+    if ! gpg --no-options --batch --homedir "$GNUPG_HOME" --auto-key-locate clear,wkd \
+        --locate-keys "$LINUX_SIGNER_EMAIL" >/dev/null 2>&1; then
+        key_file=$(mktemp "$DOWNLOAD_DIR/.linux-download.XXXXXX")
+        PART_FILES+=("$key_file")
+        curl --fail --location --proto '=https' --tlsv1.2 --retry 3 \
+            --output "$key_file" "$LINUX_SIGNER_KEY_URL"
+        gpg --no-options --batch --homedir "$GNUPG_HOME" --import "$key_file" >/dev/null 2>&1
+    fi
 fi
 actual_fingerprint=$(
     gpg --no-options --batch --homedir "$GNUPG_HOME" --with-colons \

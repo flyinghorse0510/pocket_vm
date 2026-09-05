@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 PROFILE_ROOT="$BUILD_ROOT/release/x86_64-smp-p4k"
 GUEST_DIR="$PROFILE_ROOT/guest"
-GEN_INIT_CPIO=${POCKET_GEN_INIT_CPIO:-"$BUILD_ROOT/kernel/x86_64-smp-p4k/usr/gen_init_cpio"}
+GEN_INIT_CPIO=${POCKET_GEN_INIT_CPIO:-"$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/usr/gen_init_cpio"}
 WORKLOAD_TEMPLATE="$ROOT/config/initramfs/workload-release.list.in"
 BUILDER_TEMPLATE="$ROOT/config/initramfs/builder-release.list.in"
 VALIDATOR_TEMPLATE="$ROOT/config/initramfs/validator-release.list.in"

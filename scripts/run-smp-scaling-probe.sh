@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
-KERNEL="$BUILD_ROOT/kernel/x86_64-smp-p4k/linux"
+KERNEL="$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/linux"
 INITRAMFS="$BUILD_ROOT/initramfs/smp-probe.cpio"
 GUARD=${POCKET_GUARD:-"$ROOT/target/release/pocket-guard"}
 RUNTIME_ROOT=${POCKET_RUNTIME_ROOT:-"/tmp/pocket-vm-$(id -u)"}

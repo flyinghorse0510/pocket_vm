@@ -2,10 +2,12 @@
 
 # shellcheck source=scripts/lib.sh
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
-CONFIG=${POCKET_KERNEL_CONFIG:-"$BUILD_ROOT/kernel/x86_64-smp-p4k/.config"}
+CONFIG=${POCKET_KERNEL_CONFIG:-"$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/.config"}
 REQUIRED="$ROOT/config/kernel/x86_64-uml.required"
 
 [[ $CONFIG = /* ]] || die "kernel configuration path must be absolute"

@@ -9,8 +9,9 @@ ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 SOURCE_DIR="$BUILD_ROOT/src/$LINUX_SOURCE_NAME"
 KERNEL_PARENT="$BUILD_ROOT/kernel"
-OUTPUT_DIR="$KERNEL_PARENT/x86_64-smp-p4k"
-BUILD_STAGING="$KERNEL_PARENT/.x86_64-smp-p4k.building"
+PROFILE_ID="x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX"
+OUTPUT_DIR="$KERNEL_PARENT/$PROFILE_ID"
+BUILD_STAGING="$KERNEL_PARENT/.$PROFILE_ID.building"
 BUILD_HOME="$KERNEL_PARENT/.linux-build-home"
 RECOVERY_DIR="$KERNEL_PARENT/replaced"
 FRAGMENT="$ROOT/config/kernel/x86_64-uml.fragment"
@@ -23,6 +24,13 @@ done
 safe_managed_root "$BUILD_ROOT"
 [[ $JOBS =~ ^[1-9][0-9]*$ && $JOBS -le 256 ]] || die "POCKET_BUILD_JOBS must be in 1..=256"
 load_linux_source_locks "$ROOT"
+if [[ -n $LINUX_VARIANT ]]; then
+    printf 'building the EXPERIMENTAL %s kernel variant\n' "$LINUX_VARIANT" >&2
+    printf 'source: %s\n' "$SOURCE_DIR" >&2
+    printf 'output: %s\n' "$OUTPUT_DIR" >&2
+    printf 'the default kernel at %s/x86_64-smp-p4k is not touched by this build\n' \
+        "$KERNEL_PARENT" >&2
+fi
 acquire_linux_pipeline_lock "$BUILD_ROOT"
 mkdir -p -- "$KERNEL_PARENT"
 
@@ -33,13 +41,13 @@ prepared_source=$("$ROOT/scripts/apply-linux-patches.sh")
 [[ $prepared_source == "$SOURCE_DIR" ]] || die "source preparation returned the wrong fixed path"
 "$ROOT/scripts/audit-linux-source.sh" "$SOURCE_DIR"
 
-preserve_generated_tree "$BUILD_STAGING" "$RECOVERY_DIR" x86_64-smp-p4k.interrupted-build
+preserve_generated_tree "$BUILD_STAGING" "$RECOVERY_DIR" "$PROFILE_ID.interrupted-build"
 preserve_generated_tree "$BUILD_HOME" "$RECOVERY_DIR" linux-build-home.interrupted
 mkdir -p -- "$BUILD_STAGING" "$BUILD_HOME" "$BUILD_HOME/tmp"
 BUILD_PUBLISHED=0
 preserve_failed_build() {
     if [[ $BUILD_PUBLISHED -eq 0 && ( -e $BUILD_STAGING || -L $BUILD_STAGING ) ]]; then
-        preserve_generated_tree "$BUILD_STAGING" "$RECOVERY_DIR" x86_64-smp-p4k.failed-build || true
+        preserve_generated_tree "$BUILD_STAGING" "$RECOVERY_DIR" "$PROFILE_ID.failed-build" || true
     fi
     if [[ -e $BUILD_HOME || -L $BUILD_HOME ]]; then
         cleanup_linux_staging "$BUILD_HOME" "$KERNEL_PARENT" .linux-build-home
@@ -95,26 +103,27 @@ run_build_command make -C "$SOURCE_DIR" O="$BUILD_STAGING" -j "$JOBS" linux
 )
 linux_sha=$(sha256sum "$BUILD_STAGING/linux" | awk '{print $1}')
 config_sha=$(sha256sum "$BUILD_STAGING/.config" | awk '{print $1}')
-locked_linux_sha=$(
-    awk -F'"' '/^\[development_artifacts\]$/ { inside = 1; next }
-        /^\[/ { if (inside) exit }
-        inside && /^linux_uml_sha256 = "/ { print $2; count++ }
-        END { if (count != 1) exit 3 }' "$LINUX_SOURCE_LOCK"
-) || die "missing or duplicate development_artifacts.linux_uml_sha256"
-locked_config_sha=$(
-    awk -F'"' '/^\[development_artifacts\]$/ { inside = 1; next }
-        /^\[/ { if (inside) exit }
-        inside && /^linux_uml_config_sha256 = "/ { print $2; count++ }
-        END { if (count != 1) exit 3 }' "$LINUX_SOURCE_LOCK"
-) || die "missing or duplicate development_artifacts.linux_uml_config_sha256"
+# A variant produces different bytes -- different patches, and a different
+# reference toolchain -- so it carries its own artifact locks. Reading them
+# from the variant's section means a variant build can never be waved through
+# by the default build's digests, or the other way round.
+ARTIFACT_SECTION=development_artifacts
+[[ -z $LINUX_VARIANT ]] || ARTIFACT_SECTION="linux.variant.$LINUX_VARIANT"
+locked_linux_sha=$(linux_lock_value "$LINUX_SOURCE_LOCK" linux_uml_sha256 "$ARTIFACT_SECTION")
+locked_config_sha=$(linux_lock_value "$LINUX_SOURCE_LOCK" linux_uml_config_sha256 "$ARTIFACT_SECTION")
+require_hex "$locked_linux_sha" 64 "$ARTIFACT_SECTION.linux_uml_sha256"
+require_hex "$locked_config_sha" 64 "$ARTIFACT_SECTION.linux_uml_config_sha256"
 [[ $linux_sha == "$locked_linux_sha" ]] || die "rebuilt UML kernel differs from the locked artifact SHA-256"
 [[ $config_sha == "$locked_config_sha" ]] || die "rebuilt UML config differs from the locked artifact SHA-256"
 
 {
     printf 'pocket-linux-build-v1\n'
+    printf 'variant=%s\n' "${LINUX_VARIANT:-none}"
     printf 'source_tree_sha1=%s\n' "$LINUX_PATCHED_TREE"
     printf 'source_manifest_sha256=%s\n' "$LINUX_PATCHED_MANIFEST"
     printf 'patch_series_sha256=%s\n' "$LINUX_PATCH_SERIES_SHA256"
+    [[ -z $LINUX_VARIANT ]] || \
+        printf 'variant_series_sha256=%s\n' "$(sha256sum "$LINUX_OVERLAY_LOCK" | awk '{print $1}')"
     printf 'source_date_epoch=%s\n' "$LINUX_SOURCE_DATE_EPOCH"
     printf 'gcc=%s\n' "$(gcc -dumpfullversion -dumpversion)"
     printf 'ld=%s\n' "$(ld --version | awk 'NR == 1')"
@@ -125,7 +134,7 @@ locked_config_sha=$(
 } > "$BUILD_STAGING/BUILD-METADATA"
 chmod 0444 "$BUILD_STAGING/BUILD-METADATA" "$BUILD_STAGING/SHA256SUMS"
 
-preserve_generated_tree "$OUTPUT_DIR" "$RECOVERY_DIR" x86_64-smp-p4k
+preserve_generated_tree "$OUTPUT_DIR" "$RECOVERY_DIR" "$PROFILE_ID"
 if ! mv -- "$BUILD_STAGING" "$OUTPUT_DIR"; then
     if [[ -n ${PRESERVED_GENERATED_TREE:-} && ! -e $OUTPUT_DIR && ! -L $OUTPUT_DIR ]]; then
         mv -- "$PRESERVED_GENERATED_TREE" "$OUTPUT_DIR" || true

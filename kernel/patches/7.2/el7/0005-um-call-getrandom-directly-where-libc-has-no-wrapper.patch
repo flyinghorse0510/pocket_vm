@@ -1,0 +1,60 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: call getrandom() directly where libc has no wrapper
+
+getrandom() is a 3.17 syscall, but glibc only added <sys/random.h> and
+the wrapper in 2.25, so the include itself fails on an older host.
+os_getrandom() is the only user; give it the syscall directly, returning the
+same errno the wrapper would have.
+
+Guard the version test itself: `defined(__GLIBC__) &&` does not protect a
+function-like __GLIBC_PREREQ, because #if expands the whole expression before
+evaluating &&, so a libc without that macro fails to preprocess rather than
+taking the false branch.
+---
+ arch/um/os-Linux/util.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/arch/um/os-Linux/util.c b/arch/um/os-Linux/util.c
+index e3ad71a..2c6264f 100644
+--- a/arch/um/os-Linux/util.c
++++ b/arch/um/os-Linux/util.c
+@@ -14,7 +14,27 @@
+ #include <sys/wait.h>
+ #include <sys/mman.h>
+ #include <sys/utsname.h>
++/*
++ * `defined(__GLIBC__) &&` does not protect the test that follows it: #if
++ * expands the whole expression before evaluating &&, so an undefined
++ * function-like __GLIBC_PREREQ is a syntax error rather than a false branch.
++ * Give it a definition that answers "not that glibc" for any other libc.
++ */
++#ifndef __GLIBC_PREREQ
++#define __GLIBC_PREREQ(major, minor) 0
++#endif
++
++/*
++ * getrandom() is a 3.17 syscall, but glibc only added <sys/random.h> and the
++ * wrapper in 2.25. os_getrandom() below is the sole user; give it the syscall
++ * directly when the header is not there, and let the caller see the same
++ * errno it would have seen from the wrapper.
++ */
++#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 25)
++#include <sys/syscall.h>
++#else
+ #include <sys/random.h>
++#endif
+ #include <init.h>
+ #include <os.h>
+ 
+@@ -98,7 +118,11 @@ static inline void __attribute__ ((noreturn)) uml_abort(void)
+ 
+ ssize_t os_getrandom(void *buf, size_t len, unsigned int flags)
+ {
++#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 25)
++	return syscall(__NR_getrandom, buf, len, flags);
++#else
+ 	return getrandom(buf, len, flags);
++#endif
+ }
+ 
+ /*

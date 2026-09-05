@@ -1,0 +1,55 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: call gettid() directly where libc has no wrapper
+
+The kernel has had gettid since 2.4; glibc only grew the wrapper in 2.30.
+Where the wrapper is missing the syscall still is not, so call it directly
+rather than lose the per-CPU timer this file sets up.
+
+Guard the version test itself: `defined(__GLIBC__) &&` does not protect a
+function-like __GLIBC_PREREQ, because #if expands the whole expression before
+evaluating &&, so a libc without that macro fails to preprocess rather than
+taking the false branch.
+---
+ arch/um/os-Linux/time.c | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/arch/um/os-Linux/time.c b/arch/um/os-Linux/time.c
+index 13ebc86..0907376 100644
+--- a/arch/um/os-Linux/time.c
++++ b/arch/um/os-Linux/time.c
+@@ -12,6 +12,7 @@
+ #include <signal.h>
+ #include <time.h>
+ #include <sys/signalfd.h>
++#include <sys/syscall.h>
+ #include <sys/time.h>
+ #include <kern_util.h>
+ #include <os.h>
+@@ -19,6 +20,27 @@
+ #include <string.h>
+ #include "internal.h"
+ 
++/*
++ * `defined(__GLIBC__) &&` does not protect the test that follows it: #if
++ * expands the whole expression before evaluating &&, so an undefined
++ * function-like __GLIBC_PREREQ is a syntax error rather than a false branch.
++ * Give it a definition that answers "not that glibc" for any other libc.
++ */
++#ifndef __GLIBC_PREREQ
++#define __GLIBC_PREREQ(major, minor) 0
++#endif
++
++/*
++ * The kernel has had gettid since 2.4; glibc only grew the wrapper in 2.30.
++ * Where the wrapper is missing the syscall still is not, so call it directly.
++ */
++#if defined(__GLIBC__) && !__GLIBC_PREREQ(2, 30)
++static inline pid_t gettid(void)
++{
++	return (pid_t)syscall(__NR_gettid);
++}
++#endif
++
+ static timer_t event_high_res_timer[CONFIG_NR_CPUS] = { 0 };
+ 
+ static inline long long timespec_to_ns(const struct timespec *ts)

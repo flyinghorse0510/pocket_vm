@@ -1,0 +1,48 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: keep the kernel FP-state types on old glibc
+
+glibc up to 2.17 declares the signal FP-state structures itself and pulls
+them in through <sys/ucontext.h>; from 2.18 it leaves them to the kernel
+header.  Including <asm/sigcontext.h> afterwards therefore redefines five
+structures on exactly those older hosts.
+
+Rename the kernel's copies on the way in -- the same trick this file already
+uses for struct sigcontext -- and keep the aliases in place afterwards, so
+the file goes on reading the kernel layout.  That matters beyond the name
+clash: get_fpstate() reads the sw_reserved area, which the kernel structure
+has and the old glibc one does not.
+
+<bits/sigcontext.h> defining its own include guard is the exact signal that
+its declarations arrived, so no version test is needed.
+---
+ arch/x86/um/os-Linux/mcontext.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/arch/x86/um/os-Linux/mcontext.c b/arch/x86/um/os-Linux/mcontext.c
+index b1580df..83a4c08 100644
+--- a/arch/x86/um/os-Linux/mcontext.c
++++ b/arch/x86/um/os-Linux/mcontext.c
+@@ -9,6 +9,23 @@
+  * copy to avoid redefinition while keeping the FP-state types available.
+  */
+ #define sigcontext __kernel_sigcontext
++/*
++ * glibc up to 2.17 declares the signal FP-state structures itself and pulls
++ * them in through <sys/ucontext.h>; from 2.18 it leaves them to the kernel
++ * header, which is why this collides on old hosts only. Rename the kernel's
++ * copies the same way, then keep the aliases in place for the rest of the
++ * file: get_fpstate() reads the sw_reserved area, which exists in the kernel
++ * layout and not in the old glibc one, so the kernel definition is the one
++ * this file has to be looking at. <bits/sigcontext.h> having defined its own
++ * include guard is the exact signal that its declarations arrived.
++ */
++#ifdef _BITS_SIGCONTEXT_H
++#define _fpx_sw_bytes	__kernel_fpx_sw_bytes
++#define _fpstate	__kernel_fpstate
++#define _xsave_hdr	__kernel_xsave_hdr
++#define _ymmh_state	__kernel_ymmh_state
++#define _xstate		__kernel_xstate
++#endif
+ #include <asm/sigcontext.h>
+ #undef sigcontext
+ #include <sysdep/ptrace.h>

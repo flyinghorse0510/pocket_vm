@@ -1,0 +1,55 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: run driver helpers without disturbing the id cache
+
+run_helper() shares its child's address space, so it corrupts the caller's
+cached ids the same way every other CLONE_VM clone does.  Use the raw clone.
+
+Nothing pocket runs reaches this path -- it serves the xterm, port, harddog
+and tap/raw vector helpers -- but leaving one caller behind would mean the
+corruption is merely harder to reach rather than gone.
+---
+ arch/um/os-Linux/helper.c | 17 +++++++++++++++++
+ 1 file changed, 17 insertions(+)
+
+diff --git a/arch/um/os-Linux/helper.c b/arch/um/os-Linux/helper.c
+index 89c2ad2..e568272 100644
+--- a/arch/um/os-Linux/helper.c
++++ b/arch/um/os-Linux/helper.c
+@@ -14,6 +14,7 @@
+ #include <sys/wait.h>
+ #include <kern_util.h>
+ #include <os.h>
++#include <sysdep/stub.h>
+ #include <um_malloc.h>
+ 
+ struct helper_data {
+@@ -73,6 +74,21 @@ int run_helper(void (*pre_exec)(void *), void *pre_data, char **argv)
+ 	data.fd = fds[1];
+ 	data.buf = __uml_cant_sleep() ? uml_kmalloc(PATH_MAX, UM_GFP_ATOMIC) :
+ 					uml_kmalloc(PATH_MAX, UM_GFP_KERNEL);
++	/*
++	 * Not libc's clone(): for CLONE_VM without CLONE_THREAD it clobbers
++	 * this thread's own cached process and thread ids, which older libc
++	 * then reads back for pthread_cancel() and pthread_sigqueue(). See
++	 * stub_clone_vm().
++	 */
++#ifdef STUB_CLONE_VM_AVAILABLE
++	pid = stub_clone_vm(helper_child, (void *) sp, CLONE_VM, &data);
++	if (pid < 0) {
++		ret = pid;
++		printk(UM_KERN_ERR "run_helper : clone failed, errno = %d\n",
++		       -ret);
++		goto out_free2;
++	}
++#else
+ 	pid = clone(helper_child, (void *) sp, CLONE_VM, &data);
+ 	if (pid < 0) {
+ 		ret = -errno;
+@@ -80,6 +96,7 @@ int run_helper(void (*pre_exec)(void *), void *pre_data, char **argv)
+ 		       errno);
+ 		goto out_free2;
+ 	}
++#endif
+ 
+ 	close(fds[1]);
+ 	fds[1] = -1;

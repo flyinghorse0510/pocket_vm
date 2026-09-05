@@ -1,0 +1,33 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: vector: define PACKET_QDISC_BYPASS when absent
+
+Qdisc bypass arrived in Linux 3.14 and is a pure optimisation.  On an
+older host the constant is simply missing from the headers; with it defined,
+the setsockopt fails at runtime instead and the caller falls back to the
+queueing path, which is what it already does for any kernel that refuses the
+option.
+---
+ arch/um/drivers/vector_user.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/arch/um/drivers/vector_user.c b/arch/um/drivers/vector_user.c
+index 9152bac..eb1ab4e 100644
+--- a/arch/um/drivers/vector_user.c
++++ b/arch/um/drivers/vector_user.c
+@@ -557,6 +557,16 @@ raw_cleanup:
+ }
+ 
+ 
++/*
++ * Qdisc bypass arrived in Linux 3.14. On an older host the constant is simply
++ * absent from the headers; the setsockopt below then fails at runtime and the
++ * caller falls back to the queueing path, which is what it already does for
++ * any kernel that refuses the option.
++ */
++#ifndef PACKET_QDISC_BYPASS
++#define PACKET_QDISC_BYPASS 20
++#endif
++
+ bool uml_raw_enable_qdisc_bypass(int fd)
+ {
+ 	int optval = 1;

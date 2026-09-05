@@ -1,0 +1,103 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] hostfs: stat without statx where it is unavailable
+
+statx() is a 4.11 syscall wrapped by glibc from 2.28.  Hosts older than
+either have no way to report a file's birth time -- and nothing else that
+hostfs asks statx for is missing from fstatat().
+
+Since the caller already treats birth time as optional (STATX_BTIME is
+requested rather than required, and an absent one is zeroed), the older
+interface answers the same question with the same fidelity apart from that
+one field.  Selecting it on the absence of STATX_BASIC_STATS keeps current
+hosts on statx unchanged.
+---
+ fs/hostfs/hostfs_user.c | 52 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 51 insertions(+), 1 deletion(-)
+
+diff --git a/fs/hostfs/hostfs_user.c b/fs/hostfs/hostfs_user.c
+index 3bcd9f3..d86a691 100644
+--- a/fs/hostfs/hostfs_user.c
++++ b/fs/hostfs/hostfs_user.c
+@@ -15,9 +15,47 @@
+ #include <sys/types.h>
+ #include <sys/vfs.h>
+ #include <sys/syscall.h>
++#include <sys/sysmacros.h>
+ #include "hostfs.h"
+ #include <utime.h>
+ 
++/*
++ * statx() is a 4.11 syscall wrapped by glibc from 2.28. Hosts older than
++ * either have no way to report a file's birth time -- and nothing else that
++ * hostfs asks statx for is missing from fstatat(). Since the caller already
++ * treats birth time as optional (STATX_BTIME is requested, not required, and
++ * an absent one is zeroed), the older interface answers the same question
++ * with the same fidelity apart from that one field.
++ */
++#ifndef STATX_BASIC_STATS
++#define POCKET_HOSTFS_STAT_WITHOUT_STATX 1
++#endif
++
++#ifdef POCKET_HOSTFS_STAT_WITHOUT_STATX
++static void stat_to_hostfs(const struct stat64 *buf, struct hostfs_stat *p)
++{
++	p->ino = buf->st_ino;
++	p->mode = buf->st_mode;
++	p->nlink = buf->st_nlink;
++	p->uid = buf->st_uid;
++	p->gid = buf->st_gid;
++	p->size = buf->st_size;
++	p->atime.tv_sec = buf->st_atim.tv_sec;
++	p->atime.tv_nsec = buf->st_atim.tv_nsec;
++	p->ctime.tv_sec = buf->st_ctim.tv_sec;
++	p->ctime.tv_nsec = buf->st_ctim.tv_nsec;
++	p->mtime.tv_sec = buf->st_mtim.tv_sec;
++	p->mtime.tv_nsec = buf->st_mtim.tv_nsec;
++	/* No birth time from this interface; the caller accepts zero. */
++	memset(&p->btime, 0, sizeof(p->btime));
++	p->blksize = buf->st_blksize;
++	p->blocks = buf->st_blocks;
++	p->rdev.maj = major(buf->st_rdev);
++	p->rdev.min = minor(buf->st_rdev);
++	p->dev.maj = major(buf->st_dev);
++	p->dev.min = minor(buf->st_dev);
++}
++#else
+ static void statx_to_hostfs(const struct statx *buf, struct hostfs_stat *p)
+ {
+ 	p->ino = buf->stx_ino;
+@@ -45,21 +83,33 @@ static void statx_to_hostfs(const struct statx *buf, struct hostfs_stat *p)
+ 	p->dev.maj = buf->stx_dev_major;
+ 	p->dev.min = buf->stx_dev_minor;
+ }
++#endif
+ 
+ int stat_file(const char *path, struct hostfs_stat *p, int fd)
+ {
+-	struct statx buf;
+ 	int flags = AT_SYMLINK_NOFOLLOW;
++#ifdef POCKET_HOSTFS_STAT_WITHOUT_STATX
++	struct stat64 buf;
++#else
++	struct statx buf;
++#endif
+ 
+ 	if (fd >= 0) {
+ 		flags |= AT_EMPTY_PATH;
+ 		path = "";
+ 	}
+ 
++#ifdef POCKET_HOSTFS_STAT_WITHOUT_STATX
++	if (fstatat64(fd, path, &buf, flags) < 0)
++		return -errno;
++
++	stat_to_hostfs(&buf, p);
++#else
+ 	if ((statx(fd, path, flags, STATX_BASIC_STATS | STATX_BTIME, &buf)) < 0)
+ 		return -errno;
+ 
+ 	statx_to_hostfs(&buf, p);
++#endif
+ 	return 0;
+ }
+ 

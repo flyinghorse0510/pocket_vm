@@ -51,5 +51,43 @@ fi
 rmdir "$FIXTURE/empty"
 verify_source_tree_hygiene "$FIXTURE"
 
+# The variant guard. Both halves of it are load-bearing and neither was covered
+# by anything runnable: that an unnamed variant leaves every derived path
+# exactly as it was, and that a name the allow-list does not hold is refused
+# rather than quietly treated as the default.
+(
+    unset POCKET_KERNEL_VARIANT
+    # shellcheck source=scripts/linux-source-lib.sh
+    source "$ROOT/scripts/linux-source-lib.sh"
+    [[ -z $LINUX_VARIANT ]] || die "an unset variant did not stay unset"
+    [[ -z $LINUX_OUTPUT_SUFFIX ]] || \
+        die "an unset variant added the output suffix: $LINUX_OUTPUT_SUFFIX"
+    [[ $LINUX_SOURCE_NAME == "$LINUX_ARCHIVE_NAME" ]] || \
+        die "an unset variant renamed the source tree: $LINUX_SOURCE_NAME"
+)
+for rejected in bogus EL7 'el7 ' '' ' ' ../el7 el7/../..; do
+    # An empty value means "no variant" and is the default, so it is the one
+    # value that must be accepted rather than refused.
+    [[ -n $rejected ]] || continue
+    if (
+        POCKET_KERNEL_VARIANT=$rejected
+        export POCKET_KERNEL_VARIANT
+        source "$ROOT/scripts/linux-source-lib.sh"
+    ) >/dev/null 2>&1; then
+        die "an unsupported kernel variant was accepted: ${rejected@Q}"
+    fi
+done
+# Each selection is read inside the subshell that made it, which is the point:
+# the guard must not leak a variant into this script's own environment.
+# shellcheck disable=SC2031
+(
+    POCKET_KERNEL_VARIANT=el7
+    export POCKET_KERNEL_VARIANT
+    source "$ROOT/scripts/linux-source-lib.sh"
+    [[ $LINUX_OUTPUT_SUFFIX == -el7 ]] || die "el7 did not select its own output suffix"
+    [[ $LINUX_SOURCE_NAME == "$LINUX_ARCHIVE_NAME-el7" ]] || \
+        die "el7 did not select its own source tree"
+) || die "the supported el7 variant was refused"
+
 "$ROOT/scripts/audit-linux-source.sh"
 printf 'verified Linux source-pipeline regression checks\n'

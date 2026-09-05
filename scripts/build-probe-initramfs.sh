@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
-KERNEL_OUTPUT="$BUILD_ROOT/kernel/x86_64-smp-p4k"
+KERNEL_OUTPUT="$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX"
 GEN_INIT_CPIO="$KERNEL_OUTPUT/usr/gen_init_cpio"
 TEMPLATE="$ROOT/config/initramfs/probe.list.in"
 OUTPUT_DIR="$BUILD_ROOT/initramfs"

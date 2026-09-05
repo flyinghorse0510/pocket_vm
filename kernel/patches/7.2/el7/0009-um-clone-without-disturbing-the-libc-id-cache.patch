@@ -1,0 +1,97 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: clone without disturbing the libc id cache
+
+libc's clone() cannot be used for CLONE_VM without CLONE_THREAD.  Its
+child branch stores -1 into the thread control block's cached process and
+thread ids, because it cannot cheaply learn the ids the child was given.  UML
+clones exactly that way and does not pass CLONE_SETTLS, so the child shares the
+caller's control block and the -1 lands in the UML kernel thread itself.
+
+libc before 2.25 reads those cached ids back.  pthread_cancel() builds
+tgkill(cached_pid, tid, SIGCANCEL) from them, so cancelling a helper thread
+addresses a thread group of -1, fails, and reports nothing -- the thread never
+terminates and the pthread_join() behind it never returns.  UML hangs on exit
+in sigio_cleanup() with the guest already powered down.  pthread_sigqueue()
+builds its syscall the same way, which is how the same corruption disables
+inter-processor interrupts.  Newer libc removed the cache, so none of this is
+visible there.
+
+Add a clone that issues the syscall directly, entering the child on its own
+stack, so the cache is never touched.  x86-64 only; the callers keep libc's
+clone where this is not available.
+---
+ arch/x86/um/shared/sysdep/stub_64.h | 61 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+
+diff --git a/arch/x86/um/shared/sysdep/stub_64.h b/arch/x86/um/shared/sysdep/stub_64.h
+index 9fd5695..01399b6 100644
+--- a/arch/x86/um/shared/sysdep/stub_64.h
++++ b/arch/x86/um/shared/sysdep/stub_64.h
+@@ -108,6 +108,67 @@ static __always_inline long stub_syscall6(long syscall, long arg1, long arg2,
+ 	return ret;
+ }
+ 
++/*
++ * clone(2), issued directly, entering the child on its own stack.
++ *
++ * libc's clone() cannot be used for this. When CLONE_VM is set without
++ * CLONE_THREAD its child branch stores -1 into the thread control block's
++ * cached process and thread ids, because it cannot cheaply learn the ids the
++ * child was given. UML clones exactly that way and does not pass CLONE_SETTLS,
++ * so the child shares the caller's control block and the -1 lands in the
++ * caller -- the UML kernel thread itself.
++ *
++ * libc before 2.25 reads those cached ids back. pthread_cancel() builds
++ * tgkill(cached_pid, tid, ...) from them and pthread_sigqueue() the same, so
++ * both address a thread group of -1, fail, and report nothing: UML's helper
++ * threads then never terminate and its inter-processor interrupts never
++ * arrive. Newer libc removed the cache, which is why this is invisible there.
++ *
++ * Returns the child's pid to the caller, or a negative errno; the child does
++ * not return at all, exiting with whatever fn() gave back.
++ */
++#define STUB_CLONE_VM_AVAILABLE 1
++static __always_inline long stub_clone_vm(int (*fn)(void *), void *stack_top,
++					  unsigned long flags, void *arg)
++{
++	register long _r10 __asm__("r10") = 0;
++	register long _r8 __asm__("r8") = 0;
++	unsigned long *child_stack;
++	long ret;
++
++	/*
++	 * The child resumes with its stack pointer exactly as handed over, so
++	 * its arguments travel on that stack. Align first: the call below
++	 * needs the boundary the ABI asks for, and the caller's stack top is
++	 * not required to provide it.
++	 */
++	child_stack = (unsigned long *)((unsigned long)stack_top & ~15UL);
++	*--child_stack = (unsigned long)arg;
++	*--child_stack = (unsigned long)fn;
++
++	__asm__ volatile (
++		__syscall "\n\t"
++		"testq %%rax, %%rax\n\t"
++		"jnz 1f\n\t"
++		/* Child: no caller frame, and nowhere to return to. */
++		"xorq %%rbp, %%rbp\n\t"
++		"popq %%rax\n\t"
++		"popq %%rdi\n\t"
++		"callq *%%rax\n\t"
++		"movl %%eax, %%edi\n\t"
++		"movl $%c[exit], %%eax\n\t"
++		__syscall "\n\t"
++		"hlt\n\t"
++		"1:\n\t"
++		: "=a" (ret)
++		: "0" ((long)__NR_clone), "D" (flags), "S" (child_stack),
++		  "d" (0L), "r" (_r10), "r" (_r8),
++		  [exit] "i" (__NR_exit)
++		: __syscall_clobber);
++
++	return ret;
++}
++
+ static __always_inline void trap_myself(void)
+ {
+ 	__asm("int3");

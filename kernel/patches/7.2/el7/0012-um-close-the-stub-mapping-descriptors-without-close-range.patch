@@ -1,0 +1,99 @@
+From: pocket_vm developers <pocket-vm@localhost>
+Subject: [PATCH] um: close the stub mapping descriptors without close_range
+
+Where close_range() is missing, the trampoline has already enumerated the
+descriptor table and closed everything outside its keep-list, so the stub can
+finish the job by closing the two mapping descriptors by number -- exactly,
+rather than hopefully.
+
+Descriptor 0 is the signalling socket, so a mapping descriptor claiming to be
+0 means the trampoline's relocation did not happen; refuse that rather than
+close the socket or leave physical memory mapped.
+
+Also define SECCOMP_RET_KILL_PROCESS where the headers are too old to name it.
+Define the value rather than aliasing it to SECCOMP_RET_KILL, which is
+SECCOMP_RET_KILL_THREAD: aliasing would let the headers on the build host
+decide the filter's kill semantics on whatever kernel the result runs on.  The
+value needs no alias to degrade -- a pre-4.14 kernel masks the action bits with
+SECCOMP_RET_ACTION and lands on its own kill -- while a 4.14 or later kernel
+gets the process-wide kill that is meant.
+---
+ arch/um/kernel/skas/stub_exe.c | 53 +++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 52 insertions(+), 1 deletion(-)
+
+diff --git a/arch/um/kernel/skas/stub_exe.c b/arch/um/kernel/skas/stub_exe.c
+index cbafaa6..d00e971 100644
+--- a/arch/um/kernel/skas/stub_exe.c
++++ b/arch/um/kernel/skas/stub_exe.c
+@@ -4,10 +4,33 @@
+ #include <asm/unistd.h>
+ #include <sysdep/stub.h>
+ #include <stub-data.h>
++#include <linux/errno.h>
+ #include <linux/filter.h>
+ #include <linux/seccomp.h>
+ #include <generated/asm-offsets.h>
+ 
++/*
++ * close_range() is a 5.9 syscall; the trampoline that launched this stub has
++ * already enumerated and closed the descriptor table where it is missing, so
++ * the number is only needed to ask.
++ */
++#ifndef __NR_close_range
++#define __NR_close_range 436
++#endif
++
++/*
++ * SECCOMP_RET_KILL_PROCESS is a 4.14 action, so headers this old do not name
++ * it. Define the value rather than aliasing it to SECCOMP_RET_KILL, which is
++ * SECCOMP_RET_KILL_THREAD: that would let the build host's headers decide the
++ * filter's kill semantics on whatever kernel the result is run on. The value
++ * degrades correctly on its own -- a pre-4.14 kernel masks the action bits
++ * with SECCOMP_RET_ACTION (0x7fff0000) and lands on its own kill -- while a
++ * 4.14 or later kernel gets the process-wide kill that is meant.
++ */
++#ifndef SECCOMP_RET_KILL_PROCESS
++#define SECCOMP_RET_KILL_PROCESS 0x80000000U
++#endif
++
+ void _start(void);
+ 
+ noinline static void real_init(void)
+@@ -71,8 +94,36 @@ noinline static void real_init(void)
+ 	/* In SECCOMP mode, we only need the signalling FD from now on */
+ 	if (init_data.seccomp) {
+ 		res = stub_syscall3(__NR_close_range, 1, ~0U, 0);
+-		if (res != 0)
++		if (res == -ENOSYS) {
++			/*
++			 * Without close_range() the trampoline has already
++			 * enumerated the descriptor table and closed
++			 * everything but these, so closing them by number
++			 * finishes the job exactly rather than hopefully.
++			 *
++			 * Descriptor 0 is the signalling socket, so a mapping
++			 * descriptor claiming to be 0 means the trampoline's
++			 * relocation did not happen; refuse rather than close
++			 * the socket or leave physical memory mapped.
++			 */
++			if (init_data.stub_code_fd <= 0 ||
++			    init_data.stub_data_fd <= 0)
++				stub_syscall1(__NR_exit, 13);
++
++			res = stub_syscall1(__NR_close,
++					    init_data.stub_code_fd);
++			if (res != 0)
++				stub_syscall1(__NR_exit, 13);
++
++			if (init_data.stub_data_fd != init_data.stub_code_fd) {
++				res = stub_syscall1(__NR_close,
++						    init_data.stub_data_fd);
++				if (res != 0)
++					stub_syscall1(__NR_exit, 13);
++			}
++		} else if (res != 0) {
+ 			stub_syscall1(__NR_exit, 13);
++		}
+ 	}
+ 
+ 	/* setup signal stack inside stub data */

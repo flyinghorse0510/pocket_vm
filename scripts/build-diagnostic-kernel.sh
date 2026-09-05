@@ -21,7 +21,11 @@ BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 SOURCE_DIR="$BUILD_ROOT/src/$LINUX_SOURCE_NAME"
 FRAGMENT="$ROOT/config/kernel/x86_64-uml.fragment"
 DIAGNOSTIC_FRAGMENT="$ROOT/config/kernel/x86_64-uml-diagnostic.fragment"
-OUTPUT_DIR="$BUILD_ROOT/diagnostic-kernel"
+# Suffixed like every other kernel output. The source directory above already
+# follows the variant, so sharing one output directory would let a variant
+# build replace the default's diagnostic kernel with one built from different
+# source, under a name that says nothing about it.
+OUTPUT_DIR="$BUILD_ROOT/diagnostic-kernel$LINUX_OUTPUT_SUFFIX"
 JOBS=${POCKET_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
 for command in awk bc bison file flex g++ gcc getconf ld make mkdir python3 sha256sum; do
@@ -85,6 +89,7 @@ grep -Fq 'free_chan_irqs_locked' "$SOURCE_DIR/arch/um/drivers/chan_kern.c" || \
 
 {
     printf 'pocket-diagnostic-kernel-v1\n'
+    printf 'variant=%s\n' "${LINUX_VARIANT:-none}"
     printf 'source_tree_sha1=%s\n' "$LINUX_PATCHED_TREE"
     printf 'source_manifest_sha256=%s\n' "$LINUX_PATCHED_MANIFEST"
     printf 'patch_series_sha256=%s\n' "$LINUX_PATCH_SERIES_SHA256"

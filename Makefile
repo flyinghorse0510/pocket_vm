@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: instances image-adjust terminal-session container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
+.PHONY: host-clone-idcache-probe stub-fd-audit stub-fd-audit-el7 verify-el7 kernel-el7 audit-linux-source-el7 host-seccomp-probe instances image-adjust terminal-session container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
 
 host-tools:
 	cargo build --release -p pocket-guard
@@ -46,8 +46,51 @@ rust-release-e2e:
 kernel:
 	./scripts/build-linux.sh
 
+# EXPERIMENTAL. Builds the kernel with the el7 patch overlay, for hosts whose
+# kernel and C library predate what UML's seccomp backend assumes. Off unless
+# asked for by name: it publishes to its own source and output paths and does
+# not touch the default kernel. See docs/el7-host-support.md.
+kernel-el7:
+	POCKET_KERNEL_VARIANT=el7 ./scripts/build-linux.sh
+
 audit-linux-source:
 	./scripts/audit-linux-source.sh
+
+audit-linux-source-el7:
+	POCKET_KERNEL_VARIANT=el7 ./scripts/audit-linux-source.sh
+
+# Reports whether this host can actually run UML's seccomp backend: not only
+# which syscalls exist, but whether SIGSYS arrives with usable metadata and
+# whether register edits in the signal frame survive rt_sigreturn, which is
+# how UML returns a syscall result to its guest.
+host-seccomp-probe:
+	./scripts/run-host-seccomp-probe.sh
+
+# Reports whether this host's libc clone() corrupts the caller's cached pid and
+# tid, which is what breaks thread cancellation and IPI delivery on a glibc
+# older than 2.25. The experiment behind patch 0009, runnable on any host.
+host-clone-idcache-probe:
+	./scripts/run-host-clone-idcache-probe.sh
+
+# Proves the descriptor invariant the seccomp backend's safety rests on: hand
+# UML a crowded, sparse descriptor table and confirm the stub reaches guest
+# userspace holding only its signalling socket.
+# The two scenarios this kernel can pass. free-fd0 is deliberately not here:
+# starting UML with descriptor 0 already free crashes the release kernel, which
+# is an upstream defect the el7 variant's patch 0011 fixes, so that scenario
+# belongs to stub-fd-audit-el7. Adding it here would assert a fix this kernel
+# does not carry.
+stub-fd-audit:
+	POCKET_FD_AUDIT_SCENARIO=crowded ./scripts/run-stub-fd-audit.sh
+	POCKET_FD_AUDIT_SCENARIO=low-nofile ./scripts/run-stub-fd-audit.sh
+
+# EXPERIMENTAL. The same descriptor audit against the el7 kernel. Named
+# separately so the experimental kernel is never audited by accident, and so a
+# host that has both built can audit each one.
+stub-fd-audit-el7:
+	POCKET_KERNEL_VARIANT=el7 POCKET_FD_AUDIT_SCENARIO=crowded ./scripts/run-stub-fd-audit.sh
+	POCKET_KERNEL_VARIANT=el7 POCKET_FD_AUDIT_SCENARIO=free-fd0 ./scripts/run-stub-fd-audit.sh
+	POCKET_KERNEL_VARIANT=el7 POCKET_FD_AUDIT_SCENARIO=low-nofile ./scripts/run-stub-fd-audit.sh
 
 # Build the release source with the kernel's own lock/RCU/atomic-sleep
 # validators enabled. Never publishable; used to qualify, not to ship.
@@ -200,3 +243,11 @@ test:
 verify:
 	./scripts/verify-kernel-config.sh
 	./scripts/verify-artifacts.sh
+
+# EXPERIMENTAL. Verifies the el7 kernel's configuration against the variant's
+# own locked digests, so this neither substitutes for `verify` nor is
+# substituted by it. The probe initramfs is not a variant artifact; it is
+# checked here only when the host has one to check.
+verify-el7:
+	POCKET_KERNEL_VARIANT=el7 ./scripts/verify-kernel-config.sh
+	POCKET_KERNEL_VARIANT=el7 ./scripts/verify-artifacts.sh

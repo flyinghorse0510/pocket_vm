@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 
 source "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=scripts/linux-source-lib.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/linux-source-lib.sh"
 
 ROOT=$(project_root)
 BUILD_ROOT=${POCKET_BUILD_ROOT:-"$ROOT/build"}
 VERSION=${1:-24.04}
 BASE="$BUILD_ROOT/disks/ubuntu-$VERSION/base.ext4"
 INITRAMFS="$BUILD_ROOT/initramfs/workload-probe.cpio"
-KERNEL="$BUILD_ROOT/kernel/x86_64-smp-p4k/linux"
+KERNEL="$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_OUTPUT_SUFFIX/linux"
 GUARD=${POCKET_GUARD:-"$ROOT/target/release/pocket-guard"}
 CPUS=${POCKET_CPUS:-2}
 RUNTIME_ROOT=${POCKET_RUNTIME_ROOT:-"/tmp/pocket-vm-$(id -u)"}
