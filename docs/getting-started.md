@@ -771,8 +771,8 @@ pocket start tally
 That is the same instance continuing, the way `docker start` resumes a stopped
 container: it keeps its name, its creation time and the command it was given,
 and its writes accumulate. Resource flags from the original run are not
-replayed, so `start` takes `-t`, `--consoles`, `--boot-log` and `--timeout` of
-its own.
+replayed, so `start` takes `-t`, `--consoles`, `--no-boot-log` and `--timeout`
+of its own.
 
 Turn what a run produced into a new image with `commit`, the way
 `docker commit` does:
@@ -990,12 +990,12 @@ pocket run --console-log /tmp/guest.log alpine:3.22 -- /bin/true
 ```
 
 It is written on success and on failure alike, which is the case it exists
-for. To watch the boot happen instead of reading it afterwards -- the useful
-form when a guest never reaches a prompt -- use `--boot-log`, which mirrors the
-kernel console to stderr as it is produced and works alongside `-t`:
+for. You do not have to wait for it, though: every run mirrors the kernel
+console to stderr as it is produced, which is the form that helps when a guest
+never reaches a prompt. It works alongside `-t`.
 
 ```sh
-pocket run --boot-log alpine:3.22 -- /bin/true
+pocket run alpine:3.22 -- /bin/true
 ```
 
 ```
@@ -1003,7 +1003,11 @@ pocket run --boot-log alpine:3.22 -- /bin/true
 [    0.130000] EXT4-fs (ubda): unmounting filesystem ...
 [    0.130000] reboot: Power down
 ```
- Errors are machine-readable: `E_CLI_INVALID_INPUT` means your command
+
+Pass `--no-boot-log` when you want the workload's output on its own -- a script
+reading stderr, or a terminal you would rather keep clear.
+
+Errors are machine-readable: `E_CLI_INVALID_INPUT` means your command
 line, `E_STORE` the store, `E_IMAGE_BUILD` the conversion, `E_GUEST` the
 workload itself.
 

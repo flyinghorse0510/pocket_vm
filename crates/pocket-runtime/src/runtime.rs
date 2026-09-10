@@ -2169,6 +2169,10 @@ fn capture_teed<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream
     let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
     let mut total_bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
+    let mut mirrored = Vec::new();
+    // Carried across reads so a chunk that ends on a carriage return is not
+    // given a second one when the newline arrives in the next chunk.
+    let mut previous = 0_u8;
     loop {
         let count = match reader.read(&mut buffer) {
             Ok(0) => break,
@@ -2177,9 +2181,22 @@ fn capture_teed<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream
             Err(error) => return Err(error.to_string()),
         };
         if mirroring {
+            // The guest kernel ends its console lines with a bare newline and
+            // relies on the receiving terminal to supply the carriage return.
+            // A terminal in raw mode -- which is what a `-t` session makes of
+            // the operator's terminal -- no longer does, so every line would
+            // start where the previous one ended. Supply what the terminal
+            // would have.
+            let chunk = if translates_newlines(stderr.as_fd()) {
+                &buffer[..count]
+            } else {
+                mirrored.clear();
+                add_carriage_returns(&buffer[..count], previous, &mut mirrored);
+                mirrored.as_slice()
+            };
             let mut written = 0;
-            while written < count {
-                match nix::unistd::write(stderr.as_fd(), &buffer[written..count]) {
+            while written < chunk.len() {
+                match nix::unistd::write(stderr.as_fd(), &chunk[written..]) {
                     Ok(0) => {
                         mirroring = false;
                         break;
@@ -2192,6 +2209,7 @@ fn capture_teed<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream
                     }
                 }
             }
+            previous = buffer[count - 1];
         }
         total_bytes = total_bytes.saturating_add(count as u64);
         let remaining = maximum.saturating_sub(bytes.len());
@@ -2202,6 +2220,36 @@ fn capture_teed<R: Read>(mut reader: R, maximum: usize) -> Result<CapturedStream
         bytes,
         total_bytes,
     })
+}
+
+/// Whether this destination still turns a newline into a line break by itself.
+///
+/// True for a terminal whose output processing is on, and for anything that is
+/// not a terminal at all -- a file or a pipe wants the bytes unaltered, and the
+/// transcript written beside the mirror has to stay comparable to it.
+fn translates_newlines(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    use nix::sys::termios::OutputFlags;
+
+    match nix::sys::termios::tcgetattr(fd) {
+        Ok(attributes) => attributes
+            .output_flags
+            .contains(OutputFlags::OPOST | OutputFlags::ONLCR),
+        Err(_) => true,
+    }
+}
+
+/// Copy `chunk` into `out`, preceding every newline that does not already have
+/// one with a carriage return. `previous` is the byte before `chunk` began.
+fn add_carriage_returns(chunk: &[u8], previous: u8, out: &mut Vec<u8>) {
+    out.reserve(chunk.len() + chunk.len() / 32 + 1);
+    let mut last = previous;
+    for &byte in chunk {
+        if byte == b'\n' && last != b'\r' {
+            out.push(b'\r');
+        }
+        out.push(byte);
+        last = byte;
+    }
 }
 
 fn failure_diagnostics<const N: usize>(
@@ -2342,10 +2390,53 @@ mod tests {
     use std::io::Cursor;
 
     use super::{
-        CapturedStream, MAX_CAPTURE_BYTES, RuntimePolicy, capture, decode_mountinfo_path,
-        failure_diagnostics, resolve_cgroup_v2_path, scaling_qualified_from_observation,
-        scaling_qualified_in_chain, shutdown_grace_ms, validate_policy,
+        CapturedStream, MAX_CAPTURE_BYTES, RuntimePolicy, add_carriage_returns, capture,
+        decode_mountinfo_path, failure_diagnostics, resolve_cgroup_v2_path,
+        scaling_qualified_from_observation, scaling_qualified_in_chain, shutdown_grace_ms,
+        validate_policy,
     };
+
+    /// `add_carriage_returns` over a whole input, as a single chunk.
+    fn with_carriage_returns(input: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        add_carriage_returns(input, 0, &mut out);
+        out
+    }
+
+    #[test]
+    fn mirror_gives_every_bare_newline_a_carriage_return() {
+        assert_eq!(
+            with_carriage_returns(b"one\ntwo\n"),
+            b"one\r\ntwo\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn mirror_leaves_an_existing_carriage_return_alone() {
+        assert_eq!(
+            with_carriage_returns(b"one\r\ntwo\n"),
+            b"one\r\ntwo\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn mirror_carries_a_split_line_ending_across_chunks() {
+        // The guest wrote "a\r\n", but the read boundary fell between the two
+        // bytes. The newline must not collect a second carriage return.
+        let mut out = Vec::new();
+        add_carriage_returns(b"a\r", 0, &mut out);
+        let previous = *b"a\r".last().expect("chunk is not empty");
+        add_carriage_returns(b"\nb", previous, &mut out);
+        assert_eq!(out, b"a\r\nb".to_vec());
+    }
+
+    #[test]
+    fn mirror_passes_through_a_chunk_with_no_newline() {
+        assert_eq!(
+            with_carriage_returns(b"no line ending"),
+            b"no line ending".to_vec()
+        );
+    }
 
     #[test]
     fn capture_drains_but_bounds_retained_bytes() {

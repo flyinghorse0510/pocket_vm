@@ -45,7 +45,7 @@ pocket generation list --store STORE --derivation DERIVATION_KEY [--json]
 pocket ps [--runtime-root RUNTIME_ROOT] [--store STORE] [-a] [--json]
 
 pocket start [--profile-bundle BUNDLE] [--store STORE] \
-  [--runtime-root RUNTIME_ROOT] [-t] [--boot-log] [--consoles N] \
+  [--runtime-root RUNTIME_ROOT] [-t] [--no-boot-log] [--consoles N] \
   [--timeout DURATION] NAME
 
 pocket rm [--store STORE] NAME...
@@ -68,7 +68,7 @@ pocket run \
   [--hostname NAME] [--umask OCTAL] [--stop-signal SIGNAL] \
   [--volume HOST_DIR:GUEST_DIR[:ro]]... [--network slirp|none] [--privileged] \
   [--root-readonly] [-i] [-t] [--name NAME | --rm] \
-  [--boot-log] [--consoles N] [--console-log ABSENT_PATH] \
+  [--no-boot-log] [--consoles N] [--console-log ABSENT_PATH] \
   IMAGE_OR_GENERATION [-- ARG...]
 ```
 
@@ -359,31 +359,37 @@ it existed.
 
 ## Seeing the guest boot
 
-Neither the kernel console nor guest-init diagnostics reach your terminal by
-default: a run prints what the workload printed and nothing else. The console
+The kernel console is mirrored to stderr as a run boots, so a guest that never
+reaches its workload says so on the terminal it was started from. The console
 is a separate UML channel from the workload's streams, so the two never mix in
-either direction.
-
-Two ways to see it:
+either direction: the mirror is on stderr, and the workload's own output is
+untouched.
 
 ```sh
-pocket run --boot-log alpine:3.22 -- /bin/true            # live, on stderr
+pocket run alpine:3.22 -- /bin/true                       # mirrored, on stderr
+pocket run --no-boot-log alpine:3.22 -- /bin/true         # workload output only
 pocket run --console-log /tmp/boot.log alpine:3.22 -- /bin/true   # to a file
 ```
 
 `--console-log` writes the transcript on success and on failure alike, but only
 once the run is over, which is no help when the question is why a guest never
-reached a prompt. `--boot-log` mirrors the console as it is produced, and
-composes with `-t`: the session rides its own channel, so a boot log cannot
-scribble over a full-screen program.
+reached a prompt. The mirror shows the console as it is produced, and composes
+with `-t`: the session rides its own channel, so a boot log cannot scribble over
+a full-screen program.
 
-Both ask the kernel for its full log rather than the `quiet` subset a run
-otherwise boots with, because a transcript filtered to errors hides the lockdep
-and RCU reports someone keeping one is looking for. `--boot-log` mirrors rather
-than redirects, so asking for it never truncates the captured transcript.
+The guest kernel ends its console lines with a bare newline and leaves the
+carriage return to the receiving terminal. A terminal in raw mode -- which is
+what `-t` makes of yours -- no longer supplies one, so the mirror supplies it
+instead, and the log reads as lines rather than a staircase. A mirror going to
+a file or a pipe is left byte-for-byte as the guest wrote it.
 
-A failed run already reports a bounded console excerpt in its error without
-either flag.
+Mirroring asks the kernel for its full log rather than the `quiet` subset,
+because a transcript filtered to errors hides the lockdep and RCU reports
+someone keeping one is looking for; `--no-boot-log` asks for `quiet` again.
+`--console-log` asks for the full log too. The mirror never redirects, so it
+cannot truncate the captured transcript.
+
+A failed run reports a bounded console excerpt in its error regardless.
 
 ## Kept runs
 
@@ -433,7 +439,7 @@ because joining is lossy -- an argument containing a space cannot be recovered
 from it. What the record does *not* keep is the rest of the original command
 line: `--cpus`, `--memory`, `--user`, `--volume` and the rest are not replayed,
 because the record exists to say what the instance is, not to be a second copy
-of the image configuration. `start` takes `-t`, `--consoles`, `--boot-log` and
+of the image configuration. `start` takes `-t`, `--consoles`, `--no-boot-log` and
 `--timeout` of its own.
 
 Resuming rewrites the overlay, so its digest changes and the root that named

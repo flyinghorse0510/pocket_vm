@@ -138,9 +138,14 @@ enum Command {
         /// Give the resumed run a terminal, as `run -t` does.
         #[arg(short = 't', long)]
         tty: bool,
-        /// Mirror the guest kernel console to stderr while it boots.
-        #[arg(long)]
+        /// Mirror the guest kernel console to stderr while it boots. On by
+        /// default.
+        #[arg(long, overrides_with = "no_boot_log")]
         boot_log: bool,
+        /// Keep the guest kernel console off stderr. It is still written to
+        /// the run's console log.
+        #[arg(long, overrides_with = "boot_log")]
+        no_boot_log: bool,
         /// Extra guest serial lines, each with a login shell.
         #[arg(long, default_value = "0")]
         consoles: u8,
@@ -479,10 +484,14 @@ struct RunArgs {
     /// workload.
     #[arg(long, default_value = "0")]
     consoles: u8,
-    /// Mirror the guest kernel console to stderr while the run boots, instead
-    /// of only writing it to a file afterwards.
-    #[arg(long)]
+    /// Mirror the guest kernel console to stderr while the run boots. On by
+    /// default.
+    #[arg(long, overrides_with = "no_boot_log")]
     boot_log: bool,
+    /// Keep the guest kernel console off stderr, so only the workload's own
+    /// output reaches it. The run still writes the console log afterwards.
+    #[arg(long, overrides_with = "boot_log")]
+    no_boot_log: bool,
     /// Name this run so it can be listed, committed and removed after it
     /// exits. Defaults to a generated name.
     #[arg(long)]
@@ -925,6 +934,7 @@ fn execute(
             name,
             tty,
             boot_log,
+            no_boot_log,
             consoles,
             timeout,
         } => execute_start(
@@ -933,7 +943,7 @@ fn execute(
             &name,
             StartOptions {
                 tty,
-                boot_log,
+                boot_log: mirror_boot_log(boot_log, no_boot_log),
                 consoles,
                 timeout,
             },
@@ -1742,6 +1752,15 @@ fn execute_commit(
     Ok(CommandStatus::SUCCESS)
 }
 
+/// Whether to mirror the guest kernel console while a run boots.
+///
+/// Mirroring is what an operator watching a boot wants, so it is the default.
+/// `--boot-log` asks for it explicitly and `--no-boot-log` declines it; clap
+/// has already settled which of the two was given last.
+fn mirror_boot_log(requested: bool, declined: bool) -> bool {
+    requested || !declined
+}
+
 /// What a resume may set beyond the instance's own record.
 struct StartOptions {
     tty: bool,
@@ -2103,7 +2122,7 @@ fn execute_run(
         },
         stdin: input,
         retain: retain.clone(),
-        boot_log: arguments.boot_log,
+        boot_log: mirror_boot_log(arguments.boot_log, arguments.no_boot_log),
         extra_consoles: arguments.consoles,
         terminal: terminal.as_ref().map(|session| session.request),
         console_log,
