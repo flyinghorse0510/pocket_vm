@@ -501,8 +501,8 @@ honour a request you are told, rather than quietly given less.
 pocket run --cpus 4 --memory 2G IMAGE -- /usr/bin/nproc
 ```
 
-`--cpus` defaults to `1` and accepts up to the profile's maximum (16 in the
-shipped profile). If the host's CPU affinity or cgroup-v2 `cpu.max` cannot
+`--cpus` defaults to `1` and accepts up to the profile's maximum (64 in the
+shipped profile, which is UML's own compiled ceiling). If the host's CPU affinity or cgroup-v2 `cpu.max` cannot
 actually deliver that many in parallel, the run still proceeds and prints a
 note on stderr saying the guest will be oversubscribed.
 

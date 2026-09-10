@@ -16,7 +16,10 @@ RUNTIME_ROOT=${POCKET_RUNTIME_ROOT:-"/tmp/pocket-vm-$(id -u)"}
 
 [[ -f "$BASE" && -f "$INITRAMFS" && -x "$KERNEL" ]] || die "build OCI rootfs and workload initramfs first"
 [[ -x "$GUARD" ]] || die "process guard is missing: $GUARD (run: cargo build --release -p pocket-guard)"
-if [[ ! "$CPUS" =~ ^[1-9][0-9]*$ ]] || (( CPUS > 16 )); then
+# Read the ceiling rather than repeating it: a second copy is a second thing to
+# forget when the profile's compiled maximum moves.
+MAX_CPUS=$(pocket_lock_value profile effective_max_cpus)
+if [[ ! "$CPUS" =~ ^[1-9][0-9]*$ ]] || (( CPUS > MAX_CPUS )); then
     die "invalid CPU count"
 fi
 safe_managed_root "$BUILD_ROOT"

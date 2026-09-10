@@ -121,10 +121,12 @@ fn run_after_hello(
                 "expected helper identities differ from measured BUILD_HELLO evidence",
             ));
         }
-        if start.expected_physmem_bytes != first_observation.accepted_physmem_bytes {
+        // A floor, not an equality; see `observe_guest` for why UML can
+        // accept more than was asked for.
+        if start.expected_physmem_bytes > first_observation.accepted_physmem_bytes {
             return Err(BuilderError::contract(
                 "start-contract",
-                "expected physical memory differs from measured BUILD_HELLO evidence",
+                "expected physical memory exceeds measured BUILD_HELLO evidence",
             ));
         }
     }
@@ -205,9 +207,10 @@ fn verify_start(
     tools: &[ToolIdentity],
     start: &pocket_protocol::BuilderStart,
 ) -> Result<(), BuilderError> {
+    // Physical memory is a floor, not an equality; see `observe_guest`.
     if observation.online_cpus != 1
-        || observation.accepted_physmem_bytes != config.expected_physmem_bytes
-        || start.expected_physmem_bytes != observation.accepted_physmem_bytes
+        || observation.accepted_physmem_bytes < config.expected_physmem_bytes
+        || start.expected_physmem_bytes > observation.accepted_physmem_bytes
     {
         return Err(BuilderError::contract(
             "start-contract",
@@ -351,13 +354,19 @@ fn observe_guest(config: &BuilderConfig) -> Result<BuilderObservation, BuilderEr
             "/proc/uml_physmem_bytes is not an unsigned byte count",
         )
     })?;
-    if accepted_physmem_bytes != config.expected_physmem_bytes
+    // UML honours `mem=` as a floor, not an exact figure: `um_arch.c` adds the
+    // gap between the kernel image and its initial program break to
+    // `physmem_size` when that gap exceeds a megabyte, and the gap grows with
+    // `CONFIG_NR_CPUS`. The hazard this guards is the opposite one -- UML
+    // silently *shrinking* an oversized request to fit its address space --
+    // so require at least what was asked for rather than exactly it.
+    if accepted_physmem_bytes < config.expected_physmem_bytes
         || !accepted_physmem_bytes.is_multiple_of(u64::from(page_size))
     {
         return Err(BuilderError::contract(
             "observe-guest",
             format!(
-                "UML accepted {accepted_physmem_bytes} bytes; boot contract requires {}",
+                "UML accepted {accepted_physmem_bytes} bytes; boot contract requires at least {}",
                 config.expected_physmem_bytes
             ),
         ));
@@ -623,16 +632,38 @@ mod tests {
         let (_input, start) = fixture();
         assert!(verify_start(&config(), &observation(), &start.expected_tools, &start).is_ok());
 
-        let mut wrong_memory: BuilderStart = start.clone();
-        wrong_memory.expected_physmem_bytes = 512 * 1024 * 1024;
+        // Memory is a floor. UML can accept more than was asked for -- it adds
+        // its kernel-image-to-brk gap to `physmem_size` -- so a START asking
+        // for less than the guest measured is satisfied, and only one asking
+        // for more than the guest has is a contract violation.
+        let mut less_than_measured: BuilderStart = start.clone();
+        less_than_measured.expected_physmem_bytes = 512 * 1024 * 1024;
         assert!(
             verify_start(
                 &config(),
                 &observation(),
-                &wrong_memory.expected_tools,
-                &wrong_memory,
+                &less_than_measured.expected_tools,
+                &less_than_measured,
+            )
+            .is_ok()
+        );
+
+        let mut more_than_measured: BuilderStart = start.clone();
+        more_than_measured.expected_physmem_bytes = 1024 * 1024 * 1024;
+        assert!(
+            verify_start(
+                &config(),
+                &observation(),
+                &more_than_measured.expected_tools,
+                &more_than_measured,
             )
             .is_err()
         );
+
+        // The guest measuring less than its own boot contract demands is the
+        // failure the floor exists to catch.
+        let mut shrunk = observation();
+        shrunk.accepted_physmem_bytes = 512 * 1024 * 1024;
+        assert!(verify_start(&config(), &shrunk, &start.expected_tools, &start).is_err());
     }
 }

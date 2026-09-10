@@ -302,11 +302,17 @@ pub(crate) fn verify_hello(
         &hello.guest_capability_policy,
     )?;
     cpus.verify_online(hello.online_cpus)?;
-    compare(
-        "accepted_physmem_bytes",
-        &memory.bytes().to_string(),
-        &hello.accepted_physmem_bytes.to_string(),
-    )?;
+    // A floor, not an equality: UML adds its kernel-image-to-brk gap to
+    // `physmem_size` when that gap exceeds a megabyte, and the gap grows with
+    // `CONFIG_NR_CPUS`. What must never happen is UML handing back *less* than
+    // was requested, which is what it does when a request will not fit.
+    if hello.accepted_physmem_bytes < memory.bytes() {
+        return Err(RuntimeError::HelloMismatch {
+            field: "accepted_physmem_bytes",
+            expected: format!("at least {}", memory.bytes()),
+            actual: hello.accepted_physmem_bytes.to_string(),
+        });
+    }
     for required in &manifest.hello.required_features {
         if !hello.features.iter().any(|feature| feature == required) {
             return Err(RuntimeError::HelloMismatch {

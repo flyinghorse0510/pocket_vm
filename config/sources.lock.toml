@@ -37,6 +37,12 @@ source_date_epoch = 1786940622
 # were produced on the reference host recorded below; a different compiler or
 # linker changes the bytes and fails the build closed rather than silently
 # shipping something else.
+#
+# STALE: the two digests below still describe a CONFIG_NR_CPUS=16 kernel. Both
+# variants read config/kernel/x86_64-uml.fragment, which now sets 64, so an
+# el7 rebuild produces different bytes and reports the difference. They can
+# only be regenerated on the validated host with the reference compiler below,
+# which is why they were not refreshed alongside the default build's.
 [linux.variant.el7]
 description = "CentOS 7 / EL7-vintage hosts: kernels without close_range or execveat, and glibc 2.17"
 patch_series_sha256 = "63cf3db6743afdce3b002ab15b277e9bf98ac56d49a8cf35ffadc9ea7c5d1bce"
@@ -135,9 +141,9 @@ oci_os = "linux"
 oci_architecture = "amd64"
 guest_page_size = 4096
 smp_enabled = true
-compiled_nr_cpus = 16
-product_max_cpus = 16
-effective_max_cpus = 16
+compiled_nr_cpus = 64
+product_max_cpus = 64
+effective_max_cpus = 64
 minimum_memory_bytes = 67108864
 default_memory_bytes = 268435456
 product_max_memory_bytes = 4294967296
@@ -164,8 +170,8 @@ umoci = "0.4.7"
 e2fsprogs = "1.47.2"
 
 [development_artifacts]
-linux_uml_sha256 = "f773d279ec37ea812489961fd18c73bd57b4757eab8557a7083f9e352ed48874"
-linux_uml_config_sha256 = "d553b9b22ed7272d23ee01c078ae54e5e46fb15d991b8ef2f9eca4eb95a48aad"
+linux_uml_sha256 = "08a9895825c6b8c90cea933683650985a72257ad184b01803b861447c1327c11"
+linux_uml_config_sha256 = "037c3b8f6234c08231a90b6a8cbecea90427867ca65cae835339db26b69d660e"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

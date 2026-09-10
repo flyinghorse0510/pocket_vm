@@ -12,9 +12,9 @@
   "guest_page_size": 4096,
   "cpu": {
     "smp_enabled": true,
-    "product_max_cpus": 16,
-    "compiled_nr_cpus": 16,
-    "effective_max_cpus": 16
+    "product_max_cpus": 64,
+    "compiled_nr_cpus": 64,
+    "effective_max_cpus": 64
   },
   "memory": {
     "minimum_bytes": 67108864,

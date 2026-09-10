@@ -158,10 +158,16 @@ impl BuilderSession {
                 if observed != &start.expected_tools {
                     return invalid("expected_tools", "does not equal BUILD_HELLO tool evidence");
                 }
-                if self.accepted_physmem_bytes != Some(start.expected_physmem_bytes) {
+                // The START expectation is a floor, not an equality: UML adds its
+                // kernel-image-to-brk gap to `physmem_size` when that gap
+                // exceeds a megabyte, and the gap grows with CONFIG_NR_CPUS.
+                // Less than was asked for is the failure worth refusing.
+                if !matches!(self.accepted_physmem_bytes,
+                    Some(accepted) if accepted >= start.expected_physmem_bytes)
+                {
                     return invalid(
                         "expected_physmem_bytes",
-                        "does not equal BUILD_HELLO accepted physical memory",
+                        "exceeds BUILD_HELLO accepted physical memory",
                     );
                 }
                 self.expected_tools = Some(start.expected_tools.clone());

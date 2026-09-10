@@ -158,9 +158,11 @@ fn verify_start(
     start
         .validate()
         .map_err(|error| ValidatorError::protocol("start-contract", error))?;
+    // Accepted physical memory is a floor, not an exact figure; see
+    // `observe_guest` below for why.
     if observation.online_cpus != 1
-        || observation.accepted_physmem_bytes != config.expected_physmem_bytes
-        || start.expected_physmem_bytes != observation.accepted_physmem_bytes
+        || observation.accepted_physmem_bytes < config.expected_physmem_bytes
+        || start.expected_physmem_bytes > observation.accepted_physmem_bytes
     {
         return Err(ValidatorError::contract(
             "start-contract",
@@ -501,12 +503,18 @@ fn observe_guest(config: &ValidatorConfig) -> Result<ValidatorObservation, Valid
             "/proc/uml_physmem_bytes is not an unsigned byte count",
         )
     })?;
-    if accepted_physmem_bytes != config.expected_physmem_bytes
+    // UML honours `mem=` as a floor, not an exact figure: `um_arch.c` adds the
+    // gap between the kernel image and its initial program break to
+    // `physmem_size` when that gap exceeds a megabyte, and the gap grows with
+    // `CONFIG_NR_CPUS`. The hazard this guards is the opposite one -- UML
+    // silently *shrinking* an oversized request to fit its address space --
+    // so require at least what was asked for rather than exactly it.
+    if accepted_physmem_bytes < config.expected_physmem_bytes
         || !accepted_physmem_bytes.is_multiple_of(u64::from(page_size))
     {
         return Err(ValidatorError::contract(
             "observe-guest",
-            "UML accepted memory differs from validation boot contract",
+            "UML accepted less memory than the validation boot contract requires",
         ));
     }
     Ok(ValidatorObservation {

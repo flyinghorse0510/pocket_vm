@@ -299,7 +299,11 @@ fn observe_guest(config: &GuestConfig) -> Result<GuestObservation, InitError> {
             "accepted UML physical memory is zero or not guest-page aligned",
         ));
     }
-    if accepted_physmem_bytes != config.expected_memory_bytes {
+    // UML honours `mem=` as a floor: `um_arch.c` adds the gap between the
+    // kernel image and its initial program break to `physmem_size` when that
+    // gap exceeds a megabyte, and the gap grows with CONFIG_NR_CPUS. The
+    // hazard here is UML silently shrinking a request it cannot fit.
+    if accepted_physmem_bytes < config.expected_memory_bytes {
         return Err(InitError::contract(
             "observe-guest",
             format!(

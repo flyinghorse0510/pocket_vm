@@ -17,8 +17,8 @@ remain open, and packaging success cannot override any of them.
 | Guest architecture | x86_64 UML (EM_X86_64 host executables) | Implemented profile only |
 | Hosts below the kernel floor | Optional `el7` kernel variant, off unless selected by name | Experimental, and narrower than the row above: the kernel is built by `make kernel-el7` and boots a guest to userspace under `seccomp=on` on CentOS Linux 7.9.2009 / 3.10.0-1160.119.1.el7 / glibc 2.17. `pocket image pull`, `pocket run` and the release e2e lane were exercised there against a bundle carrying that kernel. The kernel is built on the EL7 host; the bundle's other artifacts are static host binaries locked to a newer compiler than EL7 has, so they are built on a current host and the two are sealed together. The variant publishes to its own source and output paths and leaves the default build's bytes unchanged. See [EL7 host support](el7-host-support.md) |
 | OCI platform | linux/amd64, subject to the profile's accepted variants | Experimental |
-| CPU count | SMP range is 1 through the sealed profile's effective maximum (currently 16) | Qualified on this host by `make lifecycle-soak`: 100 consecutive fresh full-lifecycle launches at each of 1, 2, 4, 12, and 16 vCPUs, plus five eight-way concurrent waves, with no failure and no leaked runtime directory; `make smp-scaling` measured between 3.48x and 3.86x for four separate guest processes at four vCPUs across runs, varying with host load |
-| Guest memory | Profile minimum through effective maximum, aligned to 4096 bytes | Exact accepted physical memory observed at 64 MiB, 256 MiB, and 4 GiB through the full workload lifecycle; installed-package matrix remains a gate |
+| CPU count | SMP range is 1 through the sealed profile's effective maximum (currently 64, which is the range end `arch/um/Kconfig` permits) | Soak evidence covers 1 through 16 only. `make lifecycle-soak` ran 100 consecutive fresh full-lifecycle launches at each of 1, 2, 4, 12, and 16 vCPUs, plus five eight-way concurrent waves, with no failure and no leaked runtime directory; `make smp-scaling` measured between 3.48x and 3.86x for four separate guest processes at four vCPUs across runs, varying with host load. Counts above 16 are compiled and accepted but unqualified: the reference host has 12 logical CPUs and cannot produce the evidence. See the open gate below |
+| Guest memory | Profile minimum through effective maximum, aligned to 4096 bytes | Accepted physical memory observed at 64 MiB, 256 MiB, and 4 GiB through the full workload lifecycle. The guest asserts a floor, not an equality: `arch/um/kernel/um_arch.c` adds the gap between the kernel image and its initial program break to `physmem_size` once that gap exceeds a megabyte, and the gap widens with `CONFIG_NR_CPUS`, so UML can accept slightly more than was asked for. Accepting *less* -- what UML does when a request will not fit its address space -- is still refused. Installed-package matrix remains a gate |
 | Networking | Outbound NAT by default over an unprivileged userspace stack; `--network none` opts out | Implemented; inbound port forwarding is not |
 | Interactive terminal | `-t` allocates a guest PTY, holds the host terminal raw, and streams both directions with window-size forwarding | Implemented; `make terminal-session` asserts `isatty`, the startup and resized window sizes, a resolvable `ttyname`, `TERM`, an interrupt reaching the guest's line discipline, the workload's exit status, and the refusal when either descriptor is not a terminal |
 | Kept runs | A run is retained when it exits under a name, listed by `ps -a`, resumed by `start`, removed by `rm`; `--rm` opts out; `commit` publishes a kept run as a new image | Implemented; the retained overlay roots its generation against `cache gc`. A committed image carries a commit record instead of the source's build evidence, which described a different filesystem, and its account database is derived from the merged filesystem so accounts a run created resolve by name. `make instances` asserts that resuming continues the kept overlay rather than starting a fresh one over the same base |
@@ -41,6 +41,13 @@ Every item below must have retained, revision-bound evidence before changing
 the profile/package maturity or publishing a release. A packaging test alone
 does not satisfy any UML execution gate.
 
+- [ ] Qualify the CPU range above 16. The compiled ceiling was raised from 16
+  to 64 -- UML's `NR_CPUS_RANGE_END` -- so the profile now accepts counts that
+  no soak has exercised. The 12-logical-CPU reference host cannot close this:
+  it needs `make lifecycle-soak` at 32 and 64 vCPUs on a host with at least
+  that many cores, plus `make smp-scaling` there, before any release claims a
+  maximum above 16. Until then the accepted range exceeds the evidence, which
+  is why this profile stays experimental.
 - [x] Complete the Phase 0-x86-SMP corrective gate. The defect was isolated to
   `arch/um/drivers/chan_kern.c` draining its deferred channel-IRQ list from the
   SIGIO signal handler, where the generic `free_irq()` sleeps on a
@@ -56,11 +63,12 @@ does not satisfy any UML execution gate.
   `CONFIG_DEBUG_SPINLOCK`, and `CONFIG_DEBUG_MUTEXES`, runs the import,
   validation, and workload lifecycles against it, and fails on any guest
   console report; it reported none. That lane differs from the release
-  configuration in exactly two ways, both printed when it runs and both caused
-  by the kernel being a debug build: the diagnostic Kconfig fragment is merged,
-  and the guest's exact accepted-physical-memory assertion is relaxed to a
-  lower bound because a larger kernel image widens UML's own exec-shield gap
-  adjustment.
+  configuration in exactly one way, printed when it runs: the diagnostic
+  Kconfig fragment is merged. It used to carry a second delta, rewriting the
+  guest's accepted-physical-memory equality into a lower bound because a larger
+  kernel image widens UML's own exec-shield gap adjustment; raising
+  `CONFIG_NR_CPUS` to 64 put the release kernel over the same threshold, so the
+  lower bound is now what every lane asserts and the rewrite was deleted.
 
   That result only became meaningful in this revision. `--console-log` set the
   guest loglevel but never passed its path to the runtime, so it wrote no file,

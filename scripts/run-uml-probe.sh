@@ -20,7 +20,10 @@ RUNTIME_ROOT=${POCKET_RUNTIME_ROOT:-"/tmp/pocket-vm-$(id -u)"}
 [[ -f "$INITRAMFS" ]] || die "probe initramfs is missing: $INITRAMFS"
 [[ -f "$DISK" ]] || die "probe ext4 disk is missing: $DISK"
 [[ "$CPUS" =~ ^[1-9][0-9]*$ ]] || die "CPU count must be a positive integer"
-(( CPUS <= 16 )) || die "CPU count exceeds profile maximum 16"
+# Read the ceiling rather than repeating it: a second copy is a second thing to
+# forget when the profile's compiled maximum moves.
+MAX_CPUS=$(pocket_lock_value profile effective_max_cpus)
+(( CPUS <= MAX_CPUS )) || die "CPU count exceeds profile maximum $MAX_CPUS"
 if [[ "$MEMORY" =~ ^([1-9][0-9]*)([KMG])$ ]]; then
     MEMORY_NUMBER=${BASH_REMATCH[1]}
     case ${BASH_REMATCH[2]} in

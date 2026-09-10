@@ -35,20 +35,20 @@ safe_managed_root "$BUILD_ROOT"
     die "release build root is incomplete; run: make release-artifacts"
 
 # The lane needs its own source copy because it deliberately differs from the
-# release configuration. Exactly two differences are applied, both printed
-# below, and both are consequences of the kernel being a debug build:
+# release configuration. Exactly one difference is applied, and it is printed
+# below: the diagnostic Kconfig fragment is merged into the profile fragment.
 #
-#  1. the diagnostic Kconfig fragment is merged into the profile fragment;
-#  2. the guest's exact accepted-physical-memory assertion is relaxed to a
-#     lower bound, because a larger kernel image widens UML's own exec-shield
-#     gap adjustment in arch/um/kernel/um_arch.c and the accepted size then
-#     legitimately exceeds the request.
+# This lane used to carry a second delta, rewriting the guest's accepted
+# physical-memory assertion from an equality to a lower bound, because a larger
+# kernel image widens UML's exec-shield gap adjustment in
+# arch/um/kernel/um_arch.c and the accepted size then legitimately exceeds the
+# request. The release build hit exactly that when CONFIG_NR_CPUS was raised to
+# 64, so the lower bound is now what every lane asserts and the rewrite is gone.
 #
 # Nothing else is changed: same patch series, same guest init, same protocol,
 # same runtime, same workload.
 printf 'diagnostic lane deltas versus the release configuration:\n'
 printf '  1. merges config/kernel/x86_64-uml-diagnostic.fragment\n'
-printf '  2. relaxes the guest accepted-physmem equality to >= for the debug kernel\n'
 
 # Sealed bundles and published generations are deliberately read-only, so make
 # the previous lane's tree writable before replacing it.
@@ -66,102 +66,6 @@ tar -C "$ROOT" \
 cat "$ROOT/config/kernel/x86_64-uml-diagnostic.fragment" \
     >> "$TREE/config/kernel/x86_64-uml.fragment"
 
-python3 - "$TREE" <<'PYTHON'
-import pathlib
-import sys
-
-tree = pathlib.Path(sys.argv[1])
-substitutions = [
-    (
-        "observation.accepted_physmem_bytes != config.expected_memory_bytes",
-        "observation.accepted_physmem_bytes < config.expected_memory_bytes",
-    ),
-    (
-        "accepted_physmem_bytes != config.expected_memory_bytes",
-        "accepted_physmem_bytes < config.expected_memory_bytes",
-    ),
-    (
-        "observation.accepted_physmem_bytes != config.expected_physmem_bytes",
-        "observation.accepted_physmem_bytes < config.expected_physmem_bytes",
-    ),
-    (
-        "accepted_physmem_bytes != config.expected_physmem_bytes",
-        "accepted_physmem_bytes < config.expected_physmem_bytes",
-    ),
-    (
-        "start.expected_physmem_bytes != first_observation.accepted_physmem_bytes",
-        "first_observation.accepted_physmem_bytes < start.expected_physmem_bytes",
-    ),
-    (
-        "self.accepted_physmem_bytes != Some(start.expected_physmem_bytes)",
-        "self.accepted_physmem_bytes.is_none_or(|value| value < start.expected_physmem_bytes)",
-    ),
-    (
-        "start.expected_physmem_bytes != observation.accepted_physmem_bytes",
-        "observation.accepted_physmem_bytes < start.expected_physmem_bytes",
-    ),
-    (
-        "start.expected_physmem_bytes != evidence.accepted_physmem_bytes",
-        "evidence.accepted_physmem_bytes < start.expected_physmem_bytes",
-    ),
-]
-changed = 0
-for path in sorted((tree / "crates").rglob("*.rs")):
-    text = original = path.read_text()
-    for before, after in substitutions:
-        text = text.replace(before, after)
-    if text != original:
-        path.write_text(text)
-        changed += 1
-
-launch = tree / "crates/pocket-runtime/src/launch.rs"
-text = launch.read_text()
-marker = '"accepted_physmem_bytes"'
-guard = """        if field.ends_with("accepted_physmem_bytes") && actual < expected {"""
-builder = tree / "crates/pocket-runtime/src/builder.rs"
-text = builder.read_text()
-old = """        if expected != actual {"""
-new = """        if (field.ends_with("accepted_physmem_bytes") && actual < expected)
-            || (!field.ends_with("accepted_physmem_bytes") && expected != actual)
-        {"""
-count = text.count(old)
-text = text.replace(old, new)
-builder.write_text(text)
-
-protocol = tree / "crates/pocket-runtime/src/protocol.rs"
-text = protocol.read_text()
-old = """    compare(
-        "accepted_physmem_bytes",
-        &memory.bytes().to_string(),
-        &hello.accepted_physmem_bytes.to_string(),
-    )?;"""
-new = """    if hello.accepted_physmem_bytes < memory.bytes() {
-        return Err(RuntimeError::HelloMismatch {
-            field: "accepted_physmem_bytes",
-            expected: memory.bytes().to_string(),
-            actual: hello.accepted_physmem_bytes.to_string(),
-        });
-    }"""
-assert old in text, "host accepted-physmem comparison not found"
-protocol.write_text(text.replace(old, new, 1))
-residual = []
-for path in sorted((tree / "crates").rglob("*.rs")):
-    for number, line in enumerate(path.read_text().splitlines(), 1):
-        if (
-            "accepted_physmem_bytes" in line
-            and "!=" in line
-            and "#[" not in line
-            # The tabular comparison below is rewritten in place and keeps a
-            # `!=` for every field that is not the memory size.
-            and "!field.ends_with" not in line
-        ):
-            residual.append(f"{path.relative_to(tree)}:{number}: {line.strip()}")
-if residual:
-    raise SystemExit(
-        "unrelaxed accepted-physmem equality remains:\n  " + "\n  ".join(residual)
-    )
-print(f"relaxed accepted-physmem assertions in {changed + 2} files, {count} tabular sites")
-PYTHON
 
 # Share the authenticated inputs rather than re-downloading them.
 for shared in downloads tools cache oci; do

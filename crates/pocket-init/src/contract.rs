@@ -60,11 +60,17 @@ pub fn verify_start(
             ),
         ));
     }
-    if observation.accepted_physmem_bytes != config.expected_memory_bytes {
+    // UML honours `mem=` as a floor, not an exact figure: `um_arch.c` adds the
+    // gap between the kernel image and its initial program break to
+    // `physmem_size` when that gap exceeds a megabyte, and the gap grows with
+    // `CONFIG_NR_CPUS`. The hazard this guards is the opposite one -- UML
+    // silently *shrinking* an oversized request to fit its address space --
+    // so require at least what was asked for rather than exactly it.
+    if observation.accepted_physmem_bytes < config.expected_memory_bytes {
         return Err(InitError::contract(
             "start-contract",
             format!(
-                "UML accepted {} physical-memory bytes but boot contract requires {}",
+                "UML accepted {} physical-memory bytes but boot contract requires at least {}",
                 observation.accepted_physmem_bytes, config.expected_memory_bytes
             ),
         ));

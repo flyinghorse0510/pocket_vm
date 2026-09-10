@@ -305,6 +305,14 @@ the default build's are bound to its own. A different compiler or linker
 produces different bytes and fails the build closed rather than shipping
 something unverified.
 
+Those digests are currently stale. Both kernels read the same
+`config/kernel/x86_64-uml.fragment`, whose `CONFIG_NR_CPUS` was raised from 16
+to 64, so the recorded bytes describe a kernel this fragment no longer builds.
+Rebuilding the variant reports the difference rather than failing, but the
+recorded digests cannot be refreshed anywhere except the validated host with
+the reference compiler -- so `make kernel-el7` and `make verify-el7` stay open
+until someone regenerates them there.
+
 Two diagnostic targets cannot be built on the validated host. `make probe`
 needs busybox and `make smp-scaling` needs `musl-gcc` to build the initramfs
 each one boots, and neither tool is present on EL7, in the reference toolchain,

@@ -3717,11 +3717,6 @@ fn verify_builder_hello(
             u64::from(hello.guest_page_size),
         ),
         ("online_cpus", 1, u64::from(hello.online_cpus)),
-        (
-            "accepted_physmem_bytes",
-            manifest.memory.builder_memory_bytes,
-            hello.accepted_physmem_bytes,
-        ),
     ] {
         if expected != actual {
             return Err(HostBuildError::HelloMismatch {
@@ -3730,6 +3725,17 @@ fn verify_builder_hello(
                 actual: actual.to_string(),
             });
         }
+    }
+    // Accepted physical memory is a floor, not an equality: UML adds its
+    // kernel-image-to-brk gap to `physmem_size` when that gap exceeds a
+    // megabyte, and the gap grows with `CONFIG_NR_CPUS`. Handing back *less*
+    // than was asked for is the failure this catches.
+    if hello.accepted_physmem_bytes < manifest.memory.builder_memory_bytes {
+        return Err(HostBuildError::HelloMismatch {
+            field: "accepted_physmem_bytes",
+            expected: format!("at least {}", manifest.memory.builder_memory_bytes),
+            actual: hello.accepted_physmem_bytes.to_string(),
+        });
     }
     let expected_tools: Vec<ToolIdentity> = manifest
         .builder
@@ -3812,11 +3818,6 @@ fn verify_validator_hello(
             u64::from(hello.guest_page_size),
         ),
         ("validator.online_cpus", 1, u64::from(hello.online_cpus)),
-        (
-            "validator.accepted_physmem_bytes",
-            manifest.memory.validator_memory_bytes,
-            hello.accepted_physmem_bytes,
-        ),
     ] {
         if expected != actual {
             return Err(HostBuildError::HelloMismatch {
@@ -3825,6 +3826,17 @@ fn verify_validator_hello(
                 actual: actual.to_string(),
             });
         }
+    }
+    // Accepted physical memory is a floor, not an equality: UML adds its
+    // kernel-image-to-brk gap to `physmem_size` when that gap exceeds a
+    // megabyte, and the gap grows with `CONFIG_NR_CPUS`. Handing back *less*
+    // than was asked for is the failure this catches.
+    if hello.accepted_physmem_bytes < manifest.memory.validator_memory_bytes {
+        return Err(HostBuildError::HelloMismatch {
+            field: "validator.accepted_physmem_bytes",
+            expected: format!("at least {}", manifest.memory.validator_memory_bytes),
+            actual: hello.accepted_physmem_bytes.to_string(),
+        });
     }
     if hello.features != manifest.validator.hello.required_features {
         return Err(HostBuildError::HelloMismatch {
