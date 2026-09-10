@@ -164,8 +164,10 @@ whichever registry you name.
 ```sh
 git clone <this repository> pocket_vm
 cd pocket_vm
-make release-profile
+make -j8
 ```
+
+`release-profile` is the default target, so plain `make` does the same thing.
 
 That single target does everything, in order:
 
@@ -187,36 +189,39 @@ That single target does everything, in order:
 
 ### How wide it builds
 
-Every C and Go compile in that chain takes its job count from one environment
-variable:
+`-j`, as usual:
 
 ```sh
-POCKET_BUILD_JOBS=8 make release-profile
+make -j8            # eight compilers, everywhere
 ```
 
-Unset, the kernel takes every online CPU and the three static tool chains stop
-at 16. Either way the width is capped at 256: a larger request is refused, a
-larger host is clamped.
+Reading `-j` back needs **GNU Make 4.2 or newer**; 4.0 and 4.1 keep the number
+in the jobserver pipe where a makefile cannot see it, and say so at startup.
+`POCKET_BUILD_JOBS` works on any version.
+
+Targets run one at a time, so the width is not multiplied across them. Inside a
+build it is a request rather than a hard cap: GNU Make lets each recursive
+sub-make run one job without taking a token, so a deeply recursive tree -- the
+kernel most of all -- runs somewhat wider than the number asked for. That is
+make's own behaviour, not a setting here, and `taskset` or a cgroup is what
+bounds a host absolutely. With no `-j` at all, each build asks the host for its
+CPU count.
+`POCKET_BUILD_JOBS=8` overrides both, and either way the width is capped at
+256: a larger request is refused, a larger host is clamped.
 
 | target | where the count lands |
 |---|---|
-| `make kernel`, `make kernel-el7`, `make diagnostic-kernel` | `make -j` on the Linux tree |
+| `make kernel`, `kernel-el7`, `diagnostic-kernel` | `make -j` on the Linux tree |
 | `make static-e2fsprogs` | `make -j` |
-| `make static-slirp4netns` | `make -j` and `ninja -j`, across the whole GLib chain |
+| `make static-slirp4netns` | `make -j` and `ninja -j` |
 | `make static-skopeo` | `go build -p` and `GOMAXPROCS` |
 | the Rust artifacts, `make host-tools` | `CARGO_BUILD_JOBS` |
 
-cargo and the Go compiler take no `-j`, so the value reaches them through their
+cargo and the Go compiler take no `-j`, so the width reaches them through their
 own environment variables instead.
 
-A top-level `make -jN` runs independent targets at once and bounds cargo, but
-does not reach inside those builds — each passes its own `-j`. Setting both
-multiplies: `make -j4` with `POCKET_BUILD_JOBS=16` is up to 64 concurrent
-compilers.
-
-Widening the build does not change what it produces: the kernel, e2fsprogs and
-Skopeo each compare their own output against the recorded digest whatever the
-width.
+Widening the build does not change what it produces: the kernel compares its
+own output against the recorded digest whatever the width.
 
 ### Install it
 

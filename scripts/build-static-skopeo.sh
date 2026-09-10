@@ -59,7 +59,7 @@ umask 022
 
 # Reaches `go build -p`, which counts actions rather than processes; the
 # default stops at 16 for the same reason the other tool chains do.
-JOBS=$(pocket_build_jobs 16)
+JOBS=$(pocket_build_jobs)
 
 mkdir -p -- "$BUILD_ROOT" "$DOWNLOAD_DIR" "$CACHE_ROOT" "$MODULE_CACHE"
 WORK_ROOT=$(mktemp -d "$BUILD_ROOT/.skopeo-$VERSION.build.XXXXXX")

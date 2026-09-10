@@ -47,7 +47,7 @@ safe_managed_root "$OUTPUT_DIR"
 [[ $(uname -m) == x86_64 ]] || die "the release slirp4netns build requires an x86_64 host"
 # Reaches both make -j and ninja -j across the whole GLib chain. This lane
 # accepted any positive integer before, with no ceiling of its own.
-JOBS=$(pocket_build_jobs 16)
+JOBS=$(pocket_build_jobs)
 
 WORK_ROOT=$(mktemp -d "$BUILD_ROOT/.slirp4netns-build.XXXXXXXX")
 cleanup() {

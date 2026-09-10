@@ -52,7 +52,7 @@ POCKET_MAX_BUILD_JOBS=256
 # accepted 1..=256, two accepted 1..=64, one accepted any positive integer, and
 # one validated nothing at all and handed the raw string to make.
 pocket_build_jobs() {
-    local default_ceiling=${1:-0} jobs
+    local jobs
 
     if [[ -n ${POCKET_BUILD_JOBS:-} ]]; then
         jobs=$POCKET_BUILD_JOBS
@@ -67,9 +67,6 @@ pocket_build_jobs() {
         # A host with more cores than the ceiling is not a typo, so clamp it
         # rather than refuse. Refusing would fail a 384-thread machine over a
         # variable nobody set.
-        if (( default_ceiling > 0 && jobs > default_ceiling )); then
-            jobs=$default_ceiling
-        fi
         if (( jobs > POCKET_MAX_BUILD_JOBS )); then
             jobs=$POCKET_MAX_BUILD_JOBS
         fi

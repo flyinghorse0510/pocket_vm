@@ -33,7 +33,7 @@ safe_managed_root "$OUTPUT_DIR"
 # A tree this small stops paying for width well before a big host runs out of
 # cores, so the default stops at 16. An explicit POCKET_BUILD_JOBS is still
 # honoured to the shared ceiling.
-JOBS=$(pocket_build_jobs 16)
+JOBS=$(pocket_build_jobs)
 umask 022
 
 mkdir -p -- "$BUILD_ROOT" "$DOWNLOAD_DIR" "$GNUPG_HOME"

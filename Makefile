@@ -1,5 +1,32 @@
 SHELL := /bin/bash
 
+# Plain `make` builds a release. It used to build whichever target happened to
+# come first in the file, which was pocket-guard alone.
+.DEFAULT_GOAL := release-profile
+
+# -jN is the width of the whole build. Targets run one at a time and each build
+# uses all N, so -j8 means eight compilers rather than eight times whatever
+# each script picked for itself. Without .NOTPARALLEL the two multiply.
+.NOTPARALLEL:
+
+# GNU Make puts -jN in MAKEFLAGS but exposes no variable for it, so read it
+# back out. An explicit POCKET_BUILD_JOBS still wins, and with neither set each
+# build asks the host.
+POCKET_BUILD_JOBS ?= $(patsubst -j%,%,$(filter -j%,$(MAKEFLAGS)))
+export POCKET_BUILD_JOBS
+
+# Make 4.2 was the first to put the count in MAKEFLAGS. 4.0 and 4.1 put a bare
+# -j there and keep the number in the jobserver pipe, where a makefile cannot
+# reach it, so -jN would silently widen to the host's CPU count instead of N.
+# A numberless -j beside a jobserver is that case; a numberless -j without one
+# is `make -j`, which means unlimited and is meant to widen.
+ifeq ($(strip $(POCKET_BUILD_JOBS)),)
+ifneq ($(filter --jobserver-%,$(MAKEFLAGS)),)
+$(warning this GNU Make does not report -j in MAKEFLAGS -- 4.2 or newer does. \
+Every build will use the host CPU count; set POCKET_BUILD_JOBS to bound it.)
+endif
+endif
+
 .PHONY: release-toolchain host-clone-idcache-probe stub-fd-audit stub-fd-audit-el7 verify-el7 kernel-el7 audit-linux-source-el7 host-seccomp-probe instances image-adjust terminal-session container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
 
 host-tools:
