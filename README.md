@@ -59,7 +59,7 @@ affect the default build: see [EL7 host support](docs/el7-host-support.md).
 
 Building wants Rust 1.93 or newer, the Linux 7.2 tree's own tool minimums (GCC
 8.1, binutils 2.30, make 4.0, Python 3.9), and a host that allows unprivileged
-user namespaces. `POCKET_BUILD_JOBS` sets how wide it builds. Verified end to
+user namespaces. `make -j8` sets how wide it builds. Verified end to
 end on Ubuntu 26.04;
 [Getting started](docs/getting-started.md) has the full list and a
 distribution table.
@@ -81,7 +81,9 @@ Ubuntu 24.04.4 LTS
 ```
 
 That is a Linux kernel booting, mounting the converted image and running your
-command — from an unprivileged process on your host.
+command — from an unprivileged process on your host. The boot itself is
+mirrored to stderr as it happens, which is what tells you why a guest never
+reached your command; `--no-boot-log` leaves only the workload's own output.
 
 ## What the kernel buys you
 
@@ -193,8 +195,8 @@ a security boundary against hostile code.
 
 ## Upstream kernel fixes
 
-pocket_vm carries eight UML patches against Linux 7.2. Four of them fix real
-upstream defects; the rest adjust build-time policy.
+pocket_vm carries eight UML patches against Linux 7.2. Four fix upstream
+defects, two are build-time policy, and two extend the guest contract.
 
 Three fix one defect that made multi-CPU UML unusable:
 
@@ -203,16 +205,16 @@ Three fix one defect that made multi-CPU UML unusable:
 under `CONFIG_SMP=y` it reaches `synchronize_rcu()`, so `schedule()` ran from
 inside an interrupt: scheduler corruption, RCU stalls, and kernel panics.
 
-A `CONFIG_SMP=n` control passed, because there `synchronize_irqwork()` is an
-empty stub and Tiny RCU never waits — which is why `SMP=n` looked fine while
-`SMP=y ncpus=1` failed. The vCPU count was never the variable. The fix drains
-the list from a work item in process context.
+A `CONFIG_SMP=n` build is unaffected, because there `synchronize_irqwork()` is
+an empty stub and Tiny RCU never waits. The online vCPU count is not the
+variable: `SMP=y ncpus=1` fails too. The fix drains the list from a work item
+in process context.
 
-The fourth is in the network driver, and lockdep found it the first time this
-project enabled one. `vector_poll()` takes a queue lock from NAPI — softirq
-context — while `vector_reset_stats()` and `vector_get_ethtool_stats()` took
-the same lock in process context with softirqs enabled: a self-deadlock, on
-every boot with a network device. Those two now take it with softirqs off.
+The fourth is in the network driver. `vector_poll()` takes a queue lock from
+NAPI — softirq context — while `vector_reset_stats()` and
+`vector_get_ethtool_stats()` took the same lock in process context with
+softirqs enabled: a self-deadlock, on every boot with a network device. Those
+two now take it with softirqs off.
 
 The remaining four arm the stub's parent-death signal before `exec`, expose
 the kernel's accepted physical memory size so the host can verify its request

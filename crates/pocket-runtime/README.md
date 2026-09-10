@@ -43,8 +43,9 @@ For every start the library:
   explicit memory/guest-memory assertions, and the SMP/guest-CPU assertion
   pair (the deliberately UP profile omits only UML's unavailable `ncpus=`
   parser);
-- requires bounded HELLO/START/READY framing, exact build/policy/CPU/memory
-  identity, and a valid COW v3 backing binding before READY;
+- requires bounded HELLO/START/READY framing, exact build, policy and CPU
+  identity, accepted physical memory of at least the request, and a valid
+  COW v3 backing binding before READY;
 - captures and drains distinct stdout, stderr, console, and guard diagnostics
   with hard retained-byte caps; and
 - closes the liveness pipe, reaps or kills the guard, re-verifies the immutable

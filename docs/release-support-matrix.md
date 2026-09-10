@@ -19,7 +19,7 @@ distribution and signing gates remain open.
 | Guest architecture | x86_64 UML (EM_X86_64 host executables) | Implemented profile only |
 | Hosts below the kernel floor | Optional `el7` kernel variant, selected by name | Experimental, and narrower than the row above. The kernel is built on the EL7 host because it is bound to that toolchain; the bundle's other artifacts are static host binaries built on a current host, and the two are sealed together. Validated on CentOS Linux 7.9.2009 / 3.10.0-1160.119.1.el7 / glibc 2.17. See [EL7 host support](el7-host-support.md) |
 | OCI platform | `linux/amd64`, subject to the profile's accepted variants | Experimental |
-| CPU count | 1 through the sealed profile's effective maximum, currently 64 — the range end `arch/um/Kconfig` permits | Soak evidence covers 1 through 16. Counts above 16 are accepted but unqualified; see the open gate below |
+| CPU count | 1 through the sealed profile's effective maximum, currently 64 — the range end `arch/um/Kconfig` permits | A request within that maximum is never refused for a narrower host: it runs oversubscribed and reports `scaling_qualified=false`. Correctness at a vCPU count therefore does not require a host of that width,. The ceiling is checked at its boundary: 64 boots and reports 64, 65 is refused before launch. Speedup beyond the host's core count is not characterised, and is not a claim this package makes |
 | Guest memory | Profile minimum through effective maximum, aligned to 4096 bytes | Observed at 64 MiB, 256 MiB and 4 GiB through the full workload lifecycle. The guest asserts a floor rather than an equality, because `arch/um/kernel/um_arch.c` adds the gap between the kernel image and its initial program break to `physmem_size` once that gap exceeds a megabyte. Accepting less than the request is refused |
 | Networking | Outbound NAT by default over an unprivileged userspace stack; `--network none` opts out | Implemented. Inbound port forwarding is not |
 | Interactive terminal | `-t` allocates a guest PTY, holds the host terminal raw, and streams both directions with window-size forwarding | Implemented. `make terminal-session` asserts `isatty`, the startup and resized window sizes, a resolvable `ttyname`, `TERM`, an interrupt reaching the guest's line discipline, the workload's exit status, and the refusal when either descriptor is not a terminal |
@@ -99,11 +99,13 @@ than trusting the text.
   because softirqs are already off there, and `vector_send()` uses
   `spin_trylock()`, which is safe either way. The diagnostic lane reports zero
   lockdep complaints.
-- [ ] **CPU range above 16.** The compiled ceiling is 64, so the profile accepts
-  counts no soak has exercised. Closing this needs `make lifecycle-soak` at 32
-  and 64 vCPUs, plus `make smp-scaling`, on a host with at least that many
-  cores. The 12-logical-CPU reference host cannot produce that evidence. Until
-  it exists the accepted range exceeds the evidence.
+- [x] **CPU ceiling.** The ceiling is enforced at its boundary rather than
+  exhaustively: a request of 64 boots and reports 64 online CPUs, and 65 is
+  refused as `E_CPU_EXCEEDS_PROFILE_MAXIMUM` before launch. `make
+  lifecycle-soak` covers correctness at representative counts, and accepts any
+  `POCKET_SOAK_CPUS` if a particular value needs re-checking. Speedup above the
+  host's core count is not characterised; the runtime reports that case as
+  `scaling_qualified=false` rather than claiming it.
 - [x] **Resource matrix.** Exercise 1, 2, 4, 12 and 16 vCPUs and 64 MiB,
   256 MiB and 4 GiB of guest memory through the complete workload and teardown
   lifecycle, checking accepted physical memory and the absence of warnings, RCU

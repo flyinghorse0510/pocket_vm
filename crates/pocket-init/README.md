@@ -37,15 +37,17 @@ tests remain part of release qualification rather than this host build recipe.
 
 Early boot recreates `/dev/pts` after mounting devtmpfs because that mount hides
 the initramfs copy of the directory. The workload mount namespace also creates
-a private `/run`, materializes deterministic network-none `hostname`, `hosts`,
-and empty `resolv.conf` files there, and follows image-controlled target
-symlinks with in-chroot/beneath-root semantics. Resolution and target creation
+a private `/run`, materializes deterministic `hostname`, `hosts` and
+`resolv.conf` files there, and follows image-controlled target symlinks with
+in-chroot/beneath-root semantics. The resolver names the profile's sealed slirp
+DNS address, or is empty under `--network none`. Resolution and target creation
 use the effective post-overlay root, so an `/etc` symlink into `/run` is created
 on the visible tmpfs rather than invisibly in the underlying image. Each file
 is bind-mounted `readonly,nodev,nosuid,noexec`. The workload child rereads their
 exact contents after chroot and reconciles `/etc/hostname` with the already
-verified UTS hostname. Persistent volumes and a slirp resolver are still
-rejected by this profile revision.
+verified UTS hostname. The protocol's managed-volume list must be empty in this
+profile revision; sharing a host directory with `--volume` is a separate hostfs
+mount, not a managed volume.
 
 After READY, the versioned control loop accepts SHUTDOWN exactly once. It
 SIGKILLs nested PID-namespace init, waits within the message's bounded grace

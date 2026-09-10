@@ -4,8 +4,8 @@
 single-vCPU image-conversion UML. It does not mount anything on the host.
 Inside the builder guest it:
 
-1. measures the guest architecture, page size, online CPU count, exact accepted
-   UML physical-memory bytes, and pinned umoci artifact/version;
+1. measures the guest architecture, page size, online CPU count, accepted UML
+   physical-memory bytes, and pinned umoci artifact/version;
 2. performs the bounded `BUILD_HELLO` / `BUILD_START` handshake;
 3. mounts `/dev/ubda` read-only at `/input` and `/dev/ubdb` at `/target`;
 4. re-authenticates the selected canonical OCI manifest, config, compressed
@@ -65,7 +65,10 @@ pocket.builder.kernel_build_id=SHA256_HEX
 
 UML consumes `mem=` and `ncpus=` before exposing `/proc/cmdline`; the aliases
 are therefore mandatory. PID 1 compares them with `_NPROCESSORS_ONLN` and the
-revision-bound `/proc/uml_physmem_bytes` ABI before sending `BUILD_HELLO`.
+revision-bound `/proc/uml_physmem_bytes` ABI before sending `BUILD_HELLO`. The
+CPU count must match exactly; accepted memory must be at least the request,
+because UML adds its kernel-image-to-brk gap to `physmem_size` once that gap
+exceeds a megabyte.
 
 ## Integration boundary
 

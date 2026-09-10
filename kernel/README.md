@@ -22,8 +22,11 @@ pipeline lock:
    `build/src/linux-7.2` path.
 5. The kernel is built out of tree at a fixed staging path with a cleared,
    enumerated environment. Source identity is audited again after compilation,
-   and the kernel/config SHA-256 values must equal their artifact locks before
-   the output is atomically published at `build/kernel/x86_64-smp-p4k`.
+   and the kernel and config SHA-256 values are compared with their artifact
+   locks before the output is atomically published at
+   `build/kernel/x86_64-smp-p4k`. A difference is reported and the build
+   continues, because a different compiler or C library legitimately produces
+   different bytes; `POCKET_STRICT_TOOLCHAIN=1` makes the comparison fatal.
 
 `scripts/hash-source-tree.py` is an explicit Python 3 build dependency. Every
 entry point checks for `python3`, and kernel builds record its observed version
@@ -57,7 +60,8 @@ final kernel/config bytes are locked. The build uses the host programs resolved
 from `PATH` (including GCC, binutils, make, flex, bison, Python, Perl, and host
 libraries); their versions are not yet supplied by a hermetic toolchain image.
 `BUILD-METADATA` records the primary observed tool versions, and the locked
-artifact digests make an ambient-toolchain difference fail closed, but this is
+artifact digests report an ambient-toolchain difference rather than refusing
+it, so the source contract above is what holds on an arbitrary host. This is
 verification of an expected output rather than a fully bootstrappable toolchain
 supply chain. A release claiming independently reproducible toolchain inputs
 must additionally pin and rebuild that complete compiler/linker/host-tool

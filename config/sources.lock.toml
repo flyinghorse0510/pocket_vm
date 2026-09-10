@@ -35,8 +35,8 @@ source_date_epoch = 1786940622
 #
 # The artifact digests are toolchain-bound, as the default build's are. They
 # were produced on the reference host recorded below; a different compiler or
-# linker changes the bytes and fails the build closed rather than silently
-# shipping something else.
+# linker changes the bytes, which the build reports rather than refusing.
+# POCKET_STRICT_TOOLCHAIN=1 makes that comparison fatal.
 [linux.variant.el7]
 description = "CentOS 7 / EL7-vintage hosts: kernels without close_range or execveat, and glibc 2.17"
 patch_series_sha256 = "63cf3db6743afdce3b002ab15b277e9bf98ac56d49a8cf35ffadc9ea7c5d1bce"

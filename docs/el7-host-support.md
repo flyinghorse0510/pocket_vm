@@ -99,8 +99,8 @@ make verify-el7
 
 Sealing a profile around that kernel takes two toolchains, so it is worth being
 precise about which host does what. The kernel is bound to the reference
-toolchain above -- building it with anything else produces different bytes and
-fails closed -- so it is built on the EL7 host. Everything else in the bundle is
+toolchain above -- building it with anything else produces different bytes,
+which the build reports -- so it is built on the EL7 host. Everything else in the bundle is
 a static host binary; e2fsprogs is pinned to `development_tools.cc_major`, which
 EL7 does not have, so those are built on a current host. The seal builds
 `pocket` itself and pins the Rust toolchain exactly, so it runs where that
@@ -335,8 +335,9 @@ position, which this variant does not change.
 
 The variant's artifact digests are bound to the reference toolchain above, as
 the default build's are bound to its own. A different compiler or linker
-produces different bytes and fails the build closed rather than shipping
-something unverified.
+produces different bytes; the build reports the difference and continues, since
+the source contract is what holds on an arbitrary host.
+`POCKET_STRICT_TOOLCHAIN=1` makes the comparison fatal.
 
 Both kernels read the same `config/kernel/x86_64-uml.fragment`, so raising
 `CONFIG_NR_CPUS` to 64 changed this variant's bytes too. The digests recorded

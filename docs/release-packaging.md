@@ -117,14 +117,22 @@ target-specific or development Cargo entries were linked, enumerate
 unrecorded host build inputs, perform vulnerability analysis, or attest
 reproducibility. Those limitations are embedded in the SPDX document.
 
-## User-prefix installation and rollback
+## Installation and rollback
 
-The installer refuses effective UID 0 and accepts only an absolute prefix
-strictly below the invoking account's passwd-database home directory. Every
-existing prefix component below the home directory must be owned by that user
-and must not be group- or other-writable. It performs ordinary file-system
-operations only; it does not call sudo, a package manager, set-ID helpers, or
-privilege APIs.
+The installer accepts any absolute prefix the caller can write, including one
+shared between accounts such as `/opt` or `/srv`. The artifacts installed there
+are the same read-only bytes for everyone, and the runtime refuses to load a
+bundle that is group- or world-writable. What stays per-user is the store
+holding images and copy-on-write layers, and the runtime root holding live
+runs.
+
+A prefix outside the caller's home directory is treated as shared, so the
+installer writes no config file: recording one account's store and runtime root
+into a file every account reads would be wrong. Each user's first run creates
+their own instead.
+
+The installer performs ordinary file-system operations only. It does not call
+sudo, a package manager, set-ID helpers or privilege APIs.
 
     ./scripts/install-release.py install \
       --archive "$PWD/build/packages/pocket-vm-...-linux-x86_64.tar" \
