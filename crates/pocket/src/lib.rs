@@ -10,7 +10,7 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{self, IsTerminal, Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::ExitCode,
     str::FromStr,
@@ -802,6 +802,66 @@ fn apply_config(command: &mut Command, config: &Config) {
 
 /// A path argument that must be set by now, with a message naming both ways to
 /// supply it.
+/// `$VAR/suffix` when the variable names a directory, else `$HOME/fallback`.
+fn xdg_path(variable: &str, suffix: &str, fallback: &str) -> Option<PathBuf> {
+    if let Some(value) = std::env::var_os(variable)
+        && !value.is_empty()
+    {
+        return Some(PathBuf::from(value).join(suffix));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback))
+}
+
+/// Create a defaulted directory the first time it is needed, mode 0700.
+///
+/// Both the store and the runtime root must be owned by the caller and mode
+/// 0700, and both refuse to be anything else, so a path this process chose for
+/// the caller can be created outright. A failure is left unreported: the
+/// command that needs the directory reports what is actually wrong with it,
+/// which is a better message than one from here about a path the operator
+/// never named.
+fn create_private_directory(path: &Path) {
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::DirBuilder::new().mode(0o700).create(path);
+}
+
+/// The profile installed beside this executable.
+///
+/// A launcher execs `<prefix>/lib/pocket-vm/r/<release>/bin/pocket`, so walking
+/// up to the `lib/pocket-vm` that contains it finds the tree the profiles were
+/// installed into. One revision of one profile is unambiguous and is what an
+/// ordinary install leaves; more than one is a question only the caller can
+/// answer, so it is left to `--profile-bundle` rather than guessed at.
+fn discover_profile_bundle() -> Option<PathBuf> {
+    profile_bundle_beside(&fs::canonicalize("/proc/self/exe").ok()?)
+}
+
+/// The layout half of [`discover_profile_bundle`], separated so it can be
+/// exercised against a directory tree rather than against this process.
+fn profile_bundle_beside(executable: &Path) -> Option<PathBuf> {
+    let installed = executable
+        .ancestors()
+        .find(|directory| directory.ends_with("lib/pocket-vm"))?;
+    let mut bundles = Vec::new();
+    for profile in fs::read_dir(installed.join("p")).ok()?.flatten() {
+        for revision in fs::read_dir(profile.path()).ok()?.flatten() {
+            if revision.path().is_dir() {
+                bundles.push(revision.path());
+            }
+        }
+    }
+    bundles.sort();
+    match bundles.as_slice() {
+        [only] => Some(only.clone()),
+        _ => None,
+    }
+}
+
 fn required_path<'a>(
     value: &'a Option<PathBuf>,
     flag: &'static str,
@@ -825,7 +885,10 @@ fn execute(
     let mut cli = cli;
     // Fill any path the caller did not give from the config file, once, before
     // anything is opened. A flag always wins; nothing is ever guessed.
-    apply_config(&mut cli.command, &Config::load()?);
+    apply_config(
+        &mut cli.command,
+        &Config::load()?.with_discovered_defaults(),
+    );
     match cli.command {
         Command::Profile { command } => execute_profile(command, stdout),
         Command::Images { context, json } => {
@@ -1426,7 +1489,7 @@ fn execute_ps(
     json: bool,
     stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
-    let config = Config::load()?;
+    let config = Config::load()?.with_discovered_defaults();
     let root = runtime_root
         .map(Path::to_path_buf)
         .or_else(|| config.runtime_root.clone())
@@ -1443,7 +1506,11 @@ fn execute_ps(
     let kept = if all {
         let path = store
             .map(Path::to_path_buf)
-            .or_else(|| Config::load().ok().and_then(|config| config.store))
+            .or_else(|| {
+                Config::load()
+                    .ok()
+                    .and_then(|config| config.with_discovered_defaults().store)
+            })
             .ok_or_else(|| invalid("store", "pass --store or set store in the config file"))?;
         open_or_initialize_store(&path)?.instances()?
     } else {
@@ -1604,7 +1671,7 @@ fn execute_commit(
     json: bool,
     stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
-    let config = Config::load()?;
+    let config = Config::load()?.with_discovered_defaults();
     let store_path = store
         .map(Path::to_path_buf)
         .or_else(|| config.store.clone())
@@ -1698,7 +1765,7 @@ fn execute_start(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
-    let config = Config::load()?;
+    let config = Config::load()?.with_discovered_defaults();
     let profile = load_profile(required_path(
         &context.profile_bundle,
         "profile-bundle",
@@ -1824,7 +1891,11 @@ fn execute_rm(
 ) -> Result<CommandStatus, CliError> {
     let path = store
         .map(Path::to_path_buf)
-        .or_else(|| Config::load().ok().and_then(|config| config.store))
+        .or_else(|| {
+            Config::load()
+                .ok()
+                .and_then(|config| config.with_discovered_defaults().store)
+        })
         .ok_or_else(|| invalid("store", "pass --store or set store in the config file"))?;
     let store = open_or_initialize_store(&path)?;
     let mut removed = Vec::with_capacity(names.len());
@@ -2194,6 +2265,31 @@ impl Config {
             return Some(PathBuf::from(xdg).join("pocket/config.toml"));
         }
         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/pocket/config.toml"))
+    }
+
+    /// Fill anything unset from where an unconfigured host would keep it.
+    ///
+    /// A first run should work without a config file. The store and the
+    /// runtime root are per-user by construction -- the store demands mode
+    /// 0700 and its owner on every operation -- so their defaults are the XDG
+    /// paths under the caller's own home, and they are created on demand. The
+    /// profile is found beside the executable, which is what makes a prefix
+    /// shared by several accounts usable without each of them being told where
+    /// it is.
+    fn with_discovered_defaults(mut self) -> Self {
+        if self.store.is_none() {
+            self.store = xdg_path("XDG_DATA_HOME", "pocket/store", ".local/share/pocket/store")
+                .inspect(|path| create_private_directory(path));
+        }
+        if self.runtime_root.is_none() {
+            self.runtime_root =
+                xdg_path("XDG_RUNTIME_DIR", "pocket/run", ".local/state/pocket/run")
+                    .inspect(|path| create_private_directory(path));
+        }
+        if self.profile_bundle.is_none() {
+            self.profile_bundle = discover_profile_bundle();
+        }
+        self
     }
 
     fn load() -> Result<Self, CliError> {
@@ -4029,6 +4125,57 @@ mod tests {
         assert!(
             !diagnostic.contains("E_FEATURE_UNSUPPORTED"),
             "{diagnostic}"
+        );
+    }
+
+    /// A shared prefix is only usable without configuration if the executable
+    /// can find the profile installed beside it.
+    #[test]
+    fn a_profile_is_found_beside_the_executable_unless_there_is_a_choice() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let installed = root.path().join("opt/pocket/lib/pocket-vm");
+        let executable = installed.join("r/aa/bin/pocket");
+        fs::create_dir_all(executable.parent().expect("a bin directory")).expect("create bin");
+        fs::write(&executable, b"").expect("create executable");
+
+        assert_eq!(profile_bundle_beside(&executable), None, "no profiles yet");
+
+        let bundle = installed.join("p/x86_64-smp-p4k/rev-one");
+        fs::create_dir_all(&bundle).expect("create bundle");
+        assert_eq!(
+            profile_bundle_beside(&executable),
+            Some(bundle),
+            "exactly one is unambiguous"
+        );
+
+        fs::create_dir_all(installed.join("p/x86_64-smp-p4k/rev-two")).expect("second bundle");
+        assert_eq!(
+            profile_bundle_beside(&executable),
+            None,
+            "a choice belongs to the caller"
+        );
+    }
+
+    #[test]
+    fn an_executable_outside_an_installed_tree_discovers_nothing() {
+        assert_eq!(
+            profile_bundle_beside(Path::new("/usr/local/bin/pocket")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_defaulted_directory_is_created_private_to_its_owner() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let store = root.path().join("share/pocket/store");
+        create_private_directory(&store);
+        let mode = fs::metadata(&store).expect("created").mode() & 0o777;
+        assert_eq!(mode, 0o700, "{mode:04o}");
+        // Calling again on an existing directory leaves it alone.
+        create_private_directory(&store);
+        assert_eq!(
+            fs::metadata(&store).expect("still there").mode() & 0o777,
+            0o700
         );
     }
 

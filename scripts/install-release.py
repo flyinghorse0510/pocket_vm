@@ -217,7 +217,34 @@ def shared_group(gid: int, uid: int) -> bool:
     return bool(set(group.gr_mem) - {user.pw_name})
 
 
-def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
+def is_within_home(path: Path) -> bool:
+    """Whether a prefix belongs to the account doing the installing.
+
+    A prefix elsewhere is shared by construction: more than one account will
+    run out of it, so nothing about one account's paths belongs in it.
+    """
+    try:
+        home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve(strict=True)
+    except (KeyError, OSError):
+        return False
+    return path == home or home in path.parents
+
+
+def ensure_plain_directory(path: Path, *, create: bool) -> None:
+    """Prepare and check one installation prefix.
+
+    The prefix may sit anywhere: a shared read-only tree under /opt or /srv is
+    a supported layout, because the artifacts installed into it are the same
+    read-only bytes for everyone and the runtime refuses to load a bundle that
+    is group- or world-writable. What must stay per-user -- the store holding
+    images and copy-on-write layers, and the runtime root holding live runs --
+    is not installed here at all: each is created by the user who runs pocket,
+    owned by them and mode 0700, and the store re-checks both on every
+    operation.
+
+    Requiring the prefix to sit under the invoking user's home ruled that
+    layout out while protecting nothing the runtime does not check for itself.
+    """
     text = os.fspath(path)
     if (
         not path.is_absolute()
@@ -229,12 +256,6 @@ def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
             "installation prefix must be an absolute normalized path"
         )
     uid = os.geteuid()
-    user_home = Path(pwd.getpwuid(uid).pw_dir).resolve(strict=True)
-    if path == user_home or user_home not in path.parents:
-        raise ReleaseError(
-            "installation prefix must be a child of the invoking "
-            f"user's home: {user_home}"
-        )
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
@@ -263,26 +284,20 @@ def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
                 "installation prefix traverses a link or non-directory: "
                 f"{current}"
             )
-        if current == user_home or user_home in current.parents:
-            if current_stat.st_uid != uid:
-                raise ReleaseError(
-                    "installation prefix component is not owned by the "
-                    f"invoking user: {current}"
-                )
-            mode = stat.S_IMODE(current_stat.st_mode)
-            if mode & 0o002:
-                warn(
-                    f"{current} is world-writable (mode {mode:04o}); another "
-                    "account can replace what is installed there "
-                    f"(chmod o-w {current})"
-                )
-            elif mode & 0o020 and shared_group(current_stat.st_gid, uid):
-                warn(
-                    f"{current} is writable by group "
-                    f"{group_name(current_stat.st_gid)} (mode {mode:04o}); its "
-                    "other members can replace what is installed there "
-                    f"(chmod g-w {current})"
-                )
+        mode = stat.S_IMODE(current_stat.st_mode)
+        if mode & 0o002:
+            warn(
+                f"{current} is world-writable (mode {mode:04o}); another "
+                "account can replace what is installed there "
+                f"(chmod o-w {current})"
+            )
+        elif mode & 0o020 and shared_group(current_stat.st_gid, uid):
+            warn(
+                f"{current} is writable by group "
+                f"{group_name(current_stat.st_gid)} (mode {mode:04o}); its "
+                "other members can replace what is installed there "
+                f"(chmod g-w {current})"
+            )
         if created:
             for directory in (current, current.parent):
                 descriptor = os.open(
@@ -696,14 +711,14 @@ def enforce_profile_path_budget(
 def install(
     info: ArchiveInfo, prefix: Path
 ) -> tuple[Path, Path, Path, bool, bool, bool]:
-    ensure_plain_user_directory(prefix, create=True)
+    ensure_plain_directory(prefix, create=True)
     release_files, profile_files = partition_install_files(info)
     releases_parent = prefix / "lib/pocket-vm/r"
     profiles_parent = prefix / "lib/pocket-vm/p" / info.profile_id
     bin_parent = prefix / "bin"
-    ensure_plain_user_directory(releases_parent, create=True)
-    ensure_plain_user_directory(profiles_parent, create=True)
-    ensure_plain_user_directory(bin_parent, create=True)
+    ensure_plain_directory(releases_parent, create=True)
+    ensure_plain_directory(profiles_parent, create=True)
+    ensure_plain_directory(bin_parent, create=True)
     release, profile, launcher = release_paths(prefix, info)
     enforce_profile_path_budget(profile, profile_files)
     profile_changed = ensure_installed_tree(
@@ -776,7 +791,7 @@ def install(
 def verify(
     info: ArchiveInfo, prefix: Path
 ) -> tuple[Path, Path, Path]:
-    ensure_plain_user_directory(prefix, create=False)
+    ensure_plain_directory(prefix, create=False)
     release_files, profile_files = partition_install_files(info)
     release, profile, launcher = release_paths(prefix, info)
     enforce_profile_path_budget(profile, profile_files)
@@ -796,10 +811,6 @@ def verify(
 
 
 def main() -> int:
-    if os.geteuid() == 0:
-        raise ReleaseError(
-            "this user-prefix installer refuses effective UID 0"
-        )
     arguments = parse_args()
     archive_regular_file(arguments.archive)
     info = inspect_archive(arguments.archive)
@@ -820,6 +831,19 @@ def main() -> int:
         else:
             link_default_launcher(arguments.prefix, launcher)
             default_link = arguments.prefix / "bin/pocket"
+        # A prefix outside the installing account's home is a shared tree that
+        # several people will run from, so writing a config file here would
+        # record the installer's own store and runtime root -- root's, for a
+        # system-wide install -- into a file only the installer reads. Each
+        # user's first run creates their own instead.
+        shared_prefix = not is_within_home(arguments.prefix)
+        if shared_prefix and arguments.config is None:
+            arguments.no_config = True
+            print(
+                "install-release: shared prefix; each user's first run will "
+                "write their own config",
+                file=sys.stderr,
+            )
         if arguments.no_config:
             for flag, value in (
                 ("--config", arguments.config),

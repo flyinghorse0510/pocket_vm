@@ -228,10 +228,11 @@ own output against the recorded digest whatever the width.
 
 ### Install it
 
-The quickest path from here is to install into a prefix you choose. This also
-writes a config file, so afterwards no command needs any path flags:
+`make install` installs; it never builds. Package what the build produced,
+then install that:
 
 ```sh
+make package
 make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -243,10 +244,45 @@ pocket run alpine:3.22 -- /bin/sh -c 'cat /etc/alpine-release'
 3.22.5
 ```
 
+With nothing packaged it says so and stops, rather than starting a build you
+did not ask for.
+
 `make install` puts the release under `<prefix>/lib/pocket-vm/`, adds a
 versioned launcher `<prefix>/bin/pocket-<release-id>`, and points
 `<prefix>/bin/pocket` at it. Each install keeps the previous versions beside
 the new one, so pointing that symlink at an older launcher rolls back.
+
+#### One install, several users
+
+The prefix may sit anywhere, including a shared tree that several accounts run
+from:
+
+```sh
+sudo make install PREFIX=/opt/pocket
+sudo chmod -R go-w /opt/pocket
+```
+
+What is installed is the same read-only bytes for everyone, and the runtime
+refuses to load a bundle that is group- or world-writable, which is why the
+`go-w` matters. No per-user config file is written for a prefix outside the
+installing account's home, because there is no single user whose paths belong
+in one.
+
+Each user then runs `pocket` and needs no configuration at all. The profile is
+found beside the executable, and the two things that must stay private are
+created on first use, owned by them and mode `0700`:
+
+| | |
+|---|---|
+| images and copy-on-write layers | `$XDG_DATA_HOME/pocket/store`, else `~/.local/share/pocket/store` |
+| live runs | `$XDG_RUNTIME_DIR/pocket/run`, else `~/.local/state/pocket/run` |
+
+The store re-checks its owner and mode on every operation, so one user can
+never read or write another's images. Nothing is shared but the artifacts,
+which means each user's images cost their own disk.
+
+Discovery finds the profile only when exactly one is installed. With more than
+one, pass `--profile-bundle` or set `profile_bundle` in a config file.
 
 It also writes `~/.config/pocket/config.toml` naming the installed profile, a
 store under `~/.local/share/pocket/store`, and a runtime root under

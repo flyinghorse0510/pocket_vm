@@ -251,11 +251,25 @@ INSTALL_OPTIONS = \
 	$(if $(NO_CONFIG),--no-config) \
 	$(if $(NO_DEFAULT_LINK),--no-default-link)
 
-# Install into a user-owned prefix and write a config file so ordinary commands
-# need no flags. Never runs as root: this installs for one user, not a machine.
-install: package
+# Install an archive that `make package` has already produced, and write a
+# config file so ordinary commands need no flags.
+#
+# This builds nothing. Building is what `make` does, and a target that quietly
+# started a forty-minute compile because the tree was not ready is not an
+# install. A prefix outside the installing account's home is a shared tree
+# several people run from, so no per-user config is written for one.
+install:
+	@set -e; \
+	if [ ! -f "$(PACKAGE_DIR)/latest" ]; then \
+	    echo "nothing to install: run 'make package' first" >&2; exit 1; \
+	fi; \
+	archive=$$(cat "$(PACKAGE_DIR)/latest"); \
+	if [ ! -f "$$archive" ]; then \
+	    echo "the packaged release named by $(PACKAGE_DIR)/latest is gone: $$archive" >&2; \
+	    echo "run 'make package' again" >&2; exit 1; \
+	fi; \
 	./scripts/install-release.py install \
-	    --archive "$$(cat "$(PACKAGE_DIR)/latest")" \
+	    --archive "$$archive" \
 	    --prefix "$(PREFIX)" $(INSTALL_OPTIONS)
 
 # Install a tarball someone else built. The whole point of `make package`.

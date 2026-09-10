@@ -622,7 +622,8 @@ This build does not implement:
   Docker daemon imports, archive selectors or multi-image archives, or image
   removal. `image list` reports the aliases one profile can run; `cache roots`
   reports every root a store holds, of both kinds;
-- installed-profile discovery, implicit profile selection, or `probe`;
+- implicit profile selection between several installed profiles, or `probe`.
+  A single installed profile is found beside the executable;
 - inbound port forwards or host CPU affinity;
 - `attach`, `exec`, and `run --detach`. Each is a named command or flag that
   refuses with `E_FEATURE_UNSUPPORTED` and the reason, rather than reading as

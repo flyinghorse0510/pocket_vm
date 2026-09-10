@@ -69,7 +69,7 @@ distribution table.
 ```sh
 # Build and install. The build fetches and GPG-verifies Linux 7.2, compiles it,
 # then installs and writes a config file so no command needs path flags.
-make install PREFIX="$HOME/.local"
+make package && make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 
 pocket image pull ubuntu:24.04
