@@ -114,6 +114,12 @@ assert_lock glib version "$GLIB_VERSION" "glib version"
 MESON_VERSION=$(meson --version)
 pocket_version_at_least "$MESON_VERSION" "$MESON_MINIMUM" || die \
     "glib $GLIB_VERSION needs meson $MESON_MINIMUM or newer, found $MESON_VERSION (pipx install meson)"
+# slirp4netns is the last of six components, and its configure requires both of
+# these from the host, so a machine without them finds out at the very end.
+for module in libcap libseccomp; do
+    pkg-config --exists "$module" || \
+        die "slirp4netns needs the $module development package (Debian: ${module}-dev)"
+done
 assert_lock libslirp version "$LIBSLIRP_VERSION" "libslirp version"
 assert_lock slirp4netns version "$SLIRP4NETNS_VERSION" "slirp4netns version"
 assert_lock slirp4netns commit "$SLIRP4NETNS_COMMIT" "slirp4netns commit"
@@ -231,12 +237,13 @@ build_once() {
     restage_pkgconfig
 
     tar -xf "$DOWNLOAD_DIR/slirp4netns-$SLIRP4NETNS_VERSION.tar.gz"
-    # --disable-seccomp and --disable-libcap keep the artifact to one static
-    # binary: neither hardening feature is reachable in the bess mode this
-    # profile uses, and each would add another host library to the seal.
+    # slirp4netns has no --disable-seccomp or --disable-libcap: its configure.ac
+    # requires both through PKG_CHECK_MODULES unconditionally, and autoconf
+    # discarded the two flags that used to be passed here with nothing but a
+    # warning. libseccomp is linked in statically; libcap supplies only a header.
     (cd "slirp4netns-$SLIRP4NETNS_VERSION" && ./autogen.sh >"$logs/slirp4netns-autogen.log" 2>&1 \
         && LDFLAGS="-static -L$staged/lib" ./configure --prefix="$LOGICAL_PREFIX" \
-            --disable-seccomp --disable-libcap >"$logs/slirp4netns-configure.log" 2>&1 \
+            >"$logs/slirp4netns-configure.log" 2>&1 \
         && make -j"$JOBS" >"$logs/slirp4netns-build.log" 2>&1) || die_with_logs "$logs" "slirp4netns build failed"
 
     mkdir -p -- "$base/result"

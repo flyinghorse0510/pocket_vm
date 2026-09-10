@@ -97,12 +97,15 @@ The build needs packages; installing them is the only step that uses `sudo`.
 ```sh
 sudo apt install -y \
   autoconf automake bc bison bubblewrap build-essential cpio curl file flex \
-  git gnupg jq libtool make meson ninja-build openssl pkg-config python3 \
-  rsync shellcheck xz-utils
+  git gnupg jq libcap-dev libseccomp-dev libtool make meson ninja-build \
+  openssl pkg-config python3 rsync shellcheck umoci xz-utils
 ```
 
 You do **not** need `skopeo`, `mke2fs`, `e2fsck` or `slirp4netns` on the host —
-the build produces its own static copies and uses only those.
+the build produces its own static copies and uses only those. `umoci` is the
+exception: it is not built here. The host's copy is packed into the builder
+image along with the C library it needs, so it has to be installed. It lives in
+Ubuntu's `universe` component.
 
 The optional probe lanes need two more packages; `make release-profile` does
 not:

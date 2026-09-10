@@ -32,7 +32,8 @@ safe_managed_root "$PROFILE_ROOT"
 [[ -x "$GEN_INIT_CPIO" ]] || die "build the pinned UML kernel first: $GEN_INIT_CPIO"
 [[ -x "$POCKET_INIT" && -x "$POCKET_BUILDER_INIT" && -x "$POCKET_VALIDATOR_INIT" ]] || \
     die "build release Rust artifacts first"
-[[ -x "$UMOCI" ]] || die "umoci is required; set POCKET_UMOCI to point at it"
+[[ -x "$UMOCI" ]] || die \
+    "umoci is required (Debian/Ubuntu: apt install umoci); or set POCKET_UMOCI"
 umask 0022
 
 # Held to config/sources.lock.toml rather than to a literal, for the same

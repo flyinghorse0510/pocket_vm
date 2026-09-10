@@ -20,7 +20,7 @@ SOURCE_DIR="$SOURCE_PARENT/$LINUX_SOURCE_NAME"
 RECOVERY_DIR="$SOURCE_PARENT/replaced"
 TMP_PARENT="$BUILD_ROOT/tmp"
 
-for command in awk find flock git make mktemp mv python3 sha256sum tar; do
+for command in awk env find flock git make mktemp mv python3 sha256sum tar; do
     require_command "$command"
 done
 safe_managed_root "$BUILD_ROOT"
@@ -78,7 +78,11 @@ patched_tree=$(isolated_git "$STAGED_TREE" "$METADATA" write-tree)
     die "patched Linux Git tree mismatch immediately before publication"
 isolated_git "$STAGED_TREE" "$METADATA" diff-files --quiet || \
     die "patched Linux worktree differs from its verified index"
-version=$(make -s -C "$STAGED_TREE" kernelversion)
+# MAKEFLAGS= detaches this from any outer make: it inherits a --jobserver-auth
+# whose descriptors the parent closed, and GNU Make 4.3 and older answer that
+# with "jobserver unavailable: using -j1". Nothing is compiled here, so the
+# warning only ever misled.
+version=$(env -u MAKEFLAGS -u MAKELEVEL make -s -C "$STAGED_TREE" kernelversion)
 [[ $version == 7.2.0 ]] || die "unexpected authenticated Linux version: $version"
 
 preserve_generated_tree "$SOURCE_DIR" "$RECOVERY_DIR" "$LINUX_SOURCE_NAME"
@@ -105,6 +109,9 @@ identity_tmp="$STAGING/source.identity"
         printf 'variant_series_sha256=%s\n' "$(sha256sum "$LINUX_OVERLAY_LOCK" | awk '{print $1}')"
 } > "$identity_tmp"
 chmod 0444 "$identity_tmp"
-mv --no-target-directory -- "$identity_tmp" "$SOURCE_PARENT/$LINUX_SOURCE_NAME.identity"
+# -f because the file being replaced is itself 0444: without it mv asks the
+# operator to confirm overriding the mode, which only happens when stdin is a
+# terminal, so an interactive rebuild failed where every scripted one passed.
+mv -f --no-target-directory -- "$identity_tmp" "$SOURCE_PARENT/$LINUX_SOURCE_NAME.identity"
 
 printf '%s\n' "$SOURCE_DIR"

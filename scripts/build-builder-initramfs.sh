@@ -25,7 +25,8 @@ done
 # One resolver authenticates the busybox that is actually packed, so its pinned
 # digest lives in exactly one place.
 BUSYBOX=$(pocket_resolve_busybox)
-[[ -n "$UMOCI" && -x "$UMOCI" ]] || die "umoci is required"
+[[ -n "$UMOCI" && -x "$UMOCI" ]] || die \
+    "umoci is required (Debian/Ubuntu: apt install umoci); or set POCKET_UMOCI"
 if [[ -z "$LOADER" ]]; then
     LOADER=$(readelf -lW "$UMOCI" |
         sed -n 's/.*Requesting program interpreter: \([^]]*\)].*/\1/p')
