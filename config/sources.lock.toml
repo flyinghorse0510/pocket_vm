@@ -102,9 +102,9 @@ tarball_url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.
 tarball_sha256 = "47fe8c99461250d42f89e6e8fdaeba9da057855d06eb7fc08d9ca03fd08d7bc7"
 
 [glib]
-version = "2.88.1"
-tarball_url = "https://download.gnome.org/sources/glib/2.88/glib-2.88.1.tar.xz"
-tarball_sha256 = "51ab804c56f6eab3e5045c774d1290ac5e4c923d4f9a3d8e33123bee45c1840e"
+version = "2.78.6"
+tarball_url = "https://download.gnome.org/sources/glib/2.78/glib-2.78.6.tar.xz"
+tarball_sha256 = "244854654dd82c7ebcb2f8e246156d2a05eb9cd1ad07ed7a779659b4602c9fae"
 
 [libslirp]
 version = "4.9.4"
@@ -166,20 +166,6 @@ e2fsprogs = "1.47.2"
 [development_artifacts]
 linux_uml_sha256 = "f773d279ec37ea812489961fd18c73bd57b4757eab8557a7083f9e352ed48874"
 linux_uml_config_sha256 = "d553b9b22ed7272d23ee01c078ae54e5e46fb15d991b8ef2f9eca4eb95a48aad"
-probe_initramfs_sha256 = "4a53447c3834daee54381860931a37ea582c3072fb633c94e550073c606d451e"
-busybox_sha256 = "df12634c17fcdca839ae5dc47d7627b7558511f7645de7c99ccf097a0f28ed5b"
-umoci_sha256 = "4796f71e1dc93959b5d5c33066ee5a51542a16879df92a21fc0d6227a62d89d6"
-glibc_sha256 = "a3947513a02831ec692ebf13053c07614882ab54a2101fb91a1b15724062ed0c"
-glibc_loader_sha256 = "c5e80a563850d6ab5c2f2482e4202d9c1b71fbf44854b8c399e63527202c64e1"
-mke2fs_sha256 = "1513871ea05424b488136cfb146e618e12e4e673c653fe5371b0a677316a5a55"
-e2fsck_sha256 = "f8632c92b49cb458d6856200baaf601a7f1a3f68e56cc4723b93645776194978"
-resize2fs_sha256 = "1f29ccf67e0685ed3a1f19564ede01ebabed281f452a724b5828b824ab7139e2"
-debugfs_sha256 = "b77498cda61917095f1eb22256cf7fa44aacaa82c8ce4862037e9804f1010060"
-skopeo_sha256 = "c602dfb345db1ea8e9e709857fc5e17d936af64e676964c1a873b0b849885780"
-registry_ca_sha256 = "f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9"
-mke2fs_config_sha256 = "09e42098e8f8850e48ca06bf2fa82e2db23dd8d0bbb5b4335b3f0088bf862e23"
-e2fsck_config_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-profile_template_sha256 = "db0ae836928f23b3565376105ae4a5ef4638e2cd5d9d82464ed2df1053099d50"
 
 [fixtures.ubuntu_24_04]
 reference = "docker://docker.io/library/ubuntu:24.04"

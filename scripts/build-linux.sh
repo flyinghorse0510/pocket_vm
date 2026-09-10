@@ -15,14 +15,16 @@ BUILD_STAGING="$KERNEL_PARENT/.$PROFILE_ID.building"
 BUILD_HOME="$KERNEL_PARENT/.linux-build-home"
 RECOVERY_DIR="$KERNEL_PARENT/replaced"
 FRAGMENT="$ROOT/config/kernel/x86_64-uml.fragment"
-JOBS=${POCKET_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
 for command in awk bc bison date file find flex flock g++ gcc getconf git ld make mktemp mv \
     python3 rsync sha256sum tar; do
     require_command "$command"
 done
 safe_managed_root "$BUILD_ROOT"
-[[ $JOBS =~ ^[1-9][0-9]*$ && $JOBS -le 256 ]] || die "POCKET_BUILD_JOBS must be in 1..=256"
+# No default ceiling. This is the one build long enough to want every core the
+# host will give it, and the locked-digest comparison below is what proves the
+# width never reaches the bytes.
+JOBS=$(pocket_build_jobs)
 load_linux_source_locks "$ROOT"
 if [[ -n $LINUX_VARIANT ]]; then
     printf 'building the EXPERIMENTAL %s kernel variant\n' "$LINUX_VARIANT" >&2
@@ -113,8 +115,8 @@ locked_linux_sha=$(linux_lock_value "$LINUX_SOURCE_LOCK" linux_uml_sha256 "$ARTI
 locked_config_sha=$(linux_lock_value "$LINUX_SOURCE_LOCK" linux_uml_config_sha256 "$ARTIFACT_SECTION")
 require_hex "$locked_linux_sha" 64 "$ARTIFACT_SECTION.linux_uml_sha256"
 require_hex "$locked_config_sha" 64 "$ARTIFACT_SECTION.linux_uml_config_sha256"
-[[ $linux_sha == "$locked_linux_sha" ]] || die "rebuilt UML kernel differs from the locked artifact SHA-256"
-[[ $config_sha == "$locked_config_sha" ]] || die "rebuilt UML config differs from the locked artifact SHA-256"
+pocket_match_recorded "the rebuilt UML kernel" "$linux_sha" "$locked_linux_sha"
+pocket_match_recorded "the rebuilt UML config" "$config_sha" "$locked_config_sha"
 
 {
     printf 'pocket-linux-build-v1\n'

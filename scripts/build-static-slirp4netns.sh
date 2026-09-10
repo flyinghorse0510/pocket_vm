@@ -22,27 +22,32 @@ SOURCE_DATE_EPOCH=$(pocket_source_date_epoch)
 ZLIB_VERSION=1.3.1
 LIBFFI_VERSION=3.5.2
 PCRE2_VERSION=10.47
-GLIB_VERSION=2.88.1
+# The newest glib whose meson floor the oldest supported distribution still
+# clears: 2.78 wants meson 0.60, and Ubuntu 22.04 packages 0.61.2. Every later
+# series raises it -- 2.80 to 1.2.0, 2.84 to 1.4.0 -- which would put the build
+# out of reach of both current LTS releases. libslirp declares no glib version
+# constraint at all, so nothing here needs a newer one.
+GLIB_VERSION=2.78.6
+MESON_MINIMUM=0.60.0
 LIBSLIRP_VERSION=4.9.4
 SLIRP4NETNS_VERSION=1.3.5
 SLIRP4NETNS_COMMIT=7132ff3ba66cf0eebd8c9a83b9f23838bc84c518
 
 DOWNLOAD_DIR="$BUILD_ROOT/downloads"
 OUTPUT_DIR="$BUILD_ROOT/tools/slirp4netns-$SLIRP4NETNS_VERSION"
-ONLINE_CPU_COUNT=$(getconf _NPROCESSORS_ONLN)
-[[ "$ONLINE_CPU_COUNT" =~ ^[1-9][0-9]*$ ]] || die "getconf returned an invalid online CPU count"
-((ONLINE_CPU_COUNT > 16)) && ONLINE_CPU_COUNT=16
-JOBS=${POCKET_BUILD_JOBS:-$ONLINE_CPU_COUNT}
 
-for command in autoreconf awk basename chmod cmp curl file gcc getconf grep make \
-    meson mkdir mktemp mv ninja pkg-config readelf sha256sum tar touch; do
+for command in autoreconf awk basename chmod cmp curl cut file find gcc getconf grep \
+    head make meson mkdir mktemp mv ninja pkg-config readelf sha256sum sort tail tar \
+    touch; do
     require_command "$command"
 done
 safe_managed_root "$BUILD_ROOT"
 safe_managed_root "$OUTPUT_DIR"
 [[ -f "$LOCK_FILE" ]] || die "source lock file not found: $LOCK_FILE"
 [[ $(uname -m) == x86_64 ]] || die "the release slirp4netns build requires an x86_64 host"
-[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "POCKET_BUILD_JOBS must be a positive integer"
+# Reaches both make -j and ninja -j across the whole GLib chain. This lane
+# accepted any positive integer before, with no ceiling of its own.
+JOBS=$(pocket_build_jobs 16)
 
 WORK_ROOT=$(mktemp -d "$BUILD_ROOT/.slirp4netns-build.XXXXXXXX")
 cleanup() {
@@ -54,6 +59,25 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# The exit trap removes WORK_ROOT, so an error that names a log inside it names
+# a path that is already gone by the time anyone reads the message. Print the
+# log that failed and keep the tree.
+die_with_logs() {
+    local logs=$1 message=$2 newest
+    newest=$(find "$logs" -maxdepth 1 -name '*.log' -printf '%T@ %p\n' 2>/dev/null |
+        sort -rn | head -n 1 | cut -d' ' -f2-)
+    if [[ -n "$newest" && -s "$newest" ]]; then
+        printf '\n--- %s (last 40 lines) ---\n' "${newest##*/}" >&2
+        tail -n 40 -- "$newest" >&2
+        printf -- '---\n\n' >&2
+    elif [[ -n "$newest" ]]; then
+        printf '\n%s is empty; the step failed before it wrote anything\n\n' \
+            "${newest##*/}" >&2
+    fi
+    POCKET_KEEP_BUILD=1
+    die "$message; logs kept in $logs"
+}
 
 lock_value() {
     local section=$1 key=$2
@@ -84,6 +108,12 @@ assert_lock zlib version "$ZLIB_VERSION" "zlib version"
 assert_lock libffi version "$LIBFFI_VERSION" "libffi version"
 assert_lock pcre2 version "$PCRE2_VERSION" "pcre2 version"
 assert_lock glib version "$GLIB_VERSION" "glib version"
+
+# GLib is the fourth link in this chain, so an unusable meson otherwise
+# announces itself only after zlib, libffi and pcre2 have already been built.
+MESON_VERSION=$(meson --version)
+pocket_version_at_least "$MESON_VERSION" "$MESON_MINIMUM" || die \
+    "glib $GLIB_VERSION needs meson $MESON_MINIMUM or newer, found $MESON_VERSION (pipx install meson)"
 assert_lock libslirp version "$LIBSLIRP_VERSION" "libslirp version"
 assert_lock slirp4netns version "$SLIRP4NETNS_VERSION" "slirp4netns version"
 assert_lock slirp4netns commit "$SLIRP4NETNS_COMMIT" "slirp4netns commit"
@@ -184,13 +214,12 @@ build_once() {
     tar -xf "$DOWNLOAD_DIR/glib-$GLIB_VERSION.tar.xz"
     (cd "glib-$GLIB_VERSION" && meson setup _b --prefix="$LOGICAL_PREFIX" --libdir=lib \
         --default-library=static --buildtype=release \
-        -Dtests=false -Dglib_debug=disabled -Dintrospection=disabled \
-        -Dman-pages=disabled -Dnls=disabled -Dselinux=disabled \
-        -Dlibmount=disabled -Dsysprof=disabled -Ddtrace=disabled \
-        -Dsystemtap=disabled >"$logs/glib-setup.log" 2>&1 \
+        -Dtests=false -Dglib_debug=disabled -Dman=false -Dnls=disabled \
+        -Dselinux=disabled -Dlibmount=disabled -Dsysprof=disabled \
+        -Ddtrace=false -Dsystemtap=false >"$logs/glib-setup.log" 2>&1 \
         && ninja -C _b -j"$JOBS" >"$logs/glib-build.log" 2>&1 \
         && DESTDIR="$stage" ninja -C _b install >"$logs/glib-install.log" 2>&1) \
-        || die "glib build failed; see $logs"
+        || die_with_logs "$logs" "glib build failed"
     restage_pkgconfig
 
     tar -xf "$DOWNLOAD_DIR/libslirp-v$LIBSLIRP_VERSION.tar.gz"
@@ -198,7 +227,7 @@ build_once() {
         --default-library=static --buildtype=release >"$logs/libslirp-setup.log" 2>&1 \
         && ninja -C _b -j"$JOBS" >"$logs/libslirp-build.log" 2>&1 \
         && DESTDIR="$stage" ninja -C _b install >"$logs/libslirp-install.log" 2>&1) \
-        || die "libslirp build failed; see $logs"
+        || die_with_logs "$logs" "libslirp build failed"
     restage_pkgconfig
 
     tar -xf "$DOWNLOAD_DIR/slirp4netns-$SLIRP4NETNS_VERSION.tar.gz"
@@ -208,7 +237,7 @@ build_once() {
     (cd "slirp4netns-$SLIRP4NETNS_VERSION" && ./autogen.sh >"$logs/slirp4netns-autogen.log" 2>&1 \
         && LDFLAGS="-static -L$staged/lib" ./configure --prefix="$LOGICAL_PREFIX" \
             --disable-seccomp --disable-libcap >"$logs/slirp4netns-configure.log" 2>&1 \
-        && make -j"$JOBS" >"$logs/slirp4netns-build.log" 2>&1) || die "slirp4netns build failed; see $logs"
+        && make -j"$JOBS" >"$logs/slirp4netns-build.log" 2>&1) || die_with_logs "$logs" "slirp4netns build failed"
 
     mkdir -p -- "$base/result"
     cp -- "$src/slirp4netns-$SLIRP4NETNS_VERSION/slirp4netns" "$base/result/slirp4netns"

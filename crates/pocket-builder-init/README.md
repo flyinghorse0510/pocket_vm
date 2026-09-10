@@ -25,8 +25,10 @@ typed `BUILD_ERROR`; the target remains an unpublished staging artifact.
 
 ## Pinned x86_64 release build
 
-Rust 1.93.1, the GNU target standard library, GCC major, `Cargo.lock`, and all
-crate sources are build-contract inputs. The canonical workspace recipe is:
+The GNU target standard library, `Cargo.lock` and all crate sources are
+build-contract inputs. Rust is held to the workspace `rust-version` floor;
+`config/sources.lock.toml` records the reference toolchain, which
+`POCKET_STRICT_TOOLCHAIN=1` requires. The canonical workspace recipe is:
 
 ```sh
 make release-artifacts

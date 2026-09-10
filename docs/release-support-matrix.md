@@ -94,13 +94,14 @@ does not satisfy any UML execution gate.
   SHA-256 source manifest before and after the build. `make kernel` performs
   this on every invocation, and `make audit-linux-source` plus
   `make test-linux-source-pipeline` pass against the published tree.
-- [ ] Build every Rust host/guest artifact with the pinned Rust toolchain,
-  Cargo.lock, locked/offline dependency availability, and recorded target
-  configuration. Record whether each host artifact is static and its minimum
-  required kernel/libc ABI. `make release-artifacts` pins the toolchain, the
-  lock file, and the target, and `scripts/verify-artifacts.sh` now enforces the
-  locked kernel and probe-initramfs digests; the minimum kernel/libc ABI of
-  each host artifact is still undeclared.
+- [ ] Build every Rust host/guest artifact with `Cargo.lock`, locked/offline
+  dependency availability, and recorded target configuration. Record whether
+  each host artifact is static and its minimum required kernel/libc ABI.
+  `make release-artifacts` pins the lock file and the target. The Rust
+  toolchain is held to the workspace `rust-version` floor, and
+  `scripts/verify-artifacts.sh` reports rather than enforces the recorded
+  digests; `POCKET_STRICT_TOOLCHAIN=1` requires them. The minimum kernel/libc
+  ABI of each host artifact is still undeclared.
 - [x] Rebuild pinned e2fsprogs and Skopeo inputs from their authenticated
   sources in the documented environment and match every artifact digest in
   the profile. A completely fresh build root, including a new Go module cache,

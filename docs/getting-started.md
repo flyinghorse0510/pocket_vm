@@ -7,7 +7,9 @@ things to know before you start:
 
 - The first build fetches and *verifies* a Linux 7.2 tarball, e2fsprogs,
   Skopeo, slirp4netns and a Go toolchain, then compiles a kernel. Budget
-  **40-60 minutes** and roughly **10 GB** of disk. Later builds reuse the
+  **40-60 minutes** and roughly **10 GB** of disk. That time is what twelve
+  cores took; [How wide it builds](#how-wide-it-builds) is the knob. Later
+  builds reuse the
   downloads, but each one that replaces the kernel source or output *keeps*
   the old tree as evidence under `build/src/replaced/` and
   `build/kernel/replaced/` — roughly 1.8 GB per replaced source tree and
@@ -68,7 +70,7 @@ minimums below, not measured:
 |---|---|---|---|
 | Ubuntu 26.04 | 7.0 | yes, verified | yes, verified |
 | Ubuntu 24.04 | 6.8 | yes | yes |
-| Ubuntu 22.04 | 5.15 | yes | `meson` is likely too old |
+| Ubuntu 22.04 | 5.15 | yes | yes |
 | Ubuntu 20.04 | 5.4 | no | no, Python is 3.8 |
 | Debian 13 / 12 | 6.12 / 6.1 | yes | yes |
 | Debian 11 | 5.10 | yes | tool versions are marginal |
@@ -109,13 +111,20 @@ not:
 sudo apt install -y busybox-static musl-tools
 ```
 
-Rust must be **exactly 1.93.1** — the release build refuses any other version,
-because the artifact digests are pinned to it:
+Rust needs to be **1.93 or newer**, the `rust-version` floor in `Cargo.toml`.
+No patch release is pinned, and any GCC will build.
 
 ```sh
-rustup toolchain install 1.93.1 && rustup default 1.93.1
-rustc --version    # rustc 1.93.1
+rustc --version    # 1.93 or newer
 ```
+
+`config/sources.lock.toml` records the toolchain the reference release was
+built with. A different `rustc` or GCC prints a note and carries on; the
+artifacts just will not be byte-identical to that release. Set
+`POCKET_STRICT_TOOLCHAIN=1` to require the recorded versions, which is what
+reproducing someone else's release needs.
+`scripts/check-release-toolchain.sh` runs before the kernel build, so anything
+it has to say arrives in a second rather than an hour.
 
 You do **not** need Go installed. The Skopeo build downloads a pinned Go
 toolchain, checks its SHA-256, and uses it in an isolated cache.
@@ -126,10 +135,23 @@ restricts them refuses that step; running it is otherwise unprivileged.
 
 The kernel build also imposes its own tool minimums, taken from
 `Documentation/process/changes.rst` in the pinned Linux 7.2 tree: GCC 8.1,
-binutils 2.30, GNU make 4.0, bison 2.0, flex 2.5.35 and Python 3.9. The
-`slirp4netns` chain additionally needs `meson` and `ninja`; it builds GLib from
-source, which wants a considerably newer `meson` than several
-long-term-support distributions package.
+binutils 2.30, GNU make 4.0, bison 2.0, flex 2.5.35 and Python 3.9.
+
+The `slirp4netns` chain additionally needs `ninja` and **meson 0.60 or newer**,
+which is GLib 2.78's floor and the reason that series is pinned: 22.04 packages
+meson 0.61.2 and 24.04 packages 1.3.2, while GLib 2.80 raised the floor to
+1.2.0 and 2.84 to 1.4.0. libslirp declares no GLib version constraint, so
+nothing is gained by tracking the newer series and both LTS releases would lose
+the ability to build.
+
+Ubuntu 24.04 needs one host setting. It sets
+`kernel.apparmor_restrict_unprivileged_userns=1`, which strips every capability
+inside an unprivileged user namespace and so breaks the `bwrap --unshare-net`
+sandbox around one Skopeo smoke test:
+
+```sh
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
 
 The first build needs HTTPS access to `cdn.kernel.org`, `github.com`,
 `gitlab.freedesktop.org`, `download.gnome.org`, `curl.se`, `go.dev`,
@@ -162,6 +184,39 @@ That single target does everything, in order:
    reproducibly.
 5. **Seals a profile bundle** — a content-addressed directory holding the
    exact kernel, tools and initramfses this runtime will use.
+
+### How wide it builds
+
+Every C and Go compile in that chain takes its job count from one environment
+variable:
+
+```sh
+POCKET_BUILD_JOBS=8 make release-profile
+```
+
+Unset, the kernel takes every online CPU and the three static tool chains stop
+at 16. Either way the width is capped at 256: a larger request is refused, a
+larger host is clamped.
+
+| target | where the count lands |
+|---|---|
+| `make kernel`, `make kernel-el7`, `make diagnostic-kernel` | `make -j` on the Linux tree |
+| `make static-e2fsprogs` | `make -j` |
+| `make static-slirp4netns` | `make -j` and `ninja -j`, across the whole GLib chain |
+| `make static-skopeo` | `go build -p` and `GOMAXPROCS` |
+| the Rust artifacts, `make host-tools` | `CARGO_BUILD_JOBS` |
+
+cargo and the Go compiler take no `-j`, so the value reaches them through their
+own environment variables instead.
+
+A top-level `make -jN` runs independent targets at once and bounds cargo, but
+does not reach inside those builds — each passes its own `-j`. Setting both
+multiplies: `make -j4` with `POCKET_BUILD_JOBS=16` is up to 64 concurrent
+compilers.
+
+Widening the build does not change what it produces: the kernel, e2fsprogs and
+Skopeo each compare their own output against the recorded digest whatever the
+width.
 
 ### Install it
 

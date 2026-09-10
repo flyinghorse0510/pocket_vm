@@ -12,16 +12,17 @@ GEN_INIT_CPIO=${POCKET_GEN_INIT_CPIO:-"$BUILD_ROOT/kernel/x86_64-smp-p4k$LINUX_O
 WORKLOAD_TEMPLATE="$ROOT/config/initramfs/workload-release.list.in"
 BUILDER_TEMPLATE="$ROOT/config/initramfs/builder-release.list.in"
 VALIDATOR_TEMPLATE="$ROOT/config/initramfs/validator-release.list.in"
-SOURCE_LOCK="$ROOT/config/sources.lock.toml"
 SOURCE_DATE_EPOCH=$(pocket_source_date_epoch)
 export LC_ALL=C
 export TZ=UTC
 POCKET_INIT="$GUEST_DIR/pocket-init"
 POCKET_BUILDER_INIT="$GUEST_DIR/pocket-builder-init"
 POCKET_VALIDATOR_INIT="$GUEST_DIR/pocket-validator-init"
-UMOCI=${POCKET_UMOCI:-/usr/bin/umoci}
-LIBC=${POCKET_BUILDER_LIBC:-/usr/lib/x86_64-linux-gnu/libc.so.6}
-LOADER=${POCKET_BUILDER_LOADER:-/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2}
+UMOCI=${POCKET_UMOCI:-$(command -v umoci 2>/dev/null || printf '/usr/bin/umoci')}
+# LIBC and LOADER are resolved from umoci's own closure below rather than from
+# a fixed path. They used to default to /usr/lib/x86_64-linux-gnu/..., which is
+# Debian's multiarch layout: on a distribution that puts glibc anywhere else,
+# the existence check below failed before the build had done anything at all.
 
 for command in awk cmp cpio diff env grep install ldd mktemp objdump readelf sed sha256sum; do
     require_command "$command"
@@ -31,39 +32,20 @@ safe_managed_root "$PROFILE_ROOT"
 [[ -x "$GEN_INIT_CPIO" ]] || die "build the pinned UML kernel first: $GEN_INIT_CPIO"
 [[ -x "$POCKET_INIT" && -x "$POCKET_BUILDER_INIT" && -x "$POCKET_VALIDATOR_INIT" ]] || \
     die "build release Rust artifacts first"
-[[ -x "$UMOCI" && -f "$LIBC" && -f "$LOADER" ]] || \
-    die "pinned umoci loader/libc closure is missing"
+[[ -x "$UMOCI" ]] || die "umoci is required; set POCKET_UMOCI to point at it"
 umask 0022
 
-lock_digest() {
-    local key=$1
-    local value
-
-    value=$(sed -n "s/^${key} = \"\([0-9a-f]\{64\}\)\"$/\\1/p" "$SOURCE_LOCK")
-    [[ ${#value} == 64 ]] || die "missing or duplicate $key in source lock"
-    printf '%s\n' "$value"
-}
-
-verify_digest() {
-    local artifact=$1
-    local expected=$2
-    local actual
-
-    actual=$(sha256sum "$artifact" | awk '{print $1}')
-    [[ "$actual" == "$expected" ]] || \
-        die "artifact digest mismatch for $artifact: expected $expected, found $actual"
-}
-
-UMOCI_DIGEST=$(lock_digest umoci_sha256)
-LIBC_DIGEST=$(lock_digest glibc_sha256)
-LOADER_DIGEST=$(lock_digest glibc_loader_sha256)
-verify_digest "$UMOCI" "$UMOCI_DIGEST"
-verify_digest "$LIBC" "$LIBC_DIGEST"
-verify_digest "$LOADER" "$LOADER_DIGEST"
-
+# Held to config/sources.lock.toml rather than to a literal, for the same
+# reason the sealer is: a version written into the script cannot notice that
+# the lock moved. The lock records the upstream version and the reported string
+# appends the distribution's packaging revision.
 UMOCI_VERSION=$(env -i "$UMOCI" --version)
-[[ "$UMOCI_VERSION" == "umoci version 0.4.7+ds-4" ]] || \
+[[ "$UMOCI_VERSION" == "umoci version "* ]] || \
     die "unexpected pinned umoci version output: $UMOCI_VERSION"
+UMOCI_UPSTREAM=${UMOCI_VERSION#umoci version }
+UMOCI_UPSTREAM=${UMOCI_UPSTREAM%%[+-]*}
+pocket_match_recorded "the umoci version" "$UMOCI_UPSTREAM" \
+    "$(pocket_lock_value development_tools umoci)"
 UMOCI_MACHINE=$(readelf -h "$UMOCI" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')
 [[ "$UMOCI_MACHINE" == "Advanced Micro Devices X86-64" ]] || \
     die "pinned umoci is not x86-64: $UMOCI_MACHINE"
@@ -82,9 +64,18 @@ mapfile -t UMOCI_CLOSURE < <(
 )
 [[ ${#UMOCI_CLOSURE[@]} == 2 ]] || \
     die "umoci loader/library closure contains an unexpected file"
-[[ ${UMOCI_CLOSURE[0]} == "$LIBC" && \
-   ${UMOCI_CLOSURE[1]} == /lib64/ld-linux-x86-64.so.2 ]] || \
-    die "umoci resolves outside the pinned loader/libc closure"
+
+# Whatever this host's glibc is and wherever it keeps it, that is the closure
+# that has to be packed. The shape is still checked -- exactly libc.so.6 plus
+# the ABI loader -- only the identity is no longer required to match one host.
+LIBC=${POCKET_BUILDER_LIBC:-${UMOCI_CLOSURE[0]}}
+LOADER=${POCKET_BUILDER_LOADER:-${UMOCI_CLOSURE[1]}}
+[[ -f "$LIBC" && -f "$LOADER" ]] || die "umoci loader/libc closure is missing"
+[[ ${LIBC##*/} == libc.so.6 ]] || die "unexpected umoci C library: $LIBC"
+[[ "$LOADER" == "$UMOCI_INTERPRETER" ]] || \
+    die "umoci resolves a loader other than its own interpreter: $LOADER"
+LIBC_DIGEST=$(sha256sum "$LIBC" | awk '{print $1}')
+LOADER_DIGEST=$(sha256sum "$LOADER" | awk '{print $1}')
 
 escape_sed_replacement() {
     sed 's/[&|\\]/\\&/g' <<< "$1"

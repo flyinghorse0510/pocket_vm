@@ -1,9 +1,9 @@
 SHELL := /bin/bash
 
-.PHONY: host-clone-idcache-probe stub-fd-audit stub-fd-audit-el7 verify-el7 kernel-el7 audit-linux-source-el7 host-seccomp-probe instances image-adjust terminal-session container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
+.PHONY: release-toolchain host-clone-idcache-probe stub-fd-audit stub-fd-audit-el7 verify-el7 kernel-el7 audit-linux-source-el7 host-seccomp-probe instances image-adjust terminal-session container-engine static-slirp4netns package install install-archive test kernel audit-linux-source diagnostic-kernel diagnostic-lifecycle lifecycle-soak distro-matrix reproduce-release test-linux-source-pipeline host-tools static-e2fsprogs static-skopeo audit-arm64-seed release-rust-artifacts release-initramfs release-artifacts release-profile rust-release-e2e probe-initramfs probe-disk probe memory-matrix smp-probe-initramfs smp-scaling lifecycle-probe-initramfs lifecycle-probe builder-initramfs workload-probe-initramfs ubuntu-24.04 ubuntu-26.04 e2e-probe e2e-probe-26.04 verify
 
 host-tools:
-	cargo build --release -p pocket-guard
+	$(if $(POCKET_BUILD_JOBS),CARGO_BUILD_JOBS=$(POCKET_BUILD_JOBS)) cargo build --release -p pocket-guard
 
 static-e2fsprogs:
 	./scripts/build-static-e2fsprogs.sh
@@ -26,13 +26,22 @@ static-skopeo:
 audit-arm64-seed:
 	./scripts/audit-arm64-uml-seed.sh
 
-release-rust-artifacts:
+# Refuse a release build on a toolchain that could not have sealed it, before
+# any of the long builds start. It is the first prerequisite of everything in
+# the chain because the chain reaches cargo only after it has finished Linux:
+# the check used to live inside the Rust step alone, so a host on the wrong
+# rustc spent forty minutes compiling a kernel to be told it was the wrong
+# host. Every version it enforces is read from config/sources.lock.toml.
+release-toolchain:
+	./scripts/check-release-toolchain.sh
+
+release-rust-artifacts: release-toolchain
 	./scripts/build-release-rust-artifacts.sh
 
-release-initramfs: kernel release-rust-artifacts
+release-initramfs: release-toolchain kernel release-rust-artifacts
 	./scripts/build-release-initramfs.sh
 
-release-artifacts: static-e2fsprogs static-skopeo static-slirp4netns release-initramfs
+release-artifacts: release-toolchain static-e2fsprogs static-skopeo static-slirp4netns release-initramfs
 
 release-profile: release-artifacts
 	./scripts/build-release-profile.sh

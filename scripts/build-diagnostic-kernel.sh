@@ -26,12 +26,14 @@ DIAGNOSTIC_FRAGMENT="$ROOT/config/kernel/x86_64-uml-diagnostic.fragment"
 # build replace the default's diagnostic kernel with one built from different
 # source, under a name that says nothing about it.
 OUTPUT_DIR="$BUILD_ROOT/diagnostic-kernel$LINUX_OUTPUT_SUFFIX"
-JOBS=${POCKET_BUILD_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
 for command in awk bc bison file flex g++ gcc getconf ld make mkdir python3 sha256sum; do
     require_command "$command"
 done
 safe_managed_root "$BUILD_ROOT"
+# Same width contract as the release kernel. This lane used to validate nothing
+# at all and hand the raw string to make -j.
+JOBS=$(pocket_build_jobs)
 load_linux_source_locks "$ROOT"
 
 [[ -d "$SOURCE_DIR" && ! -L "$SOURCE_DIR" ]] || \

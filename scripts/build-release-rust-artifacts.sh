@@ -19,17 +19,14 @@ safe_managed_root "$PROFILE_ROOT"
 safe_managed_root "$RUST_TARGET_DIR"
 umask 0022
 
-RUST_RELEASE=$(rustc --version | awk '{print $2}')
-[[ "$RUST_RELEASE" == 1.93.1 ]] || \
-    die "release artifacts require rustc 1.93.1, found $RUST_RELEASE"
-RUST_HOST=$(rustc -vV | sed -n 's/^host: //p')
-[[ "$RUST_HOST" == "$TARGET" ]] || \
-    die "release artifacts require a $TARGET Rust host, found $RUST_HOST"
-GCC_MAJOR=$(gcc -dumpfullversion | cut -d. -f1)
-[[ "$GCC_MAJOR" == 15 ]] || \
-    die "release artifacts require GCC major 15, found $(gcc -dumpfullversion)"
-[[ -d "$(rustc --print target-libdir --target "$TARGET")" ]] || \
-    die "Rust target $TARGET is not installed"
+# The gate `make release-toolchain` already ran, repeated here so that running
+# this script directly is checked too. It reads every version it enforces from
+# config/sources.lock.toml, which is why none is written out here.
+"$ROOT/scripts/check-release-toolchain.sh" >/dev/null
+
+# cargo takes no -j here, so without this it builds at the host's full width
+# whatever POCKET_BUILD_JOBS says.
+pocket_export_build_jobs "$(pocket_build_jobs)"
 
 POCKET_CARGO_HOME_PATH=${CARGO_HOME:-"${HOME:?HOME is required}/.cargo"}
 [[ "$POCKET_CARGO_HOME_PATH" = /* ]] || \

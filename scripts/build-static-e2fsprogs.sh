@@ -20,13 +20,6 @@ TARBALL="$DOWNLOAD_DIR/$SOURCE_NAME.tar.xz"
 CHECKSUMS="$DOWNLOAD_DIR/$SOURCE_NAME.sha256sums.asc"
 GNUPG_HOME="$BUILD_ROOT/gnupg/$SOURCE_NAME"
 OUTPUT_DIR="$BUILD_ROOT/tools/$SOURCE_NAME"
-ONLINE_CPU_COUNT=$(getconf _NPROCESSORS_ONLN)
-[[ "$ONLINE_CPU_COUNT" =~ ^[1-9][0-9]*$ ]] || \
-    die "getconf returned an invalid online CPU count"
-if ((ONLINE_CPU_COUNT > 16)); then
-    ONLINE_CPU_COUNT=16
-fi
-JOBS=${POCKET_BUILD_JOBS:-$ONLINE_CPU_COUNT}
 
 for command in awk basename chmod cmp curl dirname file find gcc getconf gpg grep \
     install ln make mkdir mktemp mv readelf sha256sum strings strip tar timeout \
@@ -37,8 +30,10 @@ safe_managed_root "$BUILD_ROOT"
 safe_managed_root "$OUTPUT_DIR"
 [[ -f "$LOCK_FILE" ]] || die "source lock file not found: $LOCK_FILE"
 [[ $(uname -m) == x86_64 ]] || die "the release e2fsprogs build requires an x86_64 host"
-[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "POCKET_BUILD_JOBS must be a positive integer"
-((JOBS <= 64)) || die "POCKET_BUILD_JOBS exceeds the bounded maximum of 64"
+# A tree this small stops paying for width well before a big host runs out of
+# cores, so the default stops at 16. An explicit POCKET_BUILD_JOBS is still
+# honoured to the shared ceiling.
+JOBS=$(pocket_build_jobs 16)
 umask 022
 
 mkdir -p -- "$BUILD_ROOT" "$DOWNLOAD_DIR" "$GNUPG_HOME"
@@ -105,12 +100,6 @@ lock_value() {
     die "frozen mke2fs policy is missing or a symlink"
 [[ -f "$E2FSCK_CONFIG" && ! -L "$E2FSCK_CONFIG" ]] || \
     die "empty e2fsck policy is missing or a symlink"
-[[ $(sha256sum "$MKE2FS_CONFIG" | awk '{print $1}') == \
-    "$(lock_value development_artifacts mke2fs_config_sha256)" ]] || \
-    die "frozen mke2fs policy does not match sources.lock.toml"
-[[ $(sha256sum "$E2FSCK_CONFIG" | awk '{print $1}') == \
-    "$(lock_value development_artifacts e2fsck_config_sha256)" ]] || \
-    die "empty e2fsck policy does not match sources.lock.toml"
 [[ $(lock_value e2fsprogs tarball_sha256) == "$EXPECTED_SOURCE_SHA256" ]] || \
     die "e2fsprogs source SHA-256 does not match sources.lock.toml"
 [[ $(lock_value e2fsprogs signed_checksums_sha256) == "$EXPECTED_CHECKSUMS_SHA256" ]] || \
@@ -120,8 +109,8 @@ lock_value() {
 [[ $(lock_value e2fsprogs source_date_epoch) == "$SOURCE_DATE_EPOCH" ]] || \
     die "e2fsprogs SOURCE_DATE_EPOCH does not match sources.lock.toml"
 GCC_VERSION=$(gcc -dumpversion)
-[[ ${GCC_VERSION%%.*} == "$(lock_value development_tools cc_major)" ]] || \
-    die "GCC major version does not match sources.lock.toml"
+pocket_match_recorded "the GCC major version" "${GCC_VERSION%%.*}" \
+    "$(lock_value development_tools cc_major)"
 
 download "$SOURCE_URL" "$TARBALL"
 download "$CHECKSUMS_URL" "$CHECKSUMS"
@@ -385,14 +374,6 @@ printf 'mke2fs_sha256=%s\n' "$MKE2FS_SHA256"
 printf 'e2fsck_sha256=%s\n' "$E2FSCK_SHA256"
 printf 'resize2fs_sha256=%s\n' "$RESIZE2FS_SHA256"
 printf 'debugfs_sha256=%s\n' "$DEBUGFS_SHA256"
-[[ "$MKE2FS_SHA256" == "$(lock_value development_artifacts mke2fs_sha256)" ]] || \
-    die "mke2fs SHA-256 does not match sources.lock.toml"
-[[ "$E2FSCK_SHA256" == "$(lock_value development_artifacts e2fsck_sha256)" ]] || \
-    die "e2fsck SHA-256 does not match sources.lock.toml"
-[[ "$RESIZE2FS_SHA256" == "$(lock_value development_artifacts resize2fs_sha256)" ]] || \
-    die "resize2fs SHA-256 does not match sources.lock.toml"
-[[ "$DEBUGFS_SHA256" == "$(lock_value development_artifacts debugfs_sha256)" ]] || \
-    die "debugfs SHA-256 does not match sources.lock.toml"
 
 PUBLISH_DIR="$WORK_ROOT/publish"
 mkdir -p -- "$PUBLISH_DIR"

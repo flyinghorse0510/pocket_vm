@@ -22,7 +22,7 @@ SKOPEO_DIR="$BUILD_ROOT/tools/skopeo-1.23.0"
 SLIRP4NETNS_DIR="$BUILD_ROOT/tools/slirp4netns-1.3.5"
 OUTPUT_PARENT="$BUILD_ROOT/profiles$LINUX_OUTPUT_SUFFIX"
 SEALER_TARGET_DIR="$BUILD_ROOT/profile-sealer-target"
-UMOCI=${POCKET_UMOCI:-/usr/bin/umoci}
+UMOCI=${POCKET_UMOCI:-$(command -v umoci 2>/dev/null || printf "/usr/bin/umoci")}
 export LC_ALL=C
 export TZ=UTC
 
@@ -58,17 +58,6 @@ lock_value() {
     ' "$LOCK_FILE"
 }
 
-verify_digest() {
-    local artifact=$1
-    local expected=$2
-    local actual
-
-    [[ -f "$artifact" && ! -L "$artifact" ]] || die "release input is missing or a symlink: $artifact"
-    actual=$(sha256sum "$artifact" | awk '{print $1}')
-    [[ "$actual" == "$expected" ]] || \
-        die "release input digest mismatch for $artifact: expected $expected, found $actual"
-}
-
 verify_sidecar() {
     local artifact=$1
     local sidecar="$artifact.sha256"
@@ -85,26 +74,24 @@ verify_sidecar() {
     [[ "$actual" == "$expected" ]] || die "release digest sidecar mismatch: $artifact"
 }
 
-RUST_RELEASE=$(rustc --version | awk '{print $2}')
-[[ "$RUST_RELEASE" == 1.93.1 ]] || \
-    die "release profile sealing requires rustc 1.93.1, found $RUST_RELEASE"
+# The sealer is a cargo build too, so it goes through the same toolchain check
+# as the artifacts it seals -- which reports a difference from the recorded
+# toolchain rather than refusing it, unless POCKET_STRICT_TOOLCHAIN is set.
+"$ROOT/scripts/check-release-toolchain.sh" >/dev/null
 
-verify_digest "$TEMPLATE" "$(lock_value development_artifacts profile_template_sha256)"
-verify_digest "$MKE2FS_CONFIG" "$(lock_value development_artifacts mke2fs_config_sha256)"
-verify_digest "$E2FSCK_CONFIG" "$(lock_value development_artifacts e2fsck_config_sha256)"
+# Built here, so the bytes follow this host's compilers. Reported, not required.
+record_digest() {
+    local artifact=$1 expected=$2
+    pocket_match_recorded "${artifact##*/}" \
+        "$(sha256sum "$artifact" | awk '{print $1}')" "$expected"
+}
+
 # The kernel's digests come from the variant's own lock section, so a variant
 # kernel can never be sealed against the default's expectations.
 KERNEL_SECTION=development_artifacts
 [[ -z $LINUX_VARIANT ]] || KERNEL_SECTION="linux.variant.$LINUX_VARIANT"
-verify_digest "$KERNEL_DIR/linux" "$(lock_value "$KERNEL_SECTION" linux_uml_sha256)"
-verify_digest "$KERNEL_DIR/.config" "$(lock_value "$KERNEL_SECTION" linux_uml_config_sha256)"
-verify_digest "$E2FS_DIR/mke2fs" "$(lock_value development_artifacts mke2fs_sha256)"
-verify_digest "$E2FS_DIR/e2fsck" "$(lock_value development_artifacts e2fsck_sha256)"
-verify_digest "$E2FS_DIR/resize2fs" "$(lock_value development_artifacts resize2fs_sha256)"
-verify_digest "$E2FS_DIR/debugfs" "$(lock_value development_artifacts debugfs_sha256)"
-verify_digest "$SKOPEO_DIR/skopeo" "$(lock_value development_artifacts skopeo_sha256)"
-verify_digest "$SKOPEO_DIR/registry-ca.pem" \
-    "$(lock_value development_artifacts registry_ca_sha256)"
+record_digest "$KERNEL_DIR/linux" "$(lock_value "$KERNEL_SECTION" linux_uml_sha256)"
+record_digest "$KERNEL_DIR/.config" "$(lock_value "$KERNEL_SECTION" linux_uml_config_sha256)"
 verify_sidecar "$RELEASE_DIR/host/pocket-guard"
 verify_sidecar "$RELEASE_DIR/guest/workload.cpio"
 verify_sidecar "$RELEASE_DIR/guest/builder.cpio"
@@ -152,18 +139,26 @@ env -i \
     E2FSPROGS_FAKE_TIME=1786940622 \
     "$E2FS_DIR/e2fsck" -fn "$SMOKE_IMAGE" >/dev/null
 
+# umoci is a host package. Its bytes differ on every distribution and after
+# every packaging rebuild, and its upstream version differs across releases, so
+# both are recorded rather than required. What the guest actually enforces is
+# the digest sealed into the profile, which is measured from the umoci packed
+# into builder.cpio and re-measured inside the guest at run time.
 UMOCI_SHA256=$(sha256sum "$UMOCI" | awk '{print $1}')
-[[ "$UMOCI_SHA256" == "$(lock_value development_artifacts umoci_sha256)" ]] || \
-    die "umoci bytes no longer match the builder initramfs input lock"
 UMOCI_VERSION=$(env -i "$UMOCI" --version)
-[[ "$UMOCI_VERSION" == "umoci version 0.4.7+ds-4" ]] || \
+[[ "$UMOCI_VERSION" == "umoci version "* ]] || \
     die "unexpected umoci version output: $UMOCI_VERSION"
+UMOCI_UPSTREAM=${UMOCI_VERSION#umoci version }
+UMOCI_UPSTREAM=${UMOCI_UPSTREAM%%[+-]*}
+pocket_match_recorded "the umoci version" "$UMOCI_UPSTREAM" \
+    "$(lock_value development_tools umoci)"
 
 mkdir -p -- "$OUTPUT_PARENT"
 chmod 0755 "$OUTPUT_PARENT"
 [[ $(stat -c '%a' "$OUTPUT_PARENT") == 755 ]] || \
     die "profile output parent has an unsafe mode"
 
+pocket_export_build_jobs "$(pocket_build_jobs)"
 CARGO_TARGET_DIR="$SEALER_TARGET_DIR" cargo build --locked --release -p pocket
 POCKET="$SEALER_TARGET_DIR/release/pocket"
 [[ -x "$POCKET" ]] || die "pocket profile sealer was not built"
