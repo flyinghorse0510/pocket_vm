@@ -488,6 +488,54 @@ fn profile_store_inspection_listing_alias_and_gc_are_real_operations() {
     assert_eq!(status, 0, "{}", text(&error));
     assert_eq!(json(&output)["generation_id"], first_id.to_string());
 
+    // The listing answers "what can I run": the aliased generation appears and
+    // the unrooted one does not, because only an alias makes a generation
+    // reachable by name.
+    let (status, output, error) = invoke(&[
+        "pocket".to_owned(),
+        "image".to_owned(),
+        "list".to_owned(),
+        "--profile-bundle".to_owned(),
+        profile.root.display().to_string(),
+        "--store".to_owned(),
+        store.root.display().to_string(),
+        "--json".to_owned(),
+    ]);
+    assert_eq!(status, 0, "{}", text(&error));
+    let images = json(&output);
+    let images = images["images"].as_array().expect("images array");
+    assert_eq!(images.len(), 1);
+    assert_eq!(images[0]["reference"], "example:latest");
+    assert_eq!(images[0]["repository"], "example");
+    assert_eq!(images[0]["tag"], "latest");
+    assert_eq!(images[0]["generation_id"], first_id.to_string());
+    assert_eq!(images[0]["profile_id"], "x86_64-smp-p4k");
+
+    // The human listing is a table, because the reference in it is what
+    // `pocket run` takes and looking like `docker images` is the point.
+    let (status, output, error) = invoke(&[
+        "pocket".to_owned(),
+        "image".to_owned(),
+        "ls".to_owned(),
+        "--profile-bundle".to_owned(),
+        profile.root.display().to_string(),
+        "--store".to_owned(),
+        store.root.display().to_string(),
+    ]);
+    assert_eq!(status, 0, "{}", text(&error));
+    let listing = text(&output);
+    let mut lines = listing.lines();
+    let header = lines.next().expect("a header row");
+    assert!(header.starts_with("REPOSITORY"), "{listing}");
+    assert!(header.contains("TAG"), "{listing}");
+    assert!(header.contains("IMAGE ID"), "{listing}");
+    assert!(header.contains("PLATFORM"), "{listing}");
+    let row = lines.next().expect("one image row");
+    assert!(row.starts_with("example"), "{listing}");
+    assert!(row.contains("latest"), "{listing}");
+    assert!(row.contains("linux/amd64"), "{listing}");
+    assert!(lines.next().is_none(), "exactly one image: {listing}");
+
     let (status, output, error) = invoke(&[
         "pocket".to_owned(),
         "cache".to_owned(),

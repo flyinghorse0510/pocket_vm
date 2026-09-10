@@ -72,6 +72,14 @@ enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    /// List the image aliases this profile can run. Same as `image list`.
+    Images {
+        #[command(flatten)]
+        context: ProfileStoreArgs,
+        /// Emit stable JSON rather than one line per image.
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect an existing image alias or immutable generation.
     Image {
         #[command(subcommand)]
@@ -246,8 +254,15 @@ enum ImageCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Unavailable until the store exposes safe alias enumeration.
-    List,
+    /// List the image aliases this profile can run.
+    #[command(alias = "ls")]
+    List {
+        #[command(flatten)]
+        context: ProfileStoreArgs,
+        /// Emit stable JSON rather than one line per image.
+        #[arg(long)]
+        json: bool,
+    },
     /// Pull one anonymous fully-qualified docker:// image and publish a generation.
     Pull {
         #[command(flatten)]
@@ -734,12 +749,15 @@ fn apply_config(command: &mut Command, config: &Config) {
                 fill(&mut context.store, &config.store);
                 fill(&mut context.runtime_root, &config.runtime_root);
             }
-            ImageCommand::Inspect { context, .. } => {
+            ImageCommand::Inspect { context, .. } | ImageCommand::List { context, .. } => {
                 fill(&mut context.profile_bundle, &config.profile_bundle);
                 fill(&mut context.store, &config.store);
             }
-            ImageCommand::List => {}
         },
+        Command::Images { context, .. } => {
+            fill(&mut context.profile_bundle, &config.profile_bundle);
+            fill(&mut context.store, &config.store);
+        }
         Command::Ps {
             runtime_root,
             store,
@@ -810,6 +828,9 @@ fn execute(
     apply_config(&mut cli.command, &Config::load()?);
     match cli.command {
         Command::Profile { command } => execute_profile(command, stdout),
+        Command::Images { context, json } => {
+            execute_image(ImageCommand::List { context, json }, stdout)
+        }
         Command::Image { command } => execute_image(command, stdout),
         Command::Generation { command } => execute_generation(command, stdout),
         Command::Cache { command } => execute_cache(command, stdout),
@@ -976,10 +997,22 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
             }
             Ok(CommandStatus::SUCCESS)
         }
-        ImageCommand::List => Err(unsupported(
-            "image-list",
-            "the store does not yet expose safe profile-qualified alias enumeration",
-        )),
+        ImageCommand::List { context, json } => {
+            let profile = load_profile(required_path(
+                &context.profile_bundle,
+                "profile-bundle",
+                "profile_bundle",
+            )?)?;
+            let store = open_store(required_path(&context.store, "store", "store")?)?;
+            let profile_id = &profile.manifest().profile_id;
+            let images: Vec<AliasRoot> = store
+                .alias_roots()?
+                .into_iter()
+                .filter(|root| &root.profile_id == profile_id)
+                .collect();
+            write_image_list_output(stdout, &images, json)?;
+            Ok(CommandStatus::SUCCESS)
+        }
         ImageCommand::Pull {
             context,
             source,
@@ -1439,40 +1472,66 @@ fn execute_ps(
             .map_err(|source| output_error("write ps output", source))?;
         return Ok(CommandStatus::SUCCESS);
     }
-    for operation in &live {
-        let field = |name: &str| {
-            operation
-                .description
-                .iter()
-                .find(|(key, _)| key == name)
-                .map_or("-", |(_, value)| value.as_str())
-        };
-        writeln!(
+    // `docker ps` lists the running set, and `-a` appends what has exited. The
+    // two carry different fields here -- a live run has a pid and consoles, an
+    // exited one has an outcome and a command -- so they are two tables rather
+    // than one with half its cells empty.
+    let running: Vec<Vec<String>> = live
+        .iter()
+        .map(|operation| {
+            let field = |name: &str| {
+                operation
+                    .description
+                    .iter()
+                    .find(|(key, _)| key == name)
+                    .map_or("-", |(_, value)| value.as_str())
+            };
+            vec![
+                operation.id.clone(),
+                short_generation(field("generation")),
+                field("pid").to_owned(),
+                field("cpus").to_owned(),
+                human_size(field("memory_bytes").parse().unwrap_or(0)),
+                field("started").to_owned(),
+                ellipsize(field("consoles"), 32),
+            ]
+        })
+        .collect();
+    write_table(
+        stdout,
+        &[
+            "RUN ID",
+            "GENERATION",
+            "PID",
+            "CPUS",
+            "MEMORY",
+            "STARTED",
+            "CONSOLES",
+        ],
+        &running,
+        "write ps output",
+    )?;
+    if !kept.is_empty() {
+        writeln!(stdout).map_err(|source| output_error("write ps output", source))?;
+        let exited: Vec<Vec<String>> = kept
+            .iter()
+            .map(|instance| {
+                vec![
+                    instance.name().to_owned(),
+                    instance.image_reference().to_owned(),
+                    outcome_text(instance.outcome()),
+                    instance.created_unix().to_string(),
+                    instance.finished_unix().to_string(),
+                    ellipsize(instance.command(), 40),
+                ]
+            })
+            .collect();
+        write_table(
             stdout,
-            "id={} generation={} pid={} started={} cpus={} memory_bytes={} consoles={}",
-            operation.id,
-            field("generation"),
-            field("pid"),
-            field("started"),
-            field("cpus"),
-            field("memory_bytes"),
-            field("consoles"),
-        )
-        .map_err(|source| output_error("write ps output", source))?;
-    }
-    for instance in &kept {
-        writeln!(
-            stdout,
-            "name={} status={} image={} generation={} created={} finished={} command={}",
-            instance.name(),
-            outcome_text(instance.outcome()),
-            instance.image_reference(),
-            instance.generation_id(),
-            instance.created_unix(),
-            instance.finished_unix(),
-            instance.command(),
-        )
-        .map_err(|source| output_error("write ps output", source))?;
+            &["NAME", "IMAGE", "STATUS", "CREATED", "FINISHED", "COMMAND"],
+            &exited,
+            "write ps output",
+        )?;
     }
     Ok(CommandStatus::SUCCESS)
 }
@@ -3065,6 +3124,76 @@ fn platform_summary(platform: &Platform) -> Value {
     })
 }
 
+/// Render a listing the way `docker` does: a header row, then columns padded to
+/// the widest cell.
+///
+/// Every human listing in this CLI goes through here, so they line up with one
+/// another as well as with the tool people arrive from. A table cannot hold an
+/// arbitrary value without losing the column boundary, so cells that can be
+/// long are abbreviated on the way in; `--json` is what a script reads and it
+/// abbreviates nothing.
+fn write_table(
+    output: &mut dyn Write,
+    headers: &[&str],
+    rows: &[Vec<String>],
+    context: &'static str,
+) -> Result<(), CliError> {
+    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    let render = |cells: &[String]| {
+        let last = cells.len().saturating_sub(1);
+        let mut line = String::new();
+        for (index, (cell, width)) in cells.iter().zip(&widths).enumerate() {
+            if index == last {
+                line.push_str(cell);
+            } else {
+                let pad = width.saturating_sub(cell.chars().count());
+                line.push_str(cell);
+                line.push_str(&" ".repeat(pad + 3));
+            }
+        }
+        line.trim_end().to_owned()
+    };
+    let header_cells: Vec<String> = headers.iter().map(|header| (*header).to_owned()).collect();
+    writeln!(output, "{}", render(&header_cells))
+        .map_err(|source| output_error(context, source))?;
+    for row in rows {
+        writeln!(output, "{}", render(row)).map_err(|source| output_error(context, source))?;
+    }
+    Ok(())
+}
+
+/// Bytes in the units `docker images` reports, which are powers of a thousand
+/// rather than of 1024.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}B")
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
+}
+
+/// Shorten a cell the way `docker ps` shortens a command, so that one long
+/// value cannot push every column after it off the line.
+fn ellipsize(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(1)).collect();
+    format!("{kept}\u{2026}")
+}
+
 fn write_profile_output(
     output: &mut dyn Write,
     profiles: &[Value],
@@ -3073,18 +3202,23 @@ fn write_profile_output(
     if json_output {
         return write_json(output, profiles);
     }
-    for profile in profiles {
-        writeln!(
-            output,
-            "{} {} {} {}",
-            value_text(profile, "profile_id"),
-            value_text(profile, "profile_revision"),
-            value_text(profile, "maturity"),
-            value_text(profile, "bundle")
-        )
-        .map_err(|source| output_error("write profile output", source))?;
-    }
-    Ok(())
+    let rows: Vec<Vec<String>> = profiles
+        .iter()
+        .map(|profile| {
+            vec![
+                value_text(profile, "profile_id").to_owned(),
+                short_generation(value_text(profile, "profile_revision")),
+                value_text(profile, "maturity").to_owned(),
+                value_text(profile, "bundle").to_owned(),
+            ]
+        })
+        .collect();
+    write_table(
+        output,
+        &["PROFILE ID", "REVISION", "MATURITY", "BUNDLE"],
+        &rows,
+        "write profile output",
+    )
 }
 
 fn write_generation_output(
@@ -3095,24 +3229,32 @@ fn write_generation_output(
     if json_output {
         return write_json(output, generations);
     }
-    for generation in generations {
-        writeln!(
-            output,
-            "generation_id={} derivation_key={} profile_id={} platform={}/{} base_size={}",
-            value_text(generation, "generation_id"),
-            value_text(generation, "derivation_key"),
-            value_text(generation, "profile_id"),
-            generation["effective_platform"]["os"]
-                .as_str()
-                .unwrap_or("<invalid>"),
-            generation["effective_platform"]["architecture"]
-                .as_str()
-                .unwrap_or("<invalid>"),
-            generation["base_size"].as_u64().unwrap_or(0),
-        )
-        .map_err(|source| output_error("write generation output", source))?;
-    }
-    Ok(())
+    let rows: Vec<Vec<String>> = generations
+        .iter()
+        .map(|generation| {
+            vec![
+                short_generation(value_text(generation, "generation_id")),
+                short_generation(value_text(generation, "derivation_key")),
+                value_text(generation, "profile_id").to_owned(),
+                format!(
+                    "{}/{}",
+                    generation["effective_platform"]["os"]
+                        .as_str()
+                        .unwrap_or("<invalid>"),
+                    generation["effective_platform"]["architecture"]
+                        .as_str()
+                        .unwrap_or("<invalid>"),
+                ),
+                human_size(generation["base_size"].as_u64().unwrap_or(0)),
+            ]
+        })
+        .collect();
+    write_table(
+        output,
+        &["GENERATION ID", "DERIVATION", "PROFILE", "PLATFORM", "SIZE"],
+        &rows,
+        "write generation output",
+    )
 }
 
 /// Render a platform the way `--platform` accepts it, for reporting the value
@@ -3341,6 +3483,83 @@ fn write_gc_output(
     Ok(())
 }
 
+/// Report the image aliases one profile can run, as a table.
+///
+/// An alias is what makes a generation runnable by name, so enumerating the
+/// aliases a profile owns answers "what can I run" exactly. The store returns
+/// every alias it holds under a shared roots lock, skipping half-published
+/// entries; filtering by profile is what makes the answer specific to the
+/// bundle in hand, because an alias published under another profile names a
+/// generation this one cannot launch.
+///
+/// The columns are `docker images`, because the reference in them is what
+/// `pocket run` takes and the resemblance is the point. Size and creation time
+/// are not among them: both live in the generation manifest, and reading one
+/// re-hashes the whole base image, so a listing that showed them would read
+/// every byte of every image it named. `--json` carries the untruncated
+/// identifiers.
+fn write_image_list_output(
+    output: &mut dyn Write,
+    images: &[AliasRoot],
+    json_output: bool,
+) -> Result<(), CliError> {
+    if json_output {
+        let entries: Vec<serde_json::Value> = images
+            .iter()
+            .map(|image| {
+                json!({
+                    "reference": image.reference,
+                    "repository": split_reference(&image.reference).0,
+                    "tag": split_reference(&image.reference).1,
+                    "platform": image.platform,
+                    "generation_id": image.generation_id.to_string(),
+                    "alias_id": image.id.to_string(),
+                    "profile_id": image.profile_id,
+                })
+            })
+            .collect();
+        return write_json(output, &json!({ "images": entries }));
+    }
+    let rows: Vec<Vec<String>> = images
+        .iter()
+        .map(|image| {
+            let (repository, tag) = split_reference(&image.reference);
+            vec![
+                repository,
+                tag,
+                short_generation(&image.generation_id.to_string()),
+                image.platform.clone(),
+            ]
+        })
+        .collect();
+    write_table(
+        output,
+        &["REPOSITORY", "TAG", "IMAGE ID", "PLATFORM"],
+        &rows,
+        "write image list output",
+    )
+}
+
+/// Split an image reference into repository and tag the way a registry client
+/// does: the tag is what follows the last colon, unless that colon belongs to a
+/// port in the host part, which a slash after it reveals.
+fn split_reference(reference: &str) -> (String, String) {
+    match reference.rsplit_once(':') {
+        Some((repository, tag)) if !tag.contains('/') && !repository.is_empty() => {
+            (repository.to_owned(), tag.to_owned())
+        }
+        _ => (reference.to_owned(), "<none>".to_owned()),
+    }
+}
+
+/// The leading twelve characters of a generation's digest, the way Docker
+/// abbreviates an image ID. `--json` carries the whole identifier, which is
+/// what every command that takes one expects.
+fn short_generation(id: &str) -> String {
+    let digest = id.rsplit('-').next().unwrap_or(id);
+    digest.chars().take(12).collect()
+}
+
 /// Report every root, both kinds, in one listing.
 ///
 /// The two are reported together because the question an operator brings here
@@ -3382,27 +3601,46 @@ fn write_roots_output(
         }));
         return write_json(output, &json!({ "roots": roots }));
     }
-    for root in aliases {
-        writeln!(
-            output,
-            "alias={} profile={} platform={} generation={} reference={}",
-            root.id, root.profile_id, root.platform, root.generation_id, root.reference,
-        )
-        .map_err(|source| output_error("write alias root output", source))?;
-    }
-    for root in retained {
-        // A retained COW whose instance record is gone still roots its
-        // generation. Printing a placeholder keeps the row rather than hiding
-        // the very root that would otherwise be unexplainable.
+    // Both kinds share one table. A retained COW whose instance record is gone
+    // still roots its generation, so it keeps a row with a placeholder subject
+    // rather than vanishing from the one listing that could explain it.
+    let mut rows: Vec<Vec<String>> = aliases
+        .iter()
+        .map(|root| {
+            vec![
+                "alias".to_owned(),
+                short_generation(&root.id.to_string()),
+                root.reference.clone(),
+                short_generation(&root.generation_id.to_string()),
+                "-".to_owned(),
+                format!("cache forget --alias {}", root.id),
+            ]
+        })
+        .collect();
+    rows.extend(retained.iter().map(|root| {
         let instance = root.instance_name.as_deref().unwrap_or("-");
-        writeln!(
-            output,
-            "retained={} instance={} generation={} cow_bytes={}",
-            root.id, instance, root.generation_id, root.cow_size,
-        )
-        .map_err(|source| output_error("write retained root output", source))?;
-    }
-    Ok(())
+        vec![
+            "retained".to_owned(),
+            short_generation(&root.id.to_string()),
+            instance.to_owned(),
+            short_generation(&root.generation_id.to_string()),
+            human_size(root.cow_size),
+            format!("rm {instance}"),
+        ]
+    }));
+    write_table(
+        output,
+        &[
+            "KIND",
+            "ROOT ID",
+            "SUBJECT",
+            "GENERATION",
+            "SIZE",
+            "RELEASE WITH",
+        ],
+        &rows,
+        "write roots output",
+    )
 }
 
 fn ids_to_strings(ids: &[GenerationId]) -> Vec<String> {
@@ -3794,22 +4032,116 @@ mod tests {
         );
     }
 
+    /// Every listing renders through one function, so its padding is the thing
+    /// that decides whether any of them line up.
     #[test]
-    fn image_list_and_gc_preview_remain_explicitly_unavailable() {
-        for arguments in [
-            vec!["pocket", "image", "list"],
-            vec![
+    fn a_table_pads_each_column_to_its_widest_cell_and_never_trails_space() {
+        let mut output = Vec::new();
+        let rows = vec![
+            vec!["alpine".to_owned(), "3.22".to_owned()],
+            vec!["a-much-longer-name".to_owned(), "latest".to_owned()],
+        ];
+        write_table(&mut output, &["REPOSITORY", "TAG"], &rows, "test").expect("render");
+        let text = String::from_utf8(output).expect("utf-8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        // The second row is the widest, so every row's second column starts
+        // where that row's does.
+        let column = lines[2].find("latest").expect("a second column");
+        assert_eq!(lines[1].find("3.22"), Some(column), "{text}");
+        for line in &lines {
+            assert!(!line.ends_with(' '), "no trailing padding: {line:?}");
+        }
+        assert!(lines[2].starts_with("a-much-longer-name"), "{text}");
+    }
+
+    #[test]
+    fn a_table_with_no_rows_is_still_a_header() {
+        let mut output = Vec::new();
+        write_table(&mut output, &["NAME", "STATUS"], &[], "test").expect("render");
+        assert_eq!(String::from_utf8(output).expect("utf-8"), "NAME   STATUS\n");
+    }
+
+    #[test]
+    fn sizes_read_the_way_docker_reports_them() {
+        assert_eq!(human_size(0), "0B");
+        assert_eq!(human_size(999), "999B");
+        assert_eq!(human_size(1_000), "1.0kB");
+        assert_eq!(human_size(7_800_000), "7.8MB");
+        assert_eq!(human_size(78_000_000_000), "78.0GB");
+    }
+
+    #[test]
+    fn a_long_cell_is_shortened_rather_than_pushing_the_columns_apart() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("exactly-ten", 11), "exactly-ten");
+        assert_eq!(
+            ellipsize("/bin/sh -c echo hello world", 12),
+            "/bin/sh -c \u{2026}"
+        );
+    }
+
+    /// A registry host may carry a port, whose colon is not a tag separator.
+    #[test]
+    fn a_reference_splits_into_repository_and_tag_the_way_a_registry_client_reads_it() {
+        assert_eq!(
+            split_reference("alpine:3.22"),
+            ("alpine".to_owned(), "3.22".to_owned())
+        );
+        assert_eq!(
+            split_reference("docker.io/library/ubuntu:24.04"),
+            ("docker.io/library/ubuntu".to_owned(), "24.04".to_owned())
+        );
+        assert_eq!(
+            split_reference("registry.example:5000/team/app"),
+            (
+                "registry.example:5000/team/app".to_owned(),
+                "<none>".to_owned()
+            )
+        );
+        assert_eq!(
+            split_reference("alpine"),
+            ("alpine".to_owned(), "<none>".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_generation_abbreviates_to_twelve_digest_characters() {
+        assert_eq!(
+            short_generation(&format!("pkvm-gen-v1-{}", "ab".repeat(32))),
+            "abababababab"
+        );
+        assert_eq!(short_generation("short"), "short");
+    }
+
+    /// `image list` used to sit here too. It refuses nothing now: the store
+    /// grew `alias_roots` for `cache roots`, which is the enumeration the
+    /// refusal said did not exist.
+    #[test]
+    fn gc_preview_remains_explicitly_unavailable() {
+        let (status, _, stderr) = invoke(
+            &[
                 "pocket",
                 "cache",
                 "gc",
                 "--store",
                 "/tmp/pocket/missing/store",
             ],
-        ] {
-            let (status, _, stderr) = invoke(&arguments, &[]);
-            assert_eq!(status, OPERATIONAL_ERROR_EXIT);
-            assert!(text(&stderr).contains("E_FEATURE_UNSUPPORTED"));
-        }
+            &[],
+        );
+        assert_eq!(status, OPERATIONAL_ERROR_EXIT);
+        assert!(text(&stderr).contains("E_FEATURE_UNSUPPORTED"));
+    }
+
+    /// Whatever this host's configuration resolves to, the one answer the
+    /// command must never give again is that the feature does not exist. The
+    /// success path is covered end to end in tests/cli_store.rs, against a real
+    /// store and profile.
+    #[test]
+    fn image_list_no_longer_refuses_as_unsupported() {
+        let (_, _, stderr) = invoke(&["pocket", "image", "list"], &[]);
+        let message = text(&stderr);
+        assert!(!message.contains("E_FEATURE_UNSUPPORTED"), "{message}");
     }
 
     /// A typo in a config file must never silently change which store a

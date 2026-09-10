@@ -699,7 +699,8 @@ pocket ps -a
 ```
 
 ```
-name=build-one status=exited(0) image=alpine:3.22 created=... command=/bin/sh -c echo built > /out
+NAME        IMAGE          STATUS       CREATED       FINISHED      COMMAND
+build-one   alpine:3.22    exited(0)    1786940622    1786940671    /bin/sh -c echo built > /out
 ```
 
 Without `--name` you get a generated one like `nimble-delta-1d4d`. Add `--rm` to
@@ -788,7 +789,8 @@ Any serial terminal program works -- `minicom -D`, `picocom`, `socat`, `tio`.
 If you backgrounded the run and lost the path, `pocket ps` reports it:
 
 ```
-id=run-af990f6c... pid=3538462 ... consoles=/dev/pts/10,/dev/pts/11
+RUN ID          GENERATION     PID       CPUS   MEMORY   STARTED       CONSOLES
+run-af990f6c…   4d2a1f9b3c7e   3538462   4      2.1GB    1786940622    /dev/pts/10,/dev/pts/11
 ```
 
 You get a prompt straight away -- a second, independent shell inside the same
@@ -903,6 +905,7 @@ it owns the run, and its exit status is the workload's.
 ## Managing the store
 
 ```sh
+pocket image list             # what this profile can run
 pocket image inspect alpine:3.22 --json
 
 pocket cache roots            # what is keeping generations alive
@@ -910,9 +913,25 @@ pocket cache forget --alias <ALIAS_ID>
 pocket cache gc     --apply
 ```
 
+`image list` prints the columns `docker images` does, for the profile in your
+config file. `pocket images` and `pocket image ls` are the same command:
+
+```
+REPOSITORY   TAG      IMAGE ID       PLATFORM
+alpine       3.22     a1b2c3d4e5f6   linux/amd64
+```
+
+It lists aliases, which is the same set as "what can I run by name": a
+generation with no alias is reachable only by its full `pkvm-gen-v1-...` ID.
+There is no SIZE column, because size lives in the generation manifest and
+reading one re-hashes the whole base image; a listing that showed it would read
+every byte of every image it named. `--json` adds the untruncated generation
+and alias IDs.
+
 Two things root a generation: an alias pointing at it, and a kept run whose
-overlay was taken from it. `cache roots` lists both, so a collection that
-declines to reclaim something can be explained. `cache gc` only reclaims what
+overlay was taken from it. `cache roots` lists both in one table, with the
+command that releases each in its last column, so a collection that declines to
+reclaim something can be explained and then acted on. `cache gc` only reclaims what
 nothing references, so release the root first -- `cache forget` for an alias,
 `rm` for a kept run -- if you want the space back.
 

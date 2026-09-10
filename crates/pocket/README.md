@@ -620,8 +620,8 @@ This build does not implement:
 
 - authenticated registry pulls, credential-helper/Docker-config discovery,
   Docker daemon imports, archive selectors or multi-image archives, or image
-  removal. `cache roots` lists the roots a store holds; `image list` does not
-  exist;
+  removal. `image list` reports the aliases one profile can run; `cache roots`
+  reports every root a store holds, of both kinds;
 - installed-profile discovery, implicit profile selection, or `probe`;
 - inbound port forwards or host CPU affinity;
 - `attach`, `exec`, and `run --detach`. Each is a named command or flag that
