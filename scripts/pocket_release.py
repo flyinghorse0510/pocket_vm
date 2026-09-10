@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import platform
 import re
 import stat
 import tarfile
@@ -928,6 +929,63 @@ def publish_file_noreplace(
     )
 
 
+# `renameat2` reached the kernel in Linux 3.15 and glibc grew its wrapper in
+# 2.28. Red Hat backported the syscall into the EL7 kernel, so an EL7-vintage
+# host answers it while its glibc 2.17 offers nothing to call. The number is
+# architecture specific and there is no portable way to ask for it.
+RENAMEAT2_SYSCALL_NUMBER = {"x86_64": 316, "aarch64": 276}
+
+
+def renameat2_callable(libc: ctypes.CDLL):
+    """`renameat2(2)`, from glibc's wrapper where there is one.
+
+    Falling back to the raw syscall keeps the atomicity the caller is asking
+    for on a host whose libc predates the wrapper; refusing there would give up
+    a guarantee the kernel is perfectly willing to provide. A kernel that truly
+    lacks it answers ENOSYS, which the caller reports like any other failure.
+    """
+    wrapper = getattr(libc, "renameat2", None)
+    if wrapper is not None:
+        wrapper.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        wrapper.restype = ctypes.c_int
+        return wrapper
+    machine = platform.machine()
+    number = RENAMEAT2_SYSCALL_NUMBER.get(machine)
+    if number is None:
+        fail(
+            "this libc has no renameat2 wrapper and its syscall number is "
+            f"not known for {machine}; refusing non-atomic installation "
+            "publication"
+        )
+    libc.syscall.restype = ctypes.c_long
+
+    def raw(
+        old_directory: int,
+        old_path: bytes,
+        new_directory: int,
+        new_path: bytes,
+        flags: int,
+    ) -> int:
+        # syscall() is variadic, so every argument is passed with an explicit
+        # ctypes width rather than left to the default conversion.
+        return libc.syscall(
+            ctypes.c_long(number),
+            ctypes.c_int(old_directory),
+            ctypes.c_char_p(old_path),
+            ctypes.c_int(new_directory),
+            ctypes.c_char_p(new_path),
+            ctypes.c_uint(flags),
+        )
+
+    return raw
+
+
 def rename_noreplace(
     source: Path,
     destination: Path,
@@ -940,20 +998,8 @@ def rename_noreplace(
     `publish_file_noreplace` for what `exist_ok` is for.
     """
     libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = getattr(libc, "renameat2", None)
-    if renameat2 is None:
-        fail(
-            "libc does not expose renameat2; refusing non-atomic "
-            "installation publication"
-        )
-    renameat2.argtypes = [
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_int,
-        ctypes.c_char_p,
-        ctypes.c_uint,
-    ]
-    renameat2.restype = ctypes.c_int
+    renameat2 = renameat2_callable(libc)
+    ctypes.set_errno(0)
     result = renameat2(
         -100,
         os.fsencode(source),

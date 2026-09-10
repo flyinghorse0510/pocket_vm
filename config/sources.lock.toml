@@ -37,12 +37,6 @@ source_date_epoch = 1786940622
 # were produced on the reference host recorded below; a different compiler or
 # linker changes the bytes and fails the build closed rather than silently
 # shipping something else.
-#
-# STALE: the two digests below still describe a CONFIG_NR_CPUS=16 kernel. Both
-# variants read config/kernel/x86_64-uml.fragment, which now sets 64, so an
-# el7 rebuild produces different bytes and reports the difference. They can
-# only be regenerated on the validated host with the reference compiler below,
-# which is why they were not refreshed alongside the default build's.
 [linux.variant.el7]
 description = "CentOS 7 / EL7-vintage hosts: kernels without close_range or execveat, and glibc 2.17"
 patch_series_sha256 = "63cf3db6743afdce3b002ab15b277e9bf98ac56d49a8cf35ffadc9ea7c5d1bce"
@@ -50,8 +44,8 @@ base_tree_sha1 = "8afe7ef519c031ab21fbbd78ccf6b53fcef038ba"
 base_manifest_sha256 = "951088deef3bcfcb589d956cf228be3cf93aec8e278adf85a2887846737a7c4d"
 patched_tree_sha1 = "a2c81478dd3a13b7d67b603260e71e08981ebd2b"
 patched_manifest_sha256 = "4035a843465dbdb9b15e65e76bb86e33ef3eb1bd8cb5c45959cfc764f94d14d1"
-linux_uml_sha256 = "e22a9033e70f9b5deaf4c93c19570f5cc57016e2d1b8a5eccf047de769bfa71b"
-linux_uml_config_sha256 = "ffc32864ca3487e93db88bd7e87ebb4c8ea83d85e684d0b67742c196292b276b"
+linux_uml_sha256 = "fcf9eb34b69af49abee6dacb2c6d1f5f37f64bbf9d748cbf9de6a17daa78ea6f"
+linux_uml_config_sha256 = "b37f21d93caa5656f5bdde4fd1ba831598c3dd59c2612a6da83028a73824d4e3"
 validated_host = "CentOS Linux 7.9.2009, kernel 3.10.0-1160.119.1.el7.x86_64, glibc 2.17"
 reference_cc = "gcc 13.4.0"
 reference_ld = "GNU ld (GNU Binutils) 2.44"

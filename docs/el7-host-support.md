@@ -25,6 +25,8 @@ kernel's bytes are unchanged.
 | libc id-cache defect | `make host-clone-idcache-probe`, reproducing the table below on both hosts |
 | Kernel reproducibility | `make kernel-el7` rebuilt from scratch on the host, same digest every time |
 | `pocket` itself | `image pull` and `run` verified on the host; the release e2e lane run there |
+| 64 vCPUs | `CONFIG_NR_CPUS=64` built and verified here, and a container run at 1, 2, 8, 32 and 64 vCPUs on the 8-CPU validated host, each reporting the requested count |
+| Packaged install | `install-release.py` installs and verifies a sealed release on this host; see **Packaging and installing** below |
 
 `pocket`'s own binaries are static-PIE with no interpreter and no `NEEDED`
 entries, so the ones built on a current host run unmodified against glibc 2.17.
@@ -114,6 +116,37 @@ own output. The script reads `build/kernel/x86_64-smp-p4k-el7` as it finds it
 and writes to `build/profiles-el7/`, leaving the default profile and its
 `latest` marker alone. The resulting bundle is what `pocket --profile-bundle`
 is pointed at on the EL7 host.
+
+## Packaging and installing
+
+`make package` reads `build/profiles/latest`, which is the default profile, so
+it cannot package this variant. Call the packager directly with the variant's
+bundle. Both paths must be absolute:
+
+```sh
+mkdir -p build/package-el7
+./scripts/package-release.py --repo-root "$PWD" \
+    --profile "$(cat build/profiles-el7/latest)" \
+    --pocket "$PWD/build/release/x86_64-smp-p4k/host/pocket" \
+    --output-dir "$PWD/build/package-el7" > build/package-el7/package.json
+```
+
+Copy the archive it names to the EL7 host and install it there:
+
+```sh
+./scripts/install-release.py install --archive <archive> --prefix ~/opt/pocket
+```
+
+The installer needs Python 3.9 or newer for `str.removeprefix`; EL7's own
+`python3` is 3.6.8, so run it under a newer interpreter. Two things it does are
+younger than this host and now fall back rather than refuse:
+`os.chmod(follow_symlinks=False)` needs `fchmodat2(2)` from Linux 6.6, so
+directory modes are set through an `O_NOFOLLOW` descriptor instead; and glibc
+2.17 has no `renameat2` wrapper, so the atomic publication asks the kernel for
+the syscall by number, which Red Hat backported into the EL7 kernel.
+
+Installing writes `~/.config/pocket/config.toml` pointing at the installed
+bundle, so `pocket` needs no path flags afterwards.
 
 The descriptor cleanup this variant replaces is the whole basis for the claim
 that nothing UML inherited reaches guest userspace, so it is checked directly
@@ -305,13 +338,10 @@ the default build's are bound to its own. A different compiler or linker
 produces different bytes and fails the build closed rather than shipping
 something unverified.
 
-Those digests are currently stale. Both kernels read the same
-`config/kernel/x86_64-uml.fragment`, whose `CONFIG_NR_CPUS` was raised from 16
-to 64, so the recorded bytes describe a kernel this fragment no longer builds.
-Rebuilding the variant reports the difference rather than failing, but the
-recorded digests cannot be refreshed anywhere except the validated host with
-the reference compiler -- so `make kernel-el7` and `make verify-el7` stay open
-until someone regenerates them there.
+Both kernels read the same `config/kernel/x86_64-uml.fragment`, so raising
+`CONFIG_NR_CPUS` to 64 changed this variant's bytes too. The digests recorded
+here were regenerated on the validated host at that setting, and two
+consecutive from-scratch builds there produced them identically.
 
 Two diagnostic targets cannot be built on the validated host. `make probe`
 needs busybox and `make smp-scaling` needs `musl-gcc` to build the initramfs

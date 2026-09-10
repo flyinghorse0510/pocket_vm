@@ -476,6 +476,26 @@ def verify_launcher(launcher: Path, release: Path) -> None:
         )
 
 
+def set_directory_mode(directory, mode: int) -> None:
+    """Set a directory's mode without following a symlink in its place.
+
+    `os.chmod(..., follow_symlinks=False)` needs `fchmodat2(2)`, which arrived
+    in Linux 6.6; on an older kernel CPython raises NotImplementedError rather
+    than falling back, so the installer could not run on an EL7-vintage host at
+    all. Opening with O_NOFOLLOW and setting the mode on the descriptor is both
+    portable and race-free: the open refuses a symlink outright, and the mode
+    lands on that descriptor rather than on a path re-resolved afterwards.
+    """
+    descriptor = os.open(
+        directory,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+    )
+    try:
+        os.fchmod(descriptor, mode)
+    finally:
+        os.close(descriptor)
+
+
 def extract_to_stage(
     info: ArchiveInfo,
     stage: Path,
@@ -562,13 +582,13 @@ def extract_to_stage(
         reverse=True,
     ):
         destination = stage / directory
-        os.chmod(destination, 0o555, follow_symlinks=False)
+        set_directory_mode(destination, 0o555)
         os.utime(
             destination,
             (info.source_date_epoch, info.source_date_epoch),
             follow_symlinks=False,
         )
-    os.chmod(stage, 0o555, follow_symlinks=False)
+    set_directory_mode(stage, 0o555)
     os.utime(
         stage,
         (info.source_date_epoch, info.source_date_epoch),
@@ -612,7 +632,7 @@ def remove_private_stage(stage: Path) -> None:
         return
 
     def remove_tree(directory: Path) -> None:
-        os.chmod(directory, 0o700, follow_symlinks=False)
+        set_directory_mode(directory, 0o700)
         with os.scandir(directory) as scan:
             entries = list(scan)
         for entry in entries:
