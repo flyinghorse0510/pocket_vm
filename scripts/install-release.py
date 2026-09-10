@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import grp
 import os
 import pwd
 import secrets
@@ -180,6 +181,42 @@ def link_default_launcher(prefix: Path, launcher: Path) -> None:
         os.close(descriptor)
 
 
+def warn(message: str) -> None:
+    """Report a condition the operator should know about without refusing.
+
+    The permissions of a directory inside someone's own home are their
+    decision; naming the consequence is the installer's part in it.
+    """
+    print(f"install-release: warning: {message}", file=sys.stderr)
+
+
+def group_name(gid: int) -> str:
+    try:
+        return grp.getgrgid(gid).gr_name
+    except KeyError:
+        return str(gid)
+
+
+def shared_group(gid: int, uid: int) -> bool:
+    """Whether writing through this group grants anyone but the owner access.
+
+    A user-private group -- same name as the user, their primary group, nobody
+    else in it -- is the default on many distributions, and combined with a
+    umask of 002 it makes 0775 the ordinary mode for a home directory. The
+    group bit then grants no one any access the owner does not already have, so
+    refusing it rejected the standard layout while protecting nothing. Any
+    group that cannot be resolved is treated as shared.
+    """
+    try:
+        user = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except KeyError:
+        return True
+    if group.gr_name != user.pw_name or gid != user.pw_gid:
+        return True
+    return bool(set(group.gr_mem) - {user.pw_name})
+
+
 def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
     text = os.fspath(path)
     if (
@@ -232,14 +269,19 @@ def ensure_plain_user_directory(path: Path, *, create: bool) -> None:
                     "installation prefix component is not owned by the "
                     f"invoking user: {current}"
                 )
-            if stat.S_IMODE(current_stat.st_mode) & 0o022:
-                mode = stat.S_IMODE(current_stat.st_mode)
-                raise ReleaseError(
-                    "installation prefix component is group- or "
-                    f"other-writable (mode {mode:04o}): {current}\n"
-                    f"  fix it with: chmod go-w {current}\n"
-                    "  or install somewhere else with: "
-                    "make install PREFIX=<dir>"
+            mode = stat.S_IMODE(current_stat.st_mode)
+            if mode & 0o002:
+                warn(
+                    f"{current} is world-writable (mode {mode:04o}); another "
+                    "account can replace what is installed there "
+                    f"(chmod o-w {current})"
+                )
+            elif mode & 0o020 and shared_group(current_stat.st_gid, uid):
+                warn(
+                    f"{current} is writable by group "
+                    f"{group_name(current_stat.st_gid)} (mode {mode:04o}); its "
+                    "other members can replace what is installed there "
+                    f"(chmod g-w {current})"
                 )
         if created:
             for directory in (current, current.parent):

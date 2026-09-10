@@ -263,15 +263,19 @@ make install PREFIX="$HOME/.local" NO_CONFIG=1 NO_DEFAULT_LINK=1
 `CONFIG=<path>` writes the config file somewhere else; `pocket` then needs
 `POCKET_CONFIG` set to find it.
 
-If the prefix is group- or other-writable, the installer refuses and says how
-to fix it. On distributions with a `002` umask, `~/.local` is often `0775`:
+If a prefix component can be written by some other account, the installer says
+so and carries on. A `002` umask makes `~/.local` `0775` on many systems, but
+that group is normally your own with no other member, which grants nobody
+anything and is not reported. A genuinely shared one is:
 
 ```
-install-release: installation prefix component is group- or other-writable
-(mode 0775): /home/you/.local
-  fix it with: chmod go-w /home/you/.local
-  or install somewhere else with: make install PREFIX=<dir>
+install-release: warning: /home/you/.local is writable by group staff
+(mode 0775); its other members can replace what is installed there
+(chmod g-w /home/you/.local)
 ```
+
+The prefix itself must sit under your home directory: the installer refuses to
+run as root, so there is nowhere else it could write.
 
 ### Or take the tarball
 

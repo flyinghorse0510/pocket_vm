@@ -207,7 +207,8 @@ e2e-probe-26.04: builder-initramfs workload-probe-initramfs ubuntu-26.04
 	./scripts/run-oci-workload-probe.sh 26.04
 
 # Where `make install` puts things, and where `make package` writes the
-# tarball. Both are overridable: `make install PREFIX=/opt/pocket`.
+# tarball. Both are overridable: `make install PREFIX=$HOME/opt/pocket`. The
+# installer refuses effective UID 0, so the prefix has to sit under your home.
 PREFIX ?= $(HOME)/.local
 PACKAGE_DIR ?= $(CURDIR)/build/package
 
@@ -241,7 +242,7 @@ package: release-profile
 # installer picks XDG defaults for the first three, and the last two decline
 # the config file and the <prefix>/bin/pocket link respectively.
 #
-#   make install PREFIX=/opt/p STORE=/data/store RUNTIME_ROOT=/run/user/1000/p
+#   make install PREFIX=$HOME/opt/p STORE=/data/store RUNTIME_ROOT=/run/user/1000/p
 #   make install NO_CONFIG=1 NO_DEFAULT_LINK=1
 INSTALL_OPTIONS = \
 	$(if $(STORE),--store "$(STORE)") \

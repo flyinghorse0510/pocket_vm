@@ -75,8 +75,6 @@ LOADER=${POCKET_BUILDER_LOADER:-${UMOCI_CLOSURE[1]}}
 [[ ${LIBC##*/} == libc.so.6 ]] || die "unexpected umoci C library: $LIBC"
 [[ "$LOADER" == "$UMOCI_INTERPRETER" ]] || \
     die "umoci resolves a loader other than its own interpreter: $LOADER"
-LIBC_DIGEST=$(sha256sum "$LIBC" | awk '{print $1}')
-LOADER_DIGEST=$(sha256sum "$LOADER" | awk '{print $1}')
 
 escape_sed_replacement() {
     sed 's/[&|\\]/\\&/g' <<< "$1"
@@ -222,7 +220,4 @@ do
     sha256sum "$artifact"
 done
 printf 'builder_umoci_version=%s\n' "$UMOCI_VERSION"
-printf 'builder_umoci_sha256=%s\n' "$UMOCI_DIGEST"
-printf 'builder_libc_sha256=%s\n' "$LIBC_DIGEST"
-printf 'builder_loader_sha256=%s\n' "$LOADER_DIGEST"
 printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
