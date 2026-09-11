@@ -181,8 +181,8 @@ That single target does everything, in order:
    identity recorded in `config/sources.lock.toml`, builds `ARCH=um`, and
    audits the source again afterwards.
 2. **Host tools** — builds static e2fsprogs, Skopeo and slirp4netns from
-   authenticated sources, each twice, requiring identical bytes. slirp4netns
-   brings its own chain: zlib, libffi, PCRE2, GLib and libslirp.
+   authenticated sources. slirp4netns brings its own chain: zlib, libffi,
+   PCRE2, GLib and libslirp.
 3. **Rust artifacts** — builds the host CLI, the guard, and the three guest
    init programs as static PIEs.
 4. **Initramfses** — packs the workload, builder and validator images
@@ -228,11 +228,11 @@ own output against the recorded digest whatever the width.
 
 ### Install it
 
-`make install` installs; it never builds. Package what the build produced,
-then install that:
+`make install` compiles nothing: it archives what the build produced and
+installs that, and refuses an unbuilt tree rather than starting a compile.
 
 ```sh
-make package
+make -j8
 make install PREFIX="$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 

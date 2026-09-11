@@ -346,12 +346,8 @@ build_once() {
         -o "$output" ./cmd/skopeo
 }
 
-build_once first
-build_once second
-FIRST_BINARY="$WORK_ROOT/first/skopeo"
-SECOND_BINARY="$WORK_ROOT/second/skopeo"
-cmp --silent "$FIRST_BINARY" "$SECOND_BINARY" || \
-    die "independent Skopeo builds are not byte-for-byte reproducible"
+build_once only
+BINARY="$WORK_ROOT/only/skopeo"
 
 verify_static_binary() {
     local binary=$1
@@ -379,10 +375,10 @@ verify_static_binary() {
     fi
 }
 
-verify_static_binary "$FIRST_BINARY"
-[[ $("$FIRST_BINARY" --version) == "skopeo version $VERSION" ]] || \
+verify_static_binary "$BINARY"
+[[ $("$BINARY" --version) == "skopeo version $VERSION" ]] || \
     die "unexpected Skopeo version output"
-GO_BUILD_INFO=$("$GO" version -m "$FIRST_BINARY")
+GO_BUILD_INFO=$("$GO" version -m "$BINARY")
 grep -Fq $'\tCGO_ENABLED=0' <<< "$GO_BUILD_INFO" || die "Skopeo build info does not disable cgo"
 grep -Fq $'\tGOARCH=amd64' <<< "$GO_BUILD_INFO" || die "unexpected Skopeo GOARCH"
 grep -Fq $'\tGOOS=linux' <<< "$GO_BUILD_INFO" || die "unexpected Skopeo GOOS"
@@ -433,7 +429,7 @@ run_without_network() {
         --setenv LC_ALL C --setenv LANG C --setenv TZ UTC -- "$@"
 }
 
-run_without_network "$FIRST_BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" copy \
+run_without_network "$BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" copy \
     --preserve-digests -- "oci:$SMOKE_SOURCE:source" "oci:$SMOKE_DESTINATION:copy"
 [[ -f "$SMOKE_DESTINATION/index.json" && -f "$SMOKE_DESTINATION/oci-layout" ]] || \
     die "Skopeo did not create the destination OCI layout"
@@ -443,7 +439,7 @@ DESTINATION_DIGEST=$(jq -er '.manifests[] | select(.annotations["org.opencontain
     die "Skopeo local copy did not preserve the manifest digest"
 cmp --silent "$MANIFEST_FILE" "$SMOKE_DESTINATION/blobs/sha256/$MANIFEST_DIGEST" || \
     die "Skopeo local copy changed the manifest bytes"
-run_without_network "$FIRST_BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" \
+run_without_network "$BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" \
     inspect --raw "oci:$SMOKE_DESTINATION:copy" > "$SMOKE_ROOT/inspected-manifest.json"
 cmp --silent "$MANIFEST_FILE" "$SMOKE_ROOT/inspected-manifest.json" || \
     die "Skopeo could not inspect the copied OCI manifest"
@@ -452,7 +448,7 @@ cmp --silent "$MANIFEST_FILE" "$SMOKE_ROOT/inspected-manifest.json" || \
 # namespace makes a successful registry connection impossible by construction.
 DOCKER_PROBE_LOG="$SMOKE_ROOT/docker-probe.log"
 set +e
-run_without_network "$FIRST_BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" \
+run_without_network "$BINARY" --policy "$POLICY" --tmpdir "$SMOKE_TMP" \
     inspect --tls-verify=false docker://127.0.0.1:9/pocket/probe:latest \
     > "$DOCKER_PROBE_LOG" 2>&1
 DOCKER_PROBE_STATUS=$?
@@ -463,12 +459,12 @@ if grep -Eqi 'unknown transport|invalid image name.*transport' "$DOCKER_PROBE_LO
     die "Skopeo was built without docker transport support"
 fi
 
-SKOPEO_SHA256=$(sha256sum "$FIRST_BINARY" | awk '{print $1}')
+SKOPEO_SHA256=$(sha256sum "$BINARY" | awk '{print $1}')
 printf 'skopeo_sha256=%s\n' "$SKOPEO_SHA256"
 
 PUBLISH_DIR="$WORK_ROOT/publish"
 mkdir -p -- "$PUBLISH_DIR"
-install -m 0755 "$FIRST_BINARY" "$PUBLISH_DIR/skopeo"
+install -m 0755 "$BINARY" "$PUBLISH_DIR/skopeo"
 install -m 0644 "$CA_BUNDLE" "$PUBLISH_DIR/registry-ca.pem"
 printf '%s  %s\n' "$SKOPEO_SHA256" skopeo > "$PUBLISH_DIR/SHA256SUMS"
 printf '%s  %s\n' "$CA_SHA256" registry-ca.pem >> "$PUBLISH_DIR/SHA256SUMS"

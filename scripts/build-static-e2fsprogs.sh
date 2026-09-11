@@ -266,18 +266,8 @@ build_once() {
         "$result_dir/debugfs"
 }
 
-build_once first
-build_once second
-FIRST_RESULT="$WORK_ROOT/first/result"
-SECOND_RESULT="$WORK_ROOT/second/result"
-cmp --silent "$FIRST_RESULT/mke2fs" "$SECOND_RESULT/mke2fs" || \
-    die "independent mke2fs builds are not byte-for-byte reproducible"
-cmp --silent "$FIRST_RESULT/e2fsck" "$SECOND_RESULT/e2fsck" || \
-    die "independent e2fsck builds are not byte-for-byte reproducible"
-cmp --silent "$FIRST_RESULT/resize2fs" "$SECOND_RESULT/resize2fs" || \
-    die "independent resize2fs builds are not byte-for-byte reproducible"
-cmp --silent "$FIRST_RESULT/debugfs" "$SECOND_RESULT/debugfs" || \
-    die "independent debugfs builds are not byte-for-byte reproducible"
+build_once only
+RESULT="$WORK_ROOT/only/result"
 
 verify_static_binary() {
     local binary=$1
@@ -300,21 +290,21 @@ verify_static_binary() {
     fi
 }
 
-verify_static_binary "$FIRST_RESULT/mke2fs" mke2fs
-verify_static_binary "$FIRST_RESULT/e2fsck" e2fsck
-verify_static_binary "$FIRST_RESULT/resize2fs" resize2fs
-verify_static_binary "$FIRST_RESULT/debugfs" debugfs
+verify_static_binary "$RESULT/mke2fs" mke2fs
+verify_static_binary "$RESULT/e2fsck" e2fsck
+verify_static_binary "$RESULT/resize2fs" resize2fs
+verify_static_binary "$RESULT/debugfs" debugfs
 
-MKE2FS_VERSION=$("$FIRST_RESULT/mke2fs" -V 2>&1 || true)
-E2FSCK_VERSION=$("$FIRST_RESULT/e2fsck" -V 2>&1 || true)
+MKE2FS_VERSION=$("$RESULT/mke2fs" -V 2>&1 || true)
+E2FSCK_VERSION=$("$RESULT/e2fsck" -V 2>&1 || true)
 [[ "$MKE2FS_VERSION" == *"mke2fs 1.47.2 (1-Jan-2025)"* ]] || \
     die "unexpected mke2fs version output"
 [[ "$E2FSCK_VERSION" == *"e2fsck 1.47.2 (1-Jan-2025)"* ]] || \
     die "unexpected e2fsck version output"
-RESIZE2FS_VERSION=$("$FIRST_RESULT/resize2fs" 2>&1 || true)
+RESIZE2FS_VERSION=$("$RESULT/resize2fs" 2>&1 || true)
 [[ "$RESIZE2FS_VERSION" == *"resize2fs 1.47.2 (1-Jan-2025)"* ]] || \
     die "unexpected resize2fs version output"
-DEBUGFS_VERSION=$("$FIRST_RESULT/debugfs" -V 2>&1 || true)
+DEBUGFS_VERSION=$("$RESULT/debugfs" -V 2>&1 || true)
 [[ "$DEBUGFS_VERSION" == *"debugfs 1.47.2 (1-Jan-2025)"* ]] || \
     die "unexpected debugfs version output"
 
@@ -334,7 +324,7 @@ timeout --signal=TERM --kill-after=5s 30s env -i \
     MKE2FS_CONFIG="$MKE2FS_CONFIG" \
     BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/mke2fs" -q -F -t ext4 -b 4096 -I 256 -m 0 \
+    "$RESULT/mke2fs" -q -F -t ext4 -b 4096 -I 256 -m 0 \
     -U 69562479-1350-4e52-a503-44d69e5d01c7 \
     -E lazy_itable_init=0,lazy_journal_init=0 \
     -d "$SMOKE_ROOT" "$SMOKE_IMAGE"
@@ -342,7 +332,7 @@ timeout --signal=TERM --kill-after=5s 30s env -i \
     E2FSCK_CONFIG="$E2FSCK_CONFIG" \
     BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
+    "$RESULT/e2fsck" -fn "$SMOKE_IMAGE"
 
 # resize2fs is what `image adjust` runs, in both directions. Grow the smoke
 # image and shrink it back, checking the filesystem after each: a resize tool
@@ -352,24 +342,24 @@ truncate -s 67108864 "$SMOKE_IMAGE"
 timeout --signal=TERM --kill-after=5s 60s env -i \
     BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/resize2fs" "$SMOKE_IMAGE"
+    "$RESULT/resize2fs" "$SMOKE_IMAGE"
 timeout --signal=TERM --kill-after=5s 30s env -i \
     E2FSCK_CONFIG="$E2FSCK_CONFIG" BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
+    "$RESULT/e2fsck" -fn "$SMOKE_IMAGE"
 timeout --signal=TERM --kill-after=5s 60s env -i \
     BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/resize2fs" "$SMOKE_IMAGE" 8192
+    "$RESULT/resize2fs" "$SMOKE_IMAGE" 8192
 timeout --signal=TERM --kill-after=5s 30s env -i \
     E2FSCK_CONFIG="$E2FSCK_CONFIG" BLKID_FILE="$SMOKE_BLKID_FILE" \
     E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH \
-    "$FIRST_RESULT/e2fsck" -fn "$SMOKE_IMAGE"
+    "$RESULT/e2fsck" -fn "$SMOKE_IMAGE"
 
-MKE2FS_SHA256=$(sha256sum "$FIRST_RESULT/mke2fs" | awk '{print $1}')
-E2FSCK_SHA256=$(sha256sum "$FIRST_RESULT/e2fsck" | awk '{print $1}')
-RESIZE2FS_SHA256=$(sha256sum "$FIRST_RESULT/resize2fs" | awk '{print $1}')
-DEBUGFS_SHA256=$(sha256sum "$FIRST_RESULT/debugfs" | awk '{print $1}')
+MKE2FS_SHA256=$(sha256sum "$RESULT/mke2fs" | awk '{print $1}')
+E2FSCK_SHA256=$(sha256sum "$RESULT/e2fsck" | awk '{print $1}')
+RESIZE2FS_SHA256=$(sha256sum "$RESULT/resize2fs" | awk '{print $1}')
+DEBUGFS_SHA256=$(sha256sum "$RESULT/debugfs" | awk '{print $1}')
 printf 'mke2fs_sha256=%s\n' "$MKE2FS_SHA256"
 printf 'e2fsck_sha256=%s\n' "$E2FSCK_SHA256"
 printf 'resize2fs_sha256=%s\n' "$RESIZE2FS_SHA256"
@@ -377,10 +367,10 @@ printf 'debugfs_sha256=%s\n' "$DEBUGFS_SHA256"
 
 PUBLISH_DIR="$WORK_ROOT/publish"
 mkdir -p -- "$PUBLISH_DIR"
-install -m 0755 "$FIRST_RESULT/mke2fs" "$PUBLISH_DIR/mke2fs"
-install -m 0755 "$FIRST_RESULT/e2fsck" "$PUBLISH_DIR/e2fsck"
-install -m 0755 "$FIRST_RESULT/resize2fs" "$PUBLISH_DIR/resize2fs"
-install -m 0755 "$FIRST_RESULT/debugfs" "$PUBLISH_DIR/debugfs"
+install -m 0755 "$RESULT/mke2fs" "$PUBLISH_DIR/mke2fs"
+install -m 0755 "$RESULT/e2fsck" "$PUBLISH_DIR/e2fsck"
+install -m 0755 "$RESULT/resize2fs" "$PUBLISH_DIR/resize2fs"
+install -m 0755 "$RESULT/debugfs" "$PUBLISH_DIR/debugfs"
 (
     cd -- "$PUBLISH_DIR" || exit 1
     sha256sum mke2fs e2fsck resize2fs debugfs > SHA256SUMS

@@ -53,9 +53,11 @@ than trusting the text.
   `make kernel` performs this on every invocation; `make audit-linux-source`
   and `make test-linux-source-pipeline` pass against the published tree.
 - [x] **Pinned third-party inputs.** Rebuild pinned e2fsprogs and Skopeo from
-  their authenticated sources and match every artifact digest in the profile.
-  A fresh build root, including a new Go module cache, reproduces both
-  byte-for-byte.
+  their authenticated sources. Reproducibility is checked by
+  `make reproduce-release`, which rebuilds the whole release in an independent
+  root; the per-tool builds do not rebuild themselves to compare, because a
+  byte difference between two local passes blocks a build without telling the
+  operator anything the release lane does not.
 - [ ] **Rust artifact declaration.** Build every Rust host and guest artifact
   with `Cargo.lock`, locked dependency availability and recorded target
   configuration, and record whether each host artifact is static along with its

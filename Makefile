@@ -219,7 +219,12 @@ PACKAGE_DIR ?= $(CURDIR)/build/package
 # Idempotent, and stricter than it needs to be on the second run: the archive
 # name is content-addressed, so if one is already there the bytes must match,
 # and a mismatch is a reproducibility failure worth hearing about.
-package: release-profile
+package:
+	@set -e; \
+	if [ ! -f "$(CURDIR)/build/profiles/latest" ] || \
+	   [ ! -x "$(CURDIR)/build/release/x86_64-smp-p4k/host/pocket" ]; then \
+	    echo "nothing to package: run 'make' first" >&2; exit 1; \
+	fi
 	@mkdir -p -- "$(PACKAGE_DIR)"
 	@set -e; \
 	profile=$$(cat "$(CURDIR)/build/profiles/latest"); \
@@ -251,18 +256,18 @@ INSTALL_OPTIONS = \
 	$(if $(NO_CONFIG),--no-config) \
 	$(if $(NO_DEFAULT_LINK),--no-default-link)
 
-# Install an archive that `make package` has already produced, and write a
-# config file so ordinary commands need no flags.
+# Install what the build produced, and write a config file so ordinary
+# commands need no flags.
 #
-# This builds nothing. Building is what `make` does, and a target that quietly
-# started a forty-minute compile because the tree was not ready is not an
-# install. A prefix outside the installing account's home is a shared tree
-# several people run from, so no per-user config is written for one.
-install:
+# This compiles nothing. Building is what `make` does, and a target that
+# quietly started a forty-minute compile because the tree was not ready is not
+# an install -- so an unbuilt tree is refused rather than built. Archiving the
+# sealed profile is not compiling, so `make && make install` is enough and
+# `make package` is only needed to hand the tarball to another machine. A
+# prefix outside the installing account's home is a shared tree several people
+# run from, so no per-user config is written for one.
+install: package
 	@set -e; \
-	if [ ! -f "$(PACKAGE_DIR)/latest" ]; then \
-	    echo "nothing to install: run 'make package' first" >&2; exit 1; \
-	fi; \
 	archive=$$(cat "$(PACKAGE_DIR)/latest"); \
 	if [ ! -f "$$archive" ]; then \
 	    echo "the packaged release named by $(PACKAGE_DIR)/latest is gone: $$archive" >&2; \

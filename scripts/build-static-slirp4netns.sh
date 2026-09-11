@@ -250,22 +250,16 @@ build_once() {
     cp -- "$src/slirp4netns-$SLIRP4NETNS_VERSION/slirp4netns" "$base/result/slirp4netns"
 }
 
-build_once first
-FIRST="$WORK_ROOT/first/result/slirp4netns"
-build_once second
-SECOND="$WORK_ROOT/second/result/slirp4netns"
+build_once only
+BINARY="$WORK_ROOT/only/result/slirp4netns"
 
-# The claim this project makes about every artifact: build it twice in
-# independent roots and require the bytes to match.
-cmp --silent "$FIRST" "$SECOND" || die "slirp4netns did not build reproducibly"
-
-file "$SECOND" | grep -q 'statically linked' || \
+file "$BINARY" | grep -q 'statically linked' || \
     die "slirp4netns is not statically linked"
-readelf -d "$SECOND" 2>/dev/null | grep -q NEEDED && \
+readelf -d "$BINARY" 2>/dev/null | grep -q NEEDED && \
     die "slirp4netns declares a dynamic dependency"
 
 mkdir -p -- "$OUTPUT_DIR"
-install -m 0555 -- "$SECOND" "$OUTPUT_DIR/slirp4netns"
+install -m 0555 -- "$BINARY" "$OUTPUT_DIR/slirp4netns"
 touch -d "@$SOURCE_DATE_EPOCH" "$OUTPUT_DIR/slirp4netns"
 
 printf 'slirp4netns=%s\n' "$OUTPUT_DIR/slirp4netns"
