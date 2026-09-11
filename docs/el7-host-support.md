@@ -27,6 +27,7 @@ kernel's bytes are unchanged.
 | `pocket` itself | `image pull` and `run` verified on the host; the release e2e lane run there |
 | 64 vCPUs | `CONFIG_NR_CPUS=64` built and verified here, and a container run at 1, 2, 8, 32 and 64 vCPUs on the 8-CPU validated host, each reporting the requested count |
 | Packaged install | `install-release.py` installs and verifies a sealed release on this host; see **Packaging and installing** below |
+| `commit`, `image adjust` | Not working: the bundled `debugfs` segfaults on this host; see **Known limitation** below |
 | Build host | Either. A bundle compiled entirely on Ubuntu 26.04 (GCC 15, glibc 2.43) pulled an image, converted and validated it, and ran a workload on the validated host. Only the recorded digests are specific to the reference toolchain |
 
 `pocket`'s own binaries are static-PIE with no interpreter and no `NEEDED`
@@ -359,6 +360,28 @@ Both kernels read the same `config/kernel/x86_64-uml.fragment`, so raising
 `CONFIG_NR_CPUS` to 64 changed this variant's bytes too. The digests recorded
 here were regenerated on the validated host at that setting, and two
 consecutive from-scratch builds there produced them identically.
+
+## Known limitation: commit and image adjust
+
+`pocket commit` and `pocket image adjust` do not work on an EL7 host. Both read
+a staged filesystem through the bundled `debugfs`, and that binary segfaults
+there on every command that opens an image -- `ls`, `stat`, `cat`, `dump` and
+`rdump` alike. Only `-V`, which opens nothing, returns.
+
+The failure is confined to `debugfs`. `e2fsck`, `resize2fs` and `mke2fs` from
+the same build run correctly on the same host and the same image, and
+`debugfs` is the only one of the four that links `libss`. The binary is
+byte-identical to the one that runs correctly on a current host, so this is a
+runtime difference rather than a build difference, and the root cause is not
+yet established.
+
+Everything else is verified on the validated host: pulling an image, which
+boots both the builder and the validator UML; running a workload; exit status
+and in-guest signal semantics; stdin including a one-megabyte payload;
+environment, user, working-directory and hostname overrides; a writable
+copy-on-write root and `--root-readonly`; shared host directories including a
+read-only one; outbound DNS and TCP; `--network none`; concurrent runs with
+isolated overlays; and keeping, listing and removing a run.
 
 Two diagnostic targets cannot be built on the validated host. `make probe`
 needs busybox and `make smp-scaling` needs `musl-gcc` to build the initramfs
