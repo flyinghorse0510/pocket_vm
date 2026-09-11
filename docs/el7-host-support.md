@@ -27,6 +27,7 @@ kernel's bytes are unchanged.
 | `pocket` itself | `image pull` and `run` verified on the host; the release e2e lane run there |
 | 64 vCPUs | `CONFIG_NR_CPUS=64` built and verified here, and a container run at 1, 2, 8, 32 and 64 vCPUs on the 8-CPU validated host, each reporting the requested count |
 | Packaged install | `install-release.py` installs and verifies a sealed release on this host; see **Packaging and installing** below |
+| Build host | Either. A bundle compiled entirely on Ubuntu 26.04 (GCC 15, glibc 2.43) pulled an image, converted and validated it, and ran a workload on the validated host. Only the recorded digests are specific to the reference toolchain |
 
 `pocket`'s own binaries are static-PIE with no interpreter and no `NEEDED`
 entries, so the ones built on a current host run unmodified against glibc 2.17.
@@ -97,22 +98,37 @@ default kernel's digest; use the variant's target instead:
 make verify-el7
 ```
 
-Sealing a profile around that kernel takes two toolchains, so it is worth being
-precise about which host does what. The kernel is bound to the reference
-toolchain above -- building it with anything else produces different bytes,
-which the build reports -- so it is built on the EL7 host. Everything else in the bundle is
-a static host binary; e2fsprogs is pinned to `development_tools.cc_major`, which
-EL7 does not have, so those are built on a current host. The seal builds
-`pocket` itself and pins the Rust toolchain exactly, so it runs where that
-toolchain and both halves are present:
+What makes this variant run on an EL7 kernel is its patch series, not the host
+that compiles it. Building on the validated host with the reference toolchain
+reproduces the digests recorded here; building anywhere else produces different
+bytes, which the build reports and continues past.
+
+A bundle compiled entirely on a current host therefore runs on EL7, and that is
+verified: the variant built on Ubuntu 26.04 with GCC 15 and glibc 2.43 pulled an
+image, converted it in the builder UML, validated it, and ran a workload on
+CentOS Linux 7.9.2009. Its `.config` digest was identical to the validated
+host's; only the compiled bytes differed.
+
+The constraint is the build host's C library rather than its compiler. glibc
+declares a minimum supported kernel -- 3.2.0 for Ubuntu's 2.43, which
+`/lib/x86_64-linux-gnu/libc.so.6` prints and the linker stamps into every
+binary as `.note.ABI-tag`. A floor at or below the target's kernel keeps the
+runtime fallbacks that let a newer glibc work on an older kernel; a build host
+whose glibc declares a higher floor produces artifacts that abort at startup
+with `FATAL: kernel too old`.
+
+Either host can therefore seal the profile. The seal builds `pocket` itself and
+pins the Rust toolchain exactly, so it runs wherever that toolchain and the
+kernel are present:
 
 ```sh
 POCKET_KERNEL_VARIANT=el7 ./scripts/build-release-profile.sh
 ```
 
 Call the script, not `make release-profile`: the make target depends on the
-kernel, so it would rebuild the variant with the local compiler and refuse its
-own output. The script reads `build/kernel/x86_64-smp-p4k-el7` as it finds it
+kernel, so it would rebuild the variant before sealing it, discarding a kernel
+that may have come from another host. The script reads
+`build/kernel/x86_64-smp-p4k-el7` as it finds it
 and writes to `build/profiles-el7/`, leaving the default profile and its
 `latest` marker alone. The resulting bundle is what `pocket --profile-bundle`
 is pointed at on the EL7 host.
@@ -333,11 +349,11 @@ and the upstream warning applies unchanged: the backend is for trusted guest
 userspace. An EL7 host additionally carries its own lifecycle and security
 position, which this variant does not change.
 
-The variant's artifact digests are bound to the reference toolchain above, as
-the default build's are bound to its own. A different compiler or linker
-produces different bytes; the build reports the difference and continues, since
-the source contract is what holds on an arbitrary host.
-`POCKET_STRICT_TOOLCHAIN=1` makes the comparison fatal.
+The digests recorded here identify the validated host's build. A different
+compiler or linker produces different bytes; the build reports the difference
+and continues, since the source contract is what holds on an arbitrary host,
+and a differing artifact still runs. `POCKET_STRICT_TOOLCHAIN=1` makes the
+comparison fatal for a build that must reproduce the reference exactly.
 
 Both kernels read the same `config/kernel/x86_64-uml.fragment`, so raising
 `CONFIG_NR_CPUS` to 64 changed this variant's bytes too. The digests recorded
