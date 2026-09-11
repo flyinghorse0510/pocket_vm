@@ -165,6 +165,14 @@ pub struct SkopeoExecutionPolicy {
     pub guard_term_timeout: Duration,
     pub guard_exit_timeout: Duration,
     pub maximum_capture_bytes: usize,
+    /// Mirror Skopeo's own progress to standard error while capturing it.
+    ///
+    /// A registry copy is the longest part of an acquisition and says nothing
+    /// until it finishes, which reads as a hang. Skopeo names each blob as it
+    /// starts it, so echoing that is the difference between silence and
+    /// visible progress. The capture is still complete: this is a tee, and a
+    /// failed write stops the mirror rather than the transcript.
+    pub mirror_progress: bool,
 }
 
 impl Default for SkopeoExecutionPolicy {
@@ -174,6 +182,7 @@ impl Default for SkopeoExecutionPolicy {
             guard_term_timeout: DEFAULT_GUARD_TERM_TIMEOUT,
             guard_exit_timeout: DEFAULT_GUARD_EXIT_TIMEOUT,
             maximum_capture_bytes: 8 * 1024 * 1024,
+            mirror_progress: false,
         }
     }
 }
@@ -743,7 +752,11 @@ impl SkopeoNormalizer {
                 stream: "stderr",
                 reason: "guard stderr pipe is missing".to_owned(),
             })?;
-        let stdout_worker = capture_worker(stdout, self.policy.maximum_capture_bytes);
+        let stdout_worker = if self.policy.mirror_progress {
+            capture_worker_teed(stdout, self.policy.maximum_capture_bytes)
+        } else {
+            capture_worker(stdout, self.policy.maximum_capture_bytes)
+        };
         let stderr_worker = capture_worker(stderr, self.policy.maximum_capture_bytes);
         let status_result = wait_guard(&mut launch, self.policy);
         let stdout = join_capture(stdout_worker, "stdout")?;
@@ -896,6 +909,73 @@ fn capture_worker<R: Read + Send + 'static>(
     maximum: usize,
 ) -> JoinHandle<io::Result<CapturedBytes>> {
     thread::spawn(move || capture(reader, maximum))
+}
+
+fn capture_worker_teed<R: Read + Send + 'static>(
+    reader: R,
+    maximum: usize,
+) -> JoinHandle<io::Result<CapturedBytes>> {
+    thread::spawn(move || capture_teed(reader, maximum))
+}
+
+/// Capture as `capture` does, echoing each line to standard error on the way.
+///
+/// Skopeo writes one line per blob, so the echo is whole lines rather than raw
+/// chunks: a partially read line would interleave with anything else the
+/// process is reporting.
+///
+/// The write goes straight to the descriptor rather than through
+/// `io::stderr()`, which takes a process-wide lock. An acquisition spawns more
+/// than one helper, and `Command::spawn` forks: a fork that happens while this
+/// thread holds that lock gives the child a mutex no thread will ever release,
+/// so the child deadlocks before `exec` and the parent waits for a helper that
+/// never runs. A raw descriptor write takes no userspace lock and cannot be
+/// inherited locked.
+fn write_stderr_unlocked(bytes: &[u8]) -> bool {
+    use std::os::fd::AsFd;
+
+    let stderr = io::stderr();
+    let mut written = 0;
+    while written < bytes.len() {
+        match nix::unistd::write(stderr.as_fd(), &bytes[written..]) {
+            Ok(0) => return false,
+            Ok(count) => written += count,
+            Err(nix::errno::Errno::EINTR) => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+fn capture_teed(reader: impl Read, maximum: usize) -> io::Result<CapturedBytes> {
+    let mut bytes = Vec::with_capacity(maximum.min(64 * 1024));
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total_bytes = 0_u64;
+    let mut pending = Vec::new();
+    let mut mirroring = true;
+    let mut reader = reader;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if mirroring {
+            pending.extend_from_slice(&buffer[..count]);
+            while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = pending.drain(..=position).collect();
+                let mut message = b"pocket: ".to_vec();
+                message.extend_from_slice(&line);
+                if !write_stderr_unlocked(&message) {
+                    mirroring = false;
+                    break;
+                }
+            }
+        }
+        total_bytes = total_bytes.saturating_add(count as u64);
+        let remaining = maximum.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..count.min(remaining)]);
+    }
+    Ok(CapturedBytes { bytes, total_bytes })
 }
 
 fn capture(mut reader: impl Read, maximum: usize) -> io::Result<CapturedBytes> {
@@ -2366,6 +2446,7 @@ mod tests {
                     guard_term_timeout: Duration::from_millis(10),
                     guard_exit_timeout: Duration::from_millis(50),
                     maximum_capture_bytes: 1024,
+                    mirror_progress: false,
                 },
             )?;
             let started = Instant::now();

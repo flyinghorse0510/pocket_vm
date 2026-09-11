@@ -1076,7 +1076,11 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
                 "profile-bundle",
                 "profile_bundle",
             )?)?;
-            let store = open_store(required_path(&context.store, "store", "store")?)?;
+            // Initialized rather than merely opened: listing is the first thing
+            // an operator runs after installing, and an empty store is the
+            // correct answer to "what images do I have", not an error about a
+            // directory that nothing has created yet.
+            let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
             let profile_id = &profile.manifest().profile_id;
             let images: Vec<AliasRoot> = store
                 .alias_roots()?
@@ -1281,6 +1285,45 @@ fn execute_image_import(
     Ok(CommandStatus::SUCCESS)
 }
 
+/// Report a long stage to an operator watching the terminal.
+///
+/// An acquisition spends most of its time in two places that produce no output
+/// of their own, so a caller sees nothing for the whole run and reasonably
+/// concludes it has hung. This says what is happening and how long each stage
+/// took. It writes only to a terminal: a script reading stderr, or a `--json`
+/// caller, gets exactly what it got before.
+struct Progress {
+    enabled: bool,
+    started: std::time::Instant,
+}
+
+impl Progress {
+    fn new() -> Self {
+        Self {
+            enabled: io::stderr().is_terminal(),
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn stage(&mut self, message: &str) {
+        if !self.enabled {
+            return;
+        }
+        self.started = std::time::Instant::now();
+        eprintln!("pocket: {message}");
+    }
+
+    fn done(&self) {
+        if !self.enabled {
+            return;
+        }
+        eprintln!(
+            "pocket: done in {:.1}s",
+            self.started.elapsed().as_secs_f64()
+        );
+    }
+}
+
 fn execute_image_pull(
     context: ImageBuildArgs,
     source: &str,
@@ -1337,27 +1380,33 @@ fn execute_image_pull(
         requested.architecture(),
         requested.variant().map(str::to_owned),
     )?;
+    let mut progress = Progress::new();
     let normalizer = SkopeoNormalizer::new(
         profile.skopeo_path(),
         profile.guard_path(),
         SkopeoExecutionPolicy {
             timeout: acquisition_timeout,
+            mirror_progress: progress.enabled,
             ..SkopeoExecutionPolicy::default()
         },
     )?;
     profile.reverify()?;
+    progress.stage(&format!("fetching {}", source.as_str()));
     let normalized = normalizer.normalize(
         &source,
         &platform,
         &acquisition,
         profile.registry_ca_bundle_path(),
     )?;
+    progress.done();
     validate_normalized_platform(&requested, &normalized.image)?;
+    progress.stage("converting to a filesystem and validating it");
     let output = builder.build(BuildRequest {
         oci_layout: acquisition.as_path().join("layout"),
         source_reference: reference.clone(),
         requested_variant: requested.variant().map(str::to_owned),
     })?;
+    progress.done();
     let evidence = acquisition_evidence(
         "docker-pull",
         source.as_str(),
@@ -2297,13 +2346,24 @@ impl Config {
     /// it is.
     fn with_discovered_defaults(mut self) -> Self {
         if self.store.is_none() {
-            self.store = xdg_path("XDG_DATA_HOME", "pocket/store", ".local/share/pocket/store")
-                .inspect(|path| create_private_directory(path));
+            self.store = xdg_path("XDG_DATA_HOME", "pocket/store", ".local/share/pocket/store");
         }
         if self.runtime_root.is_none() {
             self.runtime_root =
-                xdg_path("XDG_RUNTIME_DIR", "pocket/run", ".local/state/pocket/run")
-                    .inspect(|path| create_private_directory(path));
+                xdg_path("XDG_RUNTIME_DIR", "pocket/run", ".local/state/pocket/run");
+        }
+        // Created whether the path was defaulted here or read from the config
+        // file, because both are paths this program chose rather than paths the
+        // caller named. An installed config names a store the installer did not
+        // create, and a runtime root under `/run` does not survive a reboot, so
+        // a read-only command would otherwise fail on a path the operator never
+        // typed. A `--store` or `--runtime-root` flag never reaches this: the
+        // config is consulted only when the flag is absent.
+        for path in [self.store.as_deref(), self.runtime_root.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            create_private_directory(path);
         }
         if self.profile_bundle.is_none() {
             self.profile_bundle = discover_profile_bundle();
