@@ -27,7 +27,7 @@ kernel's bytes are unchanged.
 | `pocket` itself | `image pull` and `run` verified on the host; the release e2e lane run there |
 | 64 vCPUs | `CONFIG_NR_CPUS=64` built and verified here, and a container run at 1, 2, 8, 32 and 64 vCPUs on the 8-CPU validated host, each reporting the requested count |
 | Packaged install | `install-release.py` installs and verifies a sealed release on this host; see **Packaging and installing** below |
-| `commit`, `image adjust` | Not working: the bundled `debugfs` segfaults on this host; see **Known limitation** below |
+| `commit`, `image adjust` | Verified on this host. Both read a staged filesystem through `debugfs`, which needs `SS_READLINE_PATH=none`; see **Declining readline in debugfs** below |
 | Build host | Either. A bundle compiled entirely on Ubuntu 26.04 (GCC 15, glibc 2.43) pulled an image, converted and validated it, and ran a workload on the validated host. Only the recorded digests are specific to the reference toolchain |
 
 `pocket`'s own binaries are static-PIE with no interpreter and no `NEEDED`
@@ -361,27 +361,25 @@ Both kernels read the same `config/kernel/x86_64-uml.fragment`, so raising
 here were regenerated on the validated host at that setting, and two
 consecutive from-scratch builds there produced them identically.
 
-## Known limitation: commit and image adjust
+## Declining readline in debugfs
 
-`pocket commit` and `pocket image adjust` do not work on an EL7 host. Both read
-a staged filesystem through the bundled `debugfs`, and that binary segfaults
-there on every command that opens an image -- `ls`, `stat`, `cat`, `dump` and
-`rdump` alike. Only `-V`, which opens nothing, returns.
+`debugfs` is the only e2fsprogs helper that links `libss`, which `dlopen`s a
+system readline for interactive line editing. The shipped helpers are
+statically linked, so on a host whose readline resolves against an older C
+library that load places a second, differently versioned libc into an address
+space that already contains one. The two collide, and every `debugfs` command
+that opens an image dies with SIGSEGV before reading anything -- `ls`, `stat`,
+`cat`, `dump` and `rdump` alike, with only `-V`, which opens nothing, returning.
 
-The failure is confined to `debugfs`. `e2fsck`, `resize2fs` and `mke2fs` from
-the same build run correctly on the same host and the same image, and
-`debugfs` is the only one of the four that links `libss`. The binary is
-byte-identical to the one that runs correctly on a current host, so this is a
-runtime difference rather than a build difference, and the root cause is not
-yet established.
+On CentOS Linux 7.9.2009 the loaded pair was `libreadline.so.6` and glibc 2.17
+against a binary carrying glibc 2.43. A current host escapes it only because
+its readline resolves against the same libc version the binary already has.
 
-Everything else is verified on the validated host: pulling an image, which
-boots both the builder and the validator UML; running a workload; exit status
-and in-guest signal semantics; stdin including a one-megabyte payload;
-environment, user, working-directory and hostname overrides; a writable
-copy-on-write root and `--root-readonly`; shared host directories including a
-read-only one; outbound DNS and TCP; `--network none`; concurrent runs with
-isolated overlays; and keeping, listing and removing a run.
+The runtime therefore passes `SS_READLINE_PATH=none` to `debugfs`, which is the
+value `lib/ss/get_readline.c` documents for declining the load. Nothing the
+runtime asks of `debugfs` is interactive. `pocket commit` and
+`pocket image adjust`, which read staged filesystems through it, both work on
+the validated host with that set.
 
 Two diagnostic targets cannot be built on the validated host. `make probe`
 needs busybox and `make smp-scaling` needs `musl-gcc` to build the initramfs

@@ -2770,7 +2770,18 @@ fn e2fs_helper_environment(
         // resize2fs reads neither policy file. It is given the same sanitized
         // environment and frozen clock as the other two so an adjusted image
         // is reproducible from the same inputs.
-        E2fsHelper::Resize2fs | E2fsHelper::Debugfs => {}
+        E2fsHelper::Resize2fs => {}
+        E2fsHelper::Debugfs => {
+            // debugfs is the only helper linking libss, which dlopens a system
+            // readline for interactive editing. This process is statically
+            // linked, so that pulls a second, differently versioned C library
+            // into an address space that already contains one, and the two
+            // collide: on a host whose readline resolves against an older
+            // libc, every command that opens an image dies with SIGSEGV before
+            // reading anything. `none` is the value libss documents for
+            // declining the load, and nothing here is interactive.
+            environment.insert(OsString::from("SS_READLINE_PATH"), OsString::from("none"));
+        }
     }
     environment.insert(
         OsString::from("E2FSPROGS_FAKE_TIME"),
