@@ -787,6 +787,28 @@ from the manifest the builder recorded and the validator checked; every file is
 checked against its recorded digest on the way out, and the result is a single
 flattened layer rather than the original stack.
 
+Between two pocket stores there is a second format that skips the rebuilding:
+
+```sh
+pocket image export alpine:3.22 --pocket-archive /tmp/alpine.pkvm
+pocket image import --pocket-archive /tmp/alpine.pkvm --reference alpine:3.22
+```
+
+This carries the generation itself, so the far side publishes the same
+generation ID rather than converting the image again -- no builder or validator
+boot on import. It travels as the image's allocated extents, so an eight
+gibibyte filesystem holding a few megabytes does not become an eight gibibyte
+file. Nothing is trusted: the store publishes under an identity derived from
+the bytes received, so a truncated or altered archive is refused and nothing
+enters the store.
+
+A generation is bound to the profile revision that produced it, so a pocket
+archive only lands in a store running that same revision; one from elsewhere is
+refused by name before anything is written. That is the trade for skipping the
+rebuild. The OCI archive has no such constraint, because the far side converts
+it under whatever profile it has -- which is what to use between machines whose
+profiles differ, and the only thing any other tool can read.
+
 Turn what a run produced into a new image with `commit`, the way
 `docker commit` does:
 

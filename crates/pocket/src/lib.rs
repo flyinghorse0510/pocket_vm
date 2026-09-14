@@ -319,9 +319,24 @@ enum ImageCommand {
         ///
         /// `--reference` names the image inside it, defaulting to the source,
         /// and `--json` reports the result as a stable document.
-        #[arg(long, value_name = "PATH")]
-        oci_archive: PathBuf,
+        #[command(flatten)]
+        destination: ImageExportDestinationArgs,
     },
+}
+
+/// Where an export writes, and in which of the two formats.
+#[derive(Debug, Clone, Args)]
+#[group(required = true, multiple = false)]
+struct ImageExportDestinationArgs {
+    /// Write an OCI archive other tools read. The layer is rebuilt from the
+    /// image, so the far side converts it again on import.
+    #[arg(long, value_name = "PATH")]
+    oci_archive: Option<PathBuf>,
+    /// Write the generation itself, for another pocket store. Nothing is
+    /// rebuilt on either side, so this is the faster transfer and the bytes
+    /// arrive exactly as they left. Only pocket reads it.
+    #[arg(long, value_name = "PATH")]
+    pocket_archive: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -336,6 +351,11 @@ struct ImageImportSourceArgs {
     /// Exact absolute single-image Docker save archive to normalize with sealed Skopeo.
     #[arg(long, value_name = "PATH")]
     docker_archive: Option<PathBuf>,
+    /// Exact absolute pocket archive, as `image export --pocket-archive`
+    /// writes. Published without rebuilding, under an identity derived from
+    /// the bytes received.
+    #[arg(long, value_name = "PATH")]
+    pocket_archive: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1125,8 +1145,8 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
         ImageCommand::Export {
             context,
             source,
-            oci_archive,
-        } => execute_image_export(context, &source, &oci_archive, stdout),
+            destination,
+        } => execute_image_export(context, &source, &destination, stdout),
     }
 }
 
@@ -1138,9 +1158,16 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
 fn execute_image_export(
     context: ImageBuildArgs,
     source: &str,
-    output: &Path,
+    destination: &ImageExportDestinationArgs,
     stdout: &mut dyn Write,
 ) -> Result<CommandStatus, CliError> {
+    let (output, native) = match (&destination.oci_archive, &destination.pocket_archive) {
+        (Some(path), None) => (path.as_path(), false),
+        (None, Some(path)) => (path.as_path(), true),
+        // clap's group makes both and neither unreachable; naming the case
+        // keeps that a statement rather than an assumption.
+        _ => return Err(invalid("export", "choose exactly one destination format")),
+    };
     if !output.is_absolute() {
         return Err(invalid(
             "oci-archive",
@@ -1179,35 +1206,106 @@ fn execute_image_export(
     let builder = HostBuilder::new(&profile, &store, runtime_root, BuilderPolicy::default())?;
     let mut progress = Progress::new();
     progress.stage(&format!("exporting {} to {}", source, output.display()));
-    let output_record = builder.export_oci_archive(&lease, output, &reference)?;
+    let summary = if native {
+        let record = builder.export_pocket_archive(&lease, output, &reference)?;
+        json!({
+            "generation_id": lease.id().to_string(),
+            "reference": reference,
+            "archive": output.display().to_string(),
+            "format": "pocket-archive-v1",
+            "archive_bytes": record.archive_bytes,
+            "data_bytes": record.data_bytes,
+            "extents": record.extents,
+        })
+    } else {
+        let record = builder.export_oci_archive(&lease, output, &reference)?;
+        json!({
+            "generation_id": lease.id().to_string(),
+            "reference": reference,
+            "archive": output.display().to_string(),
+            "format": "oci-archive",
+            "layer_digest": record.layer_digest,
+            "layer_diff_id": record.layer_diff_id,
+            "manifest_digest": record.manifest_digest,
+            "archive_bytes": record.archive_bytes,
+            "entries": record.entries,
+        })
+    };
+    progress.done();
+    if context.json {
+        write_json(stdout, &summary)?;
+    } else {
+        write_fields(stdout, &summary, "write export output")?;
+    }
+    Ok(CommandStatus::SUCCESS)
+}
+
+/// Publish a generation that arrived in a pocket archive.
+///
+/// Nothing is converted and nothing is re-derived: the store publishes under
+/// an identity computed from the bytes received, and refuses the archive if
+/// they do not hash to the generation it names.
+fn execute_pocket_archive_import(
+    context: ImageBuildArgs,
+    input: &Path,
+    reference: &str,
+    stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
+    let requested_platform = requested_platform(&profile, context.platform.as_deref())?;
+    let store = open_or_initialize_store(required_path(&context.store, "store", "store")?)?;
+    let runtime_root = managed_runtime_root(required_path(
+        &context.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
+    let alias = alias_key(&profile, reference, requested_platform.clone())?;
+    let builder = HostBuilder::new(&profile, &store, runtime_root, BuilderPolicy::default())?;
+    let mut progress = Progress::new();
+    progress.stage(&format!("importing {}", input.display()));
+    let record = builder.import_pocket_archive(input, &alias)?;
     progress.done();
     let summary = json!({
-        "generation_id": lease.id().to_string(),
+        "generation_id": record.generation_id.to_string(),
+        "alias_id": record.alias_id.map(|id| id.to_string()),
         "reference": reference,
-        "archive": output.display().to_string(),
-        "layer_digest": output_record.layer_digest,
-        "layer_diff_id": output_record.layer_diff_id,
-        "manifest_digest": output_record.manifest_digest,
-        "archive_bytes": output_record.archive_bytes,
-        "entries": output_record.entries,
+        "source_kind": "pocket-archive",
+        "cache_hit": record.cache_hit,
+        "data_bytes": record.data_bytes,
+        "extents": record.extents,
     });
     if context.json {
         write_json(stdout, &summary)?;
     } else {
-        writeln!(
-            stdout,
-            "generation_id={} reference={} archive={} layer_digest={} manifest_digest={} archive_bytes={} entries={}",
-            lease.id(),
-            reference,
-            output.display(),
-            output_record.layer_digest,
-            output_record.manifest_digest,
-            output_record.archive_bytes,
-            output_record.entries,
-        )
-        .map_err(|source| output_error("write export output", source))?;
+        write_fields(stdout, &summary, "write import output")?;
     }
     Ok(CommandStatus::SUCCESS)
+}
+
+/// Render a flat JSON object as the `key=value` line the other commands print.
+fn write_fields(
+    stdout: &mut dyn Write,
+    summary: &serde_json::Value,
+    role: &'static str,
+) -> Result<(), CliError> {
+    let mut line = String::new();
+    if let Some(fields) = summary.as_object() {
+        for (key, value) in fields {
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            let text = match value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            line.push_str(&format!("{key}={text}"));
+        }
+    }
+    writeln!(stdout, "{line}").map_err(|source| output_error(role, source))
 }
 
 /// Republish one image's filesystem at a different size.
@@ -1280,6 +1378,12 @@ fn execute_image_import(
         validate_explicit_platform_syntax(platform)?;
     }
     validate_evidence_path(context.evidence_out.as_deref())?;
+    // A pocket archive carries a generation rather than an image to convert,
+    // so it never reaches Skopeo or the builder.
+    if let Some(path) = source.pocket_archive.as_deref() {
+        validate_import_path_syntax(path)?;
+        return execute_pocket_archive_import(context, path, &reference, stdout);
+    }
     let (source_path, source_kind) = match (
         source.oci.as_deref(),
         source.oci_archive.as_deref(),

@@ -15,6 +15,7 @@ mod launch;
 mod manifest;
 mod oci_export;
 mod operation;
+mod pocket_archive;
 mod profile_seal;
 mod protocol;
 mod runtime;

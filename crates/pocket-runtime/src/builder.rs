@@ -5412,3 +5412,298 @@ impl HostBuilder<'_> {
         })
     }
 }
+
+/// What a pocket-archive export or import produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PocketArchiveOutput {
+    pub generation_id: GenerationId,
+    pub alias_id: Option<AliasId>,
+    pub archive_bytes: u64,
+    pub data_bytes: u64,
+    pub extents: usize,
+    pub cache_hit: bool,
+}
+
+impl HostBuilder<'_> {
+    /// Write one generation into a pocket archive.
+    ///
+    /// The image travels as its allocated extents, because a base is mostly
+    /// holes: writing them out would make the archive orders of magnitude
+    /// larger than the data it carries.
+    pub fn export_pocket_archive(
+        &self,
+        lease: &pocket_store::Lease,
+        output: &Path,
+        reference: &str,
+    ) -> Result<PocketArchiveOutput, HostBuildError> {
+        use crate::pocket_archive::{
+            BaseRecord, Document, Extent, MAGIC, SCHEMA, SidecarRecord, SpecRecord,
+        };
+
+        let generation = lease.generation();
+        let manifest = generation.manifest();
+        let base_path = generation.base_path().to_owned();
+        let mut base = File::open(&base_path)
+            .map_err(|error| HostBuildError::io("open base", &base_path, error))?;
+        let size = manifest.base_size();
+
+        let mut extents = Vec::new();
+        let mut offset = 0_u64;
+        while offset < size {
+            let Some(data) = seek_hole_aware(&base, offset, true) else {
+                break;
+            };
+            if data >= size {
+                break;
+            }
+            let end = seek_hole_aware(&base, data, false)
+                .unwrap_or(size)
+                .min(size);
+            extents.push(Extent {
+                offset: data,
+                length: end - data,
+            });
+            offset = end;
+        }
+
+        let document = Document {
+            schema: SCHEMA.to_owned(),
+            generation_id: generation.id().to_string(),
+            reference: reference.to_owned(),
+            spec: SpecRecord::of(manifest.spec()),
+            base: BaseRecord {
+                size,
+                digest: manifest.base_digest().to_string(),
+                extents: extents.clone(),
+            },
+            sidecars: manifest.sidecars().iter().map(SidecarRecord::of).collect(),
+        };
+        document
+            .validate()
+            .map_err(|reason| HostBuildError::invalid("pocket-archive", reason))?;
+        let encoded = serde_json::to_vec(&document)
+            .map_err(|error| HostBuildError::invalid("pocket-archive", error.to_string()))?;
+
+        let mut archive = File::create(output)
+            .map_err(|error| HostBuildError::io("create archive", output, error))?;
+        archive
+            .write_all(MAGIC)
+            .and_then(|()| archive.write_all(&(encoded.len() as u64).to_be_bytes()))
+            .and_then(|()| archive.write_all(&encoded))
+            .map_err(|error| HostBuildError::io("write archive header", output, error))?;
+
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        let mut data_bytes = 0_u64;
+        for extent in &extents {
+            base.seek(SeekFrom::Start(extent.offset))
+                .map_err(|error| HostBuildError::io("seek base", &base_path, error))?;
+            let mut remaining = extent.length;
+            while remaining > 0 {
+                let want =
+                    usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+                base.read_exact(&mut buffer[..want])
+                    .map_err(|error| HostBuildError::io("read base", &base_path, error))?;
+                archive
+                    .write_all(&buffer[..want])
+                    .map_err(|error| HostBuildError::io("write archive", output, error))?;
+                remaining -= want as u64;
+                data_bytes += want as u64;
+            }
+        }
+        for sidecar in manifest.sidecars() {
+            let bytes = lease
+                .read_sidecar(sidecar.name(), sidecar.size())
+                .map_err(HostBuildError::from)?;
+            archive
+                .write_all(&bytes)
+                .map_err(|error| HostBuildError::io("write archive sidecar", output, error))?;
+        }
+        archive
+            .sync_all()
+            .map_err(|error| HostBuildError::io("flush archive", output, error))?;
+        let archive_bytes = archive
+            .metadata()
+            .map_err(|error| HostBuildError::io("measure archive", output, error))?
+            .len();
+
+        Ok(PocketArchiveOutput {
+            generation_id: generation.id(),
+            alias_id: None,
+            archive_bytes,
+            data_bytes,
+            extents: extents.len(),
+            cache_hit: false,
+        })
+    }
+
+    /// Publish a generation carried in a pocket archive.
+    ///
+    /// The archive is not trusted: the store publishes under an identity
+    /// derived from the bytes it received, and verifies the base digest and
+    /// every sidecar record before doing so. An archive whose contents do not
+    /// hash to the generation it names fails to publish rather than entering
+    /// the store under a borrowed identity.
+    pub fn import_pocket_archive(
+        &self,
+        input: &Path,
+        alias: &AliasKey,
+    ) -> Result<PocketArchiveOutput, HostBuildError> {
+        use crate::pocket_archive::{Document, MAGIC};
+
+        let mut archive =
+            File::open(input).map_err(|error| HostBuildError::io("open archive", input, error))?;
+        let mut magic = [0_u8; 16];
+        archive
+            .read_exact(&mut magic)
+            .map_err(|error| HostBuildError::io("read archive", input, error))?;
+        if &magic != MAGIC {
+            return Err(HostBuildError::invalid(
+                "pocket-archive",
+                "not a pocket archive",
+            ));
+        }
+        let mut length = [0_u8; 8];
+        archive
+            .read_exact(&mut length)
+            .map_err(|error| HostBuildError::io("read archive", input, error))?;
+        let length = u64::from_be_bytes(length);
+        if length == 0 || length > 64 * 1024 * 1024 {
+            return Err(HostBuildError::invalid(
+                "pocket-archive",
+                "archive document length is implausible",
+            ));
+        }
+        let mut encoded = vec![0_u8; usize::try_from(length).unwrap_or(usize::MAX)];
+        archive
+            .read_exact(&mut encoded)
+            .map_err(|error| HostBuildError::io("read archive", input, error))?;
+        let document: Document = serde_json::from_slice(&encoded)
+            .map_err(|error| HostBuildError::invalid("pocket-archive", error.to_string()))?;
+        document
+            .validate()
+            .map_err(|reason| HostBuildError::invalid("pocket-archive", reason))?;
+
+        // A truncated archive is cheaper to refuse now than after a staging
+        // directory exists and most of an image has been written into it.
+        let expected_bytes = MAGIC.len() as u64
+            + 8
+            + length
+            + document.data_length()
+            + document
+                .sidecars
+                .iter()
+                .map(|record| record.size)
+                .sum::<u64>();
+        let actual_bytes = archive
+            .metadata()
+            .map_err(|error| HostBuildError::io("measure archive", input, error))?
+            .len();
+        if actual_bytes != expected_bytes {
+            return Err(HostBuildError::invalid(
+                "pocket-archive",
+                format!("archive is {actual_bytes} bytes; its document describes {expected_bytes}"),
+            ));
+        }
+
+        let spec = document
+            .spec
+            .build()
+            .map_err(|reason| HostBuildError::invalid("pocket-archive", reason))?;
+        // A generation is bound to the profile revision that produced it, so an
+        // archive from a store on another revision can be published but never
+        // rooted. Refusing here keeps that a message rather than eighty
+        // megabytes written into a staging directory and then orphaned.
+        let manifest = self.profile.manifest();
+        let local_revision = manifest.profile_revision.hexadecimal();
+        if document.spec.profile_id != manifest.profile_id
+            || document.spec.profile_revision != format!("sha256:{local_revision}")
+        {
+            return Err(HostBuildError::invalid(
+                "pocket-archive",
+                format!(
+                    "archive holds {}@{}, and this profile is {}@sha256:{local_revision}",
+                    document.spec.profile_id, document.spec.profile_revision, manifest.profile_id,
+                ),
+            ));
+        }
+
+        let expected_base = document
+            .base
+            .digest
+            .parse::<Digest>()
+            .map_err(|error| HostBuildError::invalid("pocket-archive", error.to_string()))?;
+        let sidecars = document
+            .sidecars
+            .iter()
+            .map(|record| record.build())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|reason| HostBuildError::invalid("pocket-archive", reason))?;
+
+        let transaction = match self.store.try_begin_generation(spec)? {
+            BeginGeneration::Existing(lease) => {
+                self.store.set_alias(alias, lease.id())?;
+                return Ok(PocketArchiveOutput {
+                    generation_id: lease.id(),
+                    alias_id: Some(alias.id()),
+                    archive_bytes: 0,
+                    data_bytes: 0,
+                    extents: document.base.extents.len(),
+                    cache_hit: true,
+                });
+            }
+            BeginGeneration::Vacant(transaction) => transaction,
+        };
+
+        create_sparse_target(&transaction, document.base.size)?;
+        let base_path = transaction.base_path();
+        let mut base = OpenOptions::new()
+            .write(true)
+            .open(&base_path)
+            .map_err(|error| HostBuildError::io("open staged base", &base_path, error))?;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        let mut data_bytes = 0_u64;
+        for extent in &document.base.extents {
+            base.seek(SeekFrom::Start(extent.offset))
+                .map_err(|error| HostBuildError::io("seek staged base", &base_path, error))?;
+            let mut remaining = extent.length;
+            while remaining > 0 {
+                let want =
+                    usize::try_from(remaining.min(buffer.len() as u64)).unwrap_or(buffer.len());
+                archive
+                    .read_exact(&mut buffer[..want])
+                    .map_err(|error| HostBuildError::io("read archive", input, error))?;
+                base.write_all(&buffer[..want])
+                    .map_err(|error| HostBuildError::io("write staged base", &base_path, error))?;
+                remaining -= want as u64;
+                data_bytes += want as u64;
+            }
+        }
+        base.sync_all()
+            .map_err(|error| HostBuildError::io("flush staged base", &base_path, error))?;
+
+        for record in &document.sidecars {
+            let mut bytes = vec![0_u8; usize::try_from(record.size).unwrap_or(usize::MAX)];
+            archive
+                .read_exact(&mut bytes)
+                .map_err(|error| HostBuildError::io("read archive sidecar", input, error))?;
+            let mut sidecar = transaction.create_sidecar(record.name.clone())?;
+            sidecar
+                .write_all(&bytes)
+                .and_then(|()| sidecar.sync_all())
+                .map_err(|error| {
+                    HostBuildError::io("write sidecar", Path::new(&record.name), error)
+                })?;
+        }
+
+        let lease = transaction.publish_leased(expected_base, &sidecars)?;
+        self.store.set_alias(alias, lease.id())?;
+        Ok(PocketArchiveOutput {
+            generation_id: lease.id(),
+            alias_id: Some(alias.id()),
+            archive_bytes: 0,
+            data_bytes,
+            extents: document.base.extents.len(),
+            cache_hit: false,
+        })
+    }
+}
