@@ -48,6 +48,10 @@ pocket start [--profile-bundle BUNDLE] [--store STORE] \
   [--runtime-root RUNTIME_ROOT] [-t] [--no-boot-log] [--consoles N] \
   [--timeout DURATION] NAME
 
+pocket image export [--profile-bundle BUNDLE] [--store STORE] \
+  [--runtime-root RUNTIME_ROOT] --oci-archive PATH [--reference REFERENCE] \
+  [--json] IMAGE_OR_GENERATION
+
 pocket rm [--store STORE] NAME...
 
 pocket commit [--store STORE] [--profile-bundle BUNDLE] \

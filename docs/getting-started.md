@@ -774,6 +774,19 @@ and its writes accumulate. Resource flags from the original run are not
 replayed, so `start` takes `-t`, `--consoles`, `--no-boot-log` and `--timeout`
 of its own.
 
+Move an image to another machine, or hand it to another tool, with `export`:
+
+```sh
+pocket image export alpine:3.22 --oci-archive /tmp/alpine.tar
+```
+
+The result is an ordinary OCI archive, so `skopeo`, `podman` and `docker` read
+it, and `pocket image import --oci-archive` reads it back. A generation stores
+an ext4 filesystem rather than the layers it came from, so the layer is rebuilt
+from the manifest the builder recorded and the validator checked; every file is
+checked against its recorded digest on the way out, and the result is a single
+flattened layer rather than the original stack.
+
 Turn what a run produced into a new image with `commit`, the way
 `docker commit` does:
 

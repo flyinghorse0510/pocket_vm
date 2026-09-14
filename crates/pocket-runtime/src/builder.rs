@@ -5162,3 +5162,253 @@ mod tests {
         format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
     }
 }
+
+/// What one export produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciExportOutput {
+    /// Digest of the compressed layer blob, as a descriptor names it.
+    pub layer_digest: String,
+    /// Digest of the uncompressed layer, which the config records.
+    pub layer_diff_id: String,
+    pub manifest_digest: String,
+    pub archive_bytes: u64,
+    pub entries: u64,
+}
+
+/// Sidecar bounds. A manifest describes one image's metadata and a config is a
+/// small JSON document, so both are read whole under a stated ceiling rather
+/// than streamed.
+const MAX_EXPORT_MANIFEST_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_EXPORT_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+impl HostBuilder<'_> {
+    /// Write one generation out as an OCI archive.
+    ///
+    /// The layer is rebuilt rather than copied: a generation stores an ext4
+    /// filesystem, not the layers it came from. Its metadata comes from the
+    /// manifest the builder recorded and the validator checked, and its file
+    /// contents from `debugfs`, which reads the image without mounting it. Each
+    /// file is checked against the digest the manifest recorded as it is
+    /// written, so a corrupted image fails the export instead of producing a
+    /// quietly wrong archive.
+    pub fn export_oci_archive(
+        &self,
+        lease: &pocket_store::Lease,
+        output: &Path,
+        reference: &str,
+    ) -> Result<OciExportOutput, HostBuildError> {
+        use crate::oci_export::{
+            TarBuilder, content_matches, decode_manifest, descriptor_digest, dump_script,
+            layer_path, staged_name,
+        };
+
+        self.profile.reverify()?;
+        let manifest_bytes = lease
+            .read_sidecar("metadata.manifest", MAX_EXPORT_MANIFEST_BYTES)
+            .map_err(HostBuildError::from)?;
+        let config_bytes = lease
+            .read_sidecar("image-config.json", MAX_EXPORT_CONFIG_BYTES)
+            .map_err(HostBuildError::from)?;
+        let entries = decode_manifest(&manifest_bytes)
+            .map_err(|reason| HostBuildError::invalid("metadata.manifest", reason))?;
+
+        let mut directory = BuildDirectory::create(&self.runtime_root)?;
+        let paths = directory.paths(self.profile)?;
+        create_private_blkid_file(&paths.blkid_file)?;
+        let context = E2fsHelperContext {
+            profile: self.profile,
+            lock: lease.lock_file(),
+            tmp: &paths.tmp_dir,
+            blkid_file: &paths.blkid_file,
+            policy: self.policy,
+        };
+
+        // One debugfs run for the whole image. A per-file invocation would
+        // spend its time on process creation for an image of any size.
+        let scratch = paths.tmp_dir.join("export");
+        fs::create_dir_all(&scratch)
+            .map_err(|error| HostBuildError::io("create export scratch", &scratch, error))?;
+        let script_path = paths.tmp_dir.join("export.debugfs");
+        {
+            let mut script = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                .open(&script_path)
+                .map_err(|error| HostBuildError::io("create export script", &script_path, error))?;
+            script
+                .write_all(&dump_script(&entries, &scratch))
+                .and_then(|()| script.sync_all())
+                .map_err(|error| HostBuildError::io("write export script", &script_path, error))?;
+        }
+        let base = lease.generation().base_path().to_owned();
+        let image_bytes = lease.generation().manifest().base_size();
+        let mut logs = vec![run_guarded_helper(
+            "export-read-contents",
+            E2fsHelper::Debugfs,
+            &[
+                OsString::from("-f"),
+                script_path.as_os_str().to_owned(),
+                base.as_os_str().to_owned(),
+            ],
+            &context,
+            image_bytes,
+        )?];
+        logs.clear();
+
+        let layer_path_tmp = paths.tmp_dir.join("layer.tar.gz");
+        let layer_file = fs::File::create(&layer_path_tmp)
+            .map_err(|error| HostBuildError::io("create layer", &layer_path_tmp, error))?;
+        // mtime zero: a gzip header timestamp would make two exports of one
+        // generation differ for no reason the caller can see.
+        let encoder = flate2::GzBuilder::new()
+            .mtime(0)
+            .write(layer_file, flate2::Compression::default());
+        let mut tar = TarBuilder::new(encoder);
+        let mut written = 0_u64;
+        for (index, entry) in entries.iter().enumerate() {
+            let Some(path) = layer_path(entry) else {
+                continue;
+            };
+            let mut member = entry.clone();
+            member.path = path;
+            let contents = if member.kind == crate::oci_export::KIND_FILE
+                && member.hardlink_target.is_none()
+                && member.size > 0
+            {
+                let staged = scratch.join(staged_name(index));
+                let bytes = fs::read(&staged)
+                    .map_err(|error| HostBuildError::io("read exported file", &staged, error))?;
+                if !content_matches(entry, &bytes) {
+                    return Err(HostBuildError::invalid(
+                        "export",
+                        format!(
+                            "{} does not match the digest the manifest recorded",
+                            String::from_utf8_lossy(&entry.path)
+                        ),
+                    ));
+                }
+                bytes
+            } else {
+                Vec::new()
+            };
+            // A hardlink's target is an ext4 path too, and has to be rewritten
+            // the same way or it would point outside the layer.
+            if let Some(target) = member.hardlink_target.take() {
+                member.hardlink_target = target
+                    .strip_prefix(b"rootfs/".as_slice())
+                    .map(<[u8]>::to_vec)
+                    .or(Some(target));
+            }
+            if tar
+                .append(&member, &contents)
+                .map_err(|error| HostBuildError::io("write layer", &layer_path_tmp, error))?
+            {
+                written += 1;
+            }
+        }
+        let (encoder, diff_id) = tar
+            .finish()
+            .map_err(|error| HostBuildError::io("finish layer", &layer_path_tmp, error))?;
+        encoder
+            .finish()
+            .and_then(|file| file.sync_all())
+            .map_err(|error| HostBuildError::io("flush layer", &layer_path_tmp, error))?;
+
+        let layer_blob = fs::read(&layer_path_tmp)
+            .map_err(|error| HostBuildError::io("read layer", &layer_path_tmp, error))?;
+        let diff_id = format!("sha256:{}", hex::encode(diff_id));
+        let layer_digest = descriptor_digest(&layer_blob);
+
+        // The stored config describes the image this generation was built
+        // from; its layer identity is the one thing that changes, because the
+        // export flattens whatever it had into the single layer just written.
+        let mut config: serde_json::Value = serde_json::from_slice(&config_bytes)
+            .map_err(|error| HostBuildError::invalid("image-config.json", error.to_string()))?;
+        config["rootfs"] = serde_json::json!({
+            "type": "layers",
+            "diff_ids": [diff_id.clone()],
+        });
+        let config_blob = serde_json::to_vec(&config)
+            .map_err(|error| HostBuildError::invalid("image-config.json", error.to_string()))?;
+        let config_digest = descriptor_digest(&config_blob);
+
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": config_digest,
+                "size": config_blob.len(),
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+                "digest": layer_digest.clone(),
+                "size": layer_blob.len(),
+            }],
+        });
+        let manifest_blob = serde_json::to_vec(&manifest)
+            .map_err(|error| HostBuildError::invalid("manifest", error.to_string()))?;
+        let manifest_digest = descriptor_digest(&manifest_blob);
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": [{
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "digest": manifest_digest.clone(),
+                "size": manifest_blob.len(),
+                "annotations": { "org.opencontainers.image.ref.name": reference },
+            }],
+        });
+        let index_blob = serde_json::to_vec(&index)
+            .map_err(|error| HostBuildError::invalid("index", error.to_string()))?;
+
+        let archive = fs::File::create(output)
+            .map_err(|error| HostBuildError::io("create export archive", output, error))?;
+        let mut layout = TarBuilder::new(archive);
+        let write = |layout: &mut TarBuilder<fs::File>, name: &str, bytes: &[u8]| {
+            layout
+                .append_raw(name, bytes, 0o644)
+                .map_err(|error| HostBuildError::io("write export archive", output, error))
+        };
+        write(
+            &mut layout,
+            "oci-layout",
+            br#"{"imageLayoutVersion":"1.0.0"}"#,
+        )?;
+        write(&mut layout, "index.json", &index_blob)?;
+        for directory in ["blobs", "blobs/sha256"] {
+            layout
+                .append_dir(directory)
+                .map_err(|error| HostBuildError::io("write export archive", output, error))?;
+        }
+        for (digest, blob) in [
+            (&config_digest, &config_blob),
+            (&manifest_digest, &manifest_blob),
+            (&layer_digest, &layer_blob),
+        ] {
+            let name = format!("blobs/sha256/{}", digest.trim_start_matches("sha256:"));
+            write(&mut layout, &name, blob)?;
+        }
+        let (archive, _) = layout
+            .finish()
+            .map_err(|error| HostBuildError::io("finish export archive", output, error))?;
+        archive
+            .sync_all()
+            .map_err(|error| HostBuildError::io("flush export archive", output, error))?;
+        let archive_bytes = fs::metadata(output)
+            .map_err(|error| HostBuildError::io("measure export archive", output, error))?
+            .len();
+        directory.cleanup()?;
+
+        Ok(OciExportOutput {
+            layer_digest,
+            layer_diff_id: diff_id,
+            manifest_digest,
+            archive_bytes,
+            entries: written,
+        })
+    }
+}

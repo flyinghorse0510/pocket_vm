@@ -13,6 +13,7 @@ mod filesystem;
 mod image;
 mod launch;
 mod manifest;
+mod oci_export;
 mod operation;
 mod profile_seal;
 mod protocol;

@@ -302,6 +302,26 @@ enum ImageCommand {
         #[arg(long)]
         size: String,
     },
+    /// Write an image out as an OCI archive other tools can read.
+    ///
+    /// A generation stores an ext4 filesystem rather than the layers it came
+    /// from, so the layer is rebuilt: its metadata from the manifest the
+    /// builder recorded and the validator checked, its contents read out of
+    /// the image. Every file is checked against its recorded digest on the
+    /// way, so a damaged image fails the export instead of producing a quietly
+    /// wrong archive. The result imports again with `--oci-archive`.
+    Export {
+        #[command(flatten)]
+        context: ImageBuildArgs,
+        /// Image to write out, as an alias reference or exact generation ID.
+        source: String,
+        /// Destination archive. It must not already exist.
+        ///
+        /// `--reference` names the image inside it, defaulting to the source,
+        /// and `--json` reports the result as a stable document.
+        #[arg(long, value_name = "PATH")]
+        oci_archive: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -753,7 +773,8 @@ fn apply_config(command: &mut Command, config: &Config) {
         Command::Image { command } => match command {
             ImageCommand::Pull { context, .. }
             | ImageCommand::Import { context, .. }
-            | ImageCommand::Adjust { context, .. } => {
+            | ImageCommand::Adjust { context, .. }
+            | ImageCommand::Export { context, .. } => {
                 fill(&mut context.profile_bundle, &config.profile_bundle);
                 fill(&mut context.store, &config.store);
                 fill(&mut context.runtime_root, &config.runtime_root);
@@ -1101,7 +1122,92 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
             source,
             size,
         } => execute_image_adjust(context, &source, &size, stdout),
+        ImageCommand::Export {
+            context,
+            source,
+            oci_archive,
+        } => execute_image_export(context, &source, &oci_archive, stdout),
     }
+}
+
+/// Write one image out as an OCI archive.
+///
+/// The destination must not exist: an export names a file the caller chose,
+/// and silently replacing whatever is already there is not this command's
+/// decision to make.
+fn execute_image_export(
+    context: ImageBuildArgs,
+    source: &str,
+    output: &Path,
+    stdout: &mut dyn Write,
+) -> Result<CommandStatus, CliError> {
+    if !output.is_absolute() {
+        return Err(invalid(
+            "oci-archive",
+            "destination must be an absolute path",
+        ));
+    }
+    if output.exists() {
+        return Err(invalid(
+            "oci-archive",
+            "destination already exists; choose a path that does not",
+        ));
+    }
+    let profile = load_profile(required_path(
+        &context.profile_bundle,
+        "profile-bundle",
+        "profile_bundle",
+    )?)?;
+    let requested_platform = requested_platform(&profile, context.platform.as_deref())?;
+    let store = open_store(required_path(&context.store, "store", "store")?)?;
+    let runtime_root = managed_runtime_root(required_path(
+        &context.runtime_root,
+        "runtime-root",
+        "runtime_root",
+    )?)?;
+    let lease = lease_target(
+        &store,
+        &profile,
+        target_kind(source)?,
+        requested_platform.clone(),
+    )?;
+    validate_generation_profile(&profile, lease.generation())?;
+    let reference = context
+        .reference
+        .clone()
+        .unwrap_or_else(|| source.to_owned());
+    let builder = HostBuilder::new(&profile, &store, runtime_root, BuilderPolicy::default())?;
+    let mut progress = Progress::new();
+    progress.stage(&format!("exporting {} to {}", source, output.display()));
+    let output_record = builder.export_oci_archive(&lease, output, &reference)?;
+    progress.done();
+    let summary = json!({
+        "generation_id": lease.id().to_string(),
+        "reference": reference,
+        "archive": output.display().to_string(),
+        "layer_digest": output_record.layer_digest,
+        "layer_diff_id": output_record.layer_diff_id,
+        "manifest_digest": output_record.manifest_digest,
+        "archive_bytes": output_record.archive_bytes,
+        "entries": output_record.entries,
+    });
+    if context.json {
+        write_json(stdout, &summary)?;
+    } else {
+        writeln!(
+            stdout,
+            "generation_id={} reference={} archive={} layer_digest={} manifest_digest={} archive_bytes={} entries={}",
+            lease.id(),
+            reference,
+            output.display(),
+            output_record.layer_digest,
+            output_record.manifest_digest,
+            output_record.archive_bytes,
+            output_record.entries,
+        )
+        .map_err(|source| output_error("write export output", source))?;
+    }
+    Ok(CommandStatus::SUCCESS)
 }
 
 /// Republish one image's filesystem at a different size.
