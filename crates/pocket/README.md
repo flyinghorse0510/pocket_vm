@@ -30,7 +30,8 @@ pocket image import \
   --reference REFERENCE [--platform OS/ARCH[/VARIANT]] \
   (--oci ABSOLUTE_CANONICAL_OCI_LAYOUT | \
    --oci-archive ABSOLUTE_SINGLE_IMAGE_TAR | \
-   --docker-archive ABSOLUTE_SINGLE_IMAGE_TAR) \
+   --docker-archive ABSOLUTE_SINGLE_IMAGE_TAR | \
+   --pocket-archive PATH) \
   [--evidence-out ABSENT_PATH] [--json]
 
 pocket image pull \
@@ -128,6 +129,18 @@ preflighted for duplicate or ambiguous root indexes, and normalized by the
 profile's sealed Skopeo. Archive selectors and multi-image archives are rejected
 instead of choosing an implicit tag or ordering. Relative paths and daemon
 imports remain unsupported.
+
+`image export --oci-archive` writes a single-image OCI archive that Skopeo,
+Podman and Docker read. The generation stores a filesystem rather than layers,
+so the archive holds one flattened layer rebuilt from the validated metadata
+manifest; each file is checked against its recorded digest as it is written.
+`image export --pocket-archive` writes the generation itself: the base image as
+its allocated extents, the sidecars, and the generation spec.
+`image import --pocket-archive` publishes it without booting a builder or
+validator, under the identity derived from the bytes received, so a truncated
+or altered archive is refused before anything enters the store. A pocket
+archive is bound to its profile revision and is refused by a store on any other
+revision; the OCI archive is the portable form.
 
 `image pull` accepts a registry name or an explicit `docker://` source; other
 transports are refused. It runs the verified profile's exact static Skopeo artifact beneath

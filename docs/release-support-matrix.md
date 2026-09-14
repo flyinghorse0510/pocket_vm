@@ -32,7 +32,8 @@ distribution and signing gates remain open.
 | Managed path lengths | Store and profile up to 3840 bytes; runtime root capped at 66, derived from the kernel's 108-byte `sockaddr_un` | Hard kernel limit, not a policy choice |
 | Trust model | Trusted guest userspace supplied by the user | Intentional boundary |
 | Registry acquisition | Anonymous `docker` transport, sealed CA and Skopeo policy. A bare name expands the way a registry client would; other transports are refused | Experimental |
-| Local image input | Canonical OCI layout plus constrained single-image OCI and Docker archives | Experimental |
+| Local image input | Canonical OCI layout plus constrained single-image OCI and Docker archives; pocket archives from the same profile revision | Experimental |
+| Image export | Single-image OCI archive with one flattened layer; pocket archive of the generation itself | Experimental |
 | Installation | Any prefix the caller can write, including one shared between users; version-exact side-by-side releases | Foundation implemented; clean-host qualification pending |
 | Host libc/runtime | Not yet declared portable | Release blocker. Host CLI linkage and minimum ABI need qualification |
 | arm64 UML | Not in this package or profile | The seed is an out-of-tree port of Linux 7.2-rc4 plus 54 commits. Native execution is feasible, but seed reproduction and a reviewed transplant onto the selected maintained release are both required. No implied mainline support |

@@ -302,14 +302,13 @@ enum ImageCommand {
         #[arg(long)]
         size: String,
     },
-    /// Write an image out as an OCI archive other tools can read.
+    /// Write an image out as an OCI archive or a pocket archive.
     ///
-    /// A generation stores an ext4 filesystem rather than the layers it came
-    /// from, so the layer is rebuilt: its metadata from the manifest the
-    /// builder recorded and the validator checked, its contents read out of
-    /// the image. Every file is checked against its recorded digest on the
-    /// way, so a damaged image fails the export instead of producing a quietly
-    /// wrong archive. The result imports again with `--oci-archive`.
+    /// `--oci-archive` rebuilds one flattened layer from the validated
+    /// metadata manifest, checking every file against its recorded digest, so
+    /// other tools can read it. `--pocket-archive` writes the generation
+    /// itself for another pocket store on the same profile revision. Both
+    /// import again with the flag of the same name.
     Export {
         #[command(flatten)]
         context: ImageBuildArgs,
@@ -1168,15 +1167,17 @@ fn execute_image_export(
         // keeps that a statement rather than an assumption.
         _ => return Err(invalid("export", "choose exactly one destination format")),
     };
+    let field = if native {
+        "pocket-archive"
+    } else {
+        "oci-archive"
+    };
     if !output.is_absolute() {
-        return Err(invalid(
-            "oci-archive",
-            "destination must be an absolute path",
-        ));
+        return Err(invalid(field, "destination must be an absolute path"));
     }
     if output.exists() {
         return Err(invalid(
-            "oci-archive",
+            field,
             "destination already exists; choose a path that does not",
         ));
     }

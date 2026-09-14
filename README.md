@@ -23,6 +23,8 @@ pocket ps -a                                      # docker ps -a
 pocket start build                                # docker start
 pocket commit build ubuntu:with-tools             # docker commit
 pocket rm build                                   # docker rm
+pocket image export ubuntu:24.04 --oci-archive /tmp/u.tar             # docker save
+pocket image import --oci-archive /tmp/u.tar --reference ubuntu:24.04  # docker load
 ```
 
 The flags are the ones you would guess:

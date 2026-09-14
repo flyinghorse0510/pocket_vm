@@ -1126,6 +1126,7 @@ different final generation IDs.
 | Local OCI layout | Yes | Skopeo oci: source to private staged layout |
 | OCI archive | Yes | Skopeo oci-archive: source |
 | Docker save archive | Yes | Skopeo docker-archive: source; reject ambiguous multi-image selection |
+| Pocket archive | Yes, same profile revision | None; the generation is published from the archived bytes and verified against its identity |
 | Docker daemon image | Optional adapter | Only when caller already has daemon-socket access; never a prerequisite |
 | Docker container export tar | No image import | It loses image configuration and layer provenance; a future explicit raw-rootfs import would require command metadata |
 
@@ -3369,6 +3370,8 @@ pocket image pull IMAGE[@DIGEST] [--profile PROFILE_ID[@PROFILE_REVISION]] [--pl
 pocket image import --oci PATH [--ref REF] [--profile PROFILE_ID[@PROFILE_REVISION]] [--platform PLATFORM]
 pocket image import --oci-archive FILE [--ref REF] [--profile PROFILE_ID[@PROFILE_REVISION]] [--platform PLATFORM]
 pocket image import --docker-archive FILE [--ref REF] [--profile PROFILE_ID[@PROFILE_REVISION]] [--platform PLATFORM]
+pocket image import --pocket-archive FILE [--ref REF] [--profile PROFILE_ID[@PROFILE_REVISION]]
+pocket image export IMAGE_OR_ID (--oci-archive FILE | --pocket-archive FILE) [--profile PROFILE_ID[@PROFILE_REVISION]]
 pocket image inspect IMAGE_OR_ID [--profile PROFILE_ID[@PROFILE_REVISION]]
 pocket image list [--profile PROFILE_ID[@PROFILE_REVISION]|--all]
 pocket image remove IMAGE_OR_ID [--profile PROFILE_ID[@PROFILE_REVISION]]
