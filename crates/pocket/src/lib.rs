@@ -311,7 +311,7 @@ enum ImageCommand {
     /// import again with the flag of the same name.
     Export {
         #[command(flatten)]
-        context: ImageBuildArgs,
+        context: ImageExportArgs,
         /// Image to write out, as an alias reference or exact generation ID.
         source: String,
         /// Destination archive. It must not already exist.
@@ -472,6 +472,39 @@ struct ImageBuildArgs {
     /// resolver, and bounded helper-log evidence.
     #[arg(long, value_name = "PATH")]
     evidence_out: Option<PathBuf>,
+}
+
+/// What an export needs.
+///
+/// It reads one published generation and writes a file. Nothing is acquired
+/// and nothing is published, so there is no acquisition receipt to emit and no
+/// alias to update -- the two things `ImageBuildArgs` exists to carry.
+#[derive(Debug, Clone, Args)]
+struct ImageExportArgs {
+    /// Exact verified profile bundle directory. Defaults to `profile_bundle`
+    /// in the config file.
+    #[arg(long, value_name = "PATH")]
+    profile_bundle: Option<PathBuf>,
+    /// Existing initialized Pocket store root. Defaults to `store` in the
+    /// config file.
+    #[arg(long, value_name = "PATH")]
+    store: Option<PathBuf>,
+    /// Private mode-0700 root for the export's operation directories. Defaults
+    /// to `runtime_root` in the config file.
+    #[arg(long, value_name = "PATH")]
+    runtime_root: Option<PathBuf>,
+    /// Name to record inside the archive. Defaults to the source exactly as it
+    /// was given.
+    #[arg(long, value_name = "REFERENCE")]
+    reference: Option<String>,
+    /// Native selector assertion used to resolve the source:
+    /// OS/ARCHITECTURE[/VARIANT]. Defaults to the verified profile's own
+    /// platform, which is the only one it can run.
+    #[arg(long, value_name = "PLATFORM")]
+    platform: Option<String>,
+    /// Emit stable JSON rather than key=value output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -792,8 +825,12 @@ fn apply_config(command: &mut Command, config: &Config) {
         Command::Image { command } => match command {
             ImageCommand::Pull { context, .. }
             | ImageCommand::Import { context, .. }
-            | ImageCommand::Adjust { context, .. }
-            | ImageCommand::Export { context, .. } => {
+            | ImageCommand::Adjust { context, .. } => {
+                fill(&mut context.profile_bundle, &config.profile_bundle);
+                fill(&mut context.store, &config.store);
+                fill(&mut context.runtime_root, &config.runtime_root);
+            }
+            ImageCommand::Export { context, .. } => {
                 fill(&mut context.profile_bundle, &config.profile_bundle);
                 fill(&mut context.store, &config.store);
                 fill(&mut context.runtime_root, &config.runtime_root);
@@ -1155,7 +1192,7 @@ fn execute_image(command: ImageCommand, stdout: &mut dyn Write) -> Result<Comman
 /// and silently replacing whatever is already there is not this command's
 /// decision to make.
 fn execute_image_export(
-    context: ImageBuildArgs,
+    context: ImageExportArgs,
     source: &str,
     destination: &ImageExportDestinationArgs,
     stdout: &mut dyn Write,
@@ -1181,6 +1218,14 @@ fn execute_image_export(
             "destination already exists; choose a path that does not",
         ));
     }
+    // The name written into the archive is checked before the export starts,
+    // not after minutes of work have produced a file that names the image
+    // something no reader will accept.
+    let reference = context
+        .reference
+        .clone()
+        .unwrap_or_else(|| source.to_owned());
+    validate_builder_reference(&reference)?;
     let profile = load_profile(required_path(
         &context.profile_bundle,
         "profile-bundle",
@@ -1200,10 +1245,6 @@ fn execute_image_export(
         requested_platform.clone(),
     )?;
     validate_generation_profile(&profile, lease.generation())?;
-    let reference = context
-        .reference
-        .clone()
-        .unwrap_or_else(|| source.to_owned());
     let builder = HostBuilder::new(&profile, &store, runtime_root, BuilderPolicy::default())?;
     let mut progress = Progress::new();
     progress.stage(&format!("exporting {} to {}", source, output.display()));

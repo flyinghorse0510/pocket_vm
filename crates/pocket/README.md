@@ -51,7 +51,8 @@ pocket start [--profile-bundle BUNDLE] [--store STORE] \
 
 pocket image export [--profile-bundle BUNDLE] [--store STORE] \
   [--runtime-root RUNTIME_ROOT] (--oci-archive PATH | --pocket-archive PATH) \
-  [--reference REFERENCE] [--json] IMAGE_OR_GENERATION
+  [--reference REFERENCE] [--platform OS/ARCH[/VARIANT]] [--json] \
+  IMAGE_OR_GENERATION
 
 pocket rm [--store STORE] NAME...
 
